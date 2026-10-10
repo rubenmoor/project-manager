@@ -9,14 +9,33 @@ Standard library only (Python 3.11+).
     pm milestone add|set …   pm masterplan <milestone> …   pm plan add|priority …
     pm task add|done|drop|block|priority …   pm decision add …
 
-Works on the git repository around the current directory. pm never commits or pushes; workers commit their work.
-Whether the database is committed or ignored is the project's choice. Worker logs: .git/pm-logs/.
+Works on the git repository around the current directory. Settings: project-manager.toml, written with defaults
+and committed by the first command. Otherwise pm never commits; workers commit their work. Nothing is pushed.
+Whether the database is committed or ignored is the project's choice.
 """
-import argparse, contextlib, datetime, json, os, re, sqlite3, subprocess, sys, time, zoneinfo
+import argparse, contextlib, datetime, json, os, re, sqlite3, subprocess, sys, time, tomllib, zoneinfo
 from pathlib import Path
 
 
-DB_FILE = "tasks.dbsqlite"
+CONFIG_FILE = "project-manager.toml"
+CONFIG_TEMPLATE = """# pm configuration. Delete this file to get the defaults back.
+
+# SQLite database, relative to the project root.
+database = "tasks.dbsqlite"
+
+# Command that works one task. "{prompt}" is replaced by the worker prompt.
+worker = ["claude", "-p", "{prompt}", "--permission-mode", "acceptEdits",
+          "--allowedTools", "Bash Read Edit Write Glob Grep"]
+
+# Minutes to wait after a usage limit resets before retrying the task.
+limit_margin_minutes = 5
+
+# Worker logs. A relative path is inside the git directory, so it is never tracked.
+log_dir = "pm-logs"
+
+# Editor for `pm milestone add`. Empty: the editor git uses.
+editor = ""
+"""
 QID_RE = re.compile(r"^(M\d{3})-(P\d{3})-(T\d{3})$")
 PLAN_REF_RE = re.compile(r"^(M\d{3})-(P\d{3})$")
 MID_RE = re.compile(r"^M\d{3}$")
@@ -98,7 +117,6 @@ WHERE m.status = 'open' AND t.status = 'open'
 ORDER BY priority DESC, task;
 """
 
-WORKER_TOOLS = "Bash Read Edit Write Glob Grep"
 WORKER_PROMPT = """You are the worker for task {qid}. Follow the project's own instructions for agents \
 (AGENTS.md, CLAUDE.md or similar, if there are any), then do task {qid} and nothing else.
 
@@ -125,7 +143,6 @@ LIMIT_WORDS = ("usage limit", "session limit", "rate limit", "hit your limit")
 # "resets 11pm (America/Bogota)", "resets 11:30pm", "resets Oct 9, 3am (Europe/Berlin)"
 RESET_RE = re.compile(r"resets\s+(?:(?P<mon>[a-z]{3})[a-z]*\.?\s+(?P<day>\d{1,2}),?\s+(?:at\s+)?)?"
                       r"(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ap>[ap]\.?m\.?)?(?:\s*\((?P<tz>[^)]+)\))?", re.I)
-LIMIT_MARGIN = datetime.timedelta(minutes=5)  # resume this long after the reset 
 
 
 def limit_reset(msg, now=None):
@@ -177,12 +194,46 @@ def qid_of(t):
     return f"{t['milestone']}-{t['plan']}-{t['id']}"
 
 
+def load_config(root, out=sys.stderr):
+    """project-manager.toml in root; written from CONFIG_TEMPLATE and committed if missing."""
+    path = Path(root) / CONFIG_FILE
+    if not path.exists():
+        path.write_text(CONFIG_TEMPLATE, encoding="utf-8")
+        try:
+            subprocess.run(["git", "add", "--", CONFIG_FILE], cwd=root, capture_output=True, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", f"pm: add {CONFIG_FILE}", "--", CONFIG_FILE],
+                           cwd=root, capture_output=True, check=True)
+            print(f"pm: wrote and committed {CONFIG_FILE} with the defaults", file=out)
+        except subprocess.CalledProcessError as e:
+            print(f"pm: wrote {CONFIG_FILE} with the defaults; committing it failed: "
+                  f"{(e.stderr or b'').decode().strip()}", file=out)
+    try:
+        config = tomllib.loads(path.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as e:
+        raise FormatError(f"{CONFIG_FILE}: {e}") from None
+    defaults = tomllib.loads(CONFIG_TEMPLATE)
+    errors = [f"unknown setting {k!r}" for k in config.keys() - defaults.keys()]
+    config = defaults | config
+    if not isinstance(config["database"], str) or not config["database"].strip():
+        errors.append("database must be a file name")
+    w = config["worker"]
+    if not isinstance(w, list) or not w or not all(isinstance(a, str) for a in w) or not any("{prompt}" in a for a in w):
+        errors.append('worker must be a list of strings, one of them containing "{prompt}"')
+    m = config["limit_margin_minutes"]
+    if not isinstance(m, int) or isinstance(m, bool) or m < 0:
+        errors.append("limit_margin_minutes must be an integer >= 0")
+    errors += [f"{k} must be a string" for k in ("log_dir", "editor") if not isinstance(config[k], str)]
+    if errors:
+        raise FormatError(f"{CONFIG_FILE}: " + "; ".join(errors))
+    return config
+
+
 class Project:
-    def __init__(self, root, claude="claude", out=sys.stdout, db=DB_FILE):
+    def __init__(self, root, config=None, out=sys.stdout):
         self.root = Path(root)
-        self.db = db
-        self.db_path = self.root / db
-        self.claude = claude
+        self.config = config or tomllib.loads(CONFIG_TEMPLATE)
+        self.db = self.config["database"]
+        self.db_path = self.root / self.db
         self.out = out
 
     def say(self, *args):
@@ -390,10 +441,12 @@ class Project:
         path = Path(self.git("rev-parse", "--absolute-git-dir").strip()) / name
         path.write_text(template, encoding="utf-8")
         before = path.stat().st_mtime_ns
-        try:
-            editor = self.git("var", "GIT_EDITOR").strip()
-        except subprocess.CalledProcessError:
-            editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+        editor = self.config["editor"]
+        if not editor:
+            try:
+                editor = self.git("var", "GIT_EDITOR").strip()
+            except subprocess.CalledProcessError:
+                editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
         try:
             if subprocess.run(["sh", "-c", f'{editor} "$@"', editor, str(path)], cwd=self.root).returncode != 0:
                 return None
@@ -518,12 +571,12 @@ class Project:
 
     def worker_command(self, qid):
         prompt = WORKER_PROMPT.format(qid=qid, db=self.db, show=self.show(qid))
-        return [self.claude, "-p", prompt, "--permission-mode", "acceptEdits", "--allowedTools", WORKER_TOOLS]
+        return [a.replace("{prompt}", prompt) for a in self.config["worker"]]
 
     @property
     def logs(self):
-        """<git dir>/pm-logs: never tracked, so worker logs never make the tree dirty."""
-        return Path(self.git("rev-parse", "--absolute-git-dir").strip()) / "pm-logs"
+        """log_dir; relative: inside the git dir, so never tracked."""
+        return Path(self.git("rev-parse", "--absolute-git-dir").strip()) / self.config["log_dir"]
 
     def run_worker(self, cmd, log):
         """Run the worker, copying its output to the terminal and the log. Returns the exit code."""
@@ -560,7 +613,8 @@ class Project:
             reset = limit_reset(limit)
             if reset is None:
                 return "failed", f"usage limit without a readable reset time: {limit}"
-            until = max(reset + LIMIT_MARGIN, datetime.datetime.now(reset.tzinfo) + LIMIT_MARGIN)
+            margin = datetime.timedelta(minutes=self.config["limit_margin_minutes"])
+            until = max(reset + margin, datetime.datetime.now(reset.tzinfo) + margin)
             self.say(f"Usage limit ({limit.strip()}). Waiting until {until:%Y-%m-%d %H:%M %Z}, then the same task again.")
             self.wait_until(until)
         tail = "\n".join(log.read_text(encoding="utf-8", errors="replace").splitlines()[-30:])
@@ -666,8 +720,6 @@ def prio_arg(v):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="pm", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", help="the project's git repository (default: the one around the current directory)")
-    ap.add_argument("--db", default=DB_FILE, help=f"the database, relative to the root (default: {DB_FILE})")
-    ap.add_argument("--claude", default="claude", help=argparse.SUPPRESS)  # another claude executable
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name, text in [("status", "open milestones, the queue, pending decisions"), ("queue", "the whole queue"),
                        ("validate", "check the database"), ("sync", "stub masterplans, close milestones"),
@@ -675,7 +727,7 @@ def main(argv=None):
         sub.add_parser(name, help=text)
     s = sub.add_parser("show", help="a task with its plan, milestone and decisions")
     s.add_argument("task")
-    r = sub.add_parser("run", help="work the queue with claude -p")
+    r = sub.add_parser("run", help="work the queue with the worker command (claude -p)")
     r.add_argument("--once", action="store_true", help="stop after one task")
     r.add_argument("--dry-run", action="store_true", help="print the next worker command; change nothing")
 
@@ -735,11 +787,11 @@ def main(argv=None):
     if root is None:
         print("pm: not inside a git repository (or pass --root)")
         return 2
-    pm = Project(root=root, claude=args.claude, db=args.db)
     try:
+        pm = Project(root, load_config(root))
         if args.cmd == "validate":
             errors = pm.validate()
-            print("\n".join(errors) if errors else f"{args.db} is valid")
+            print("\n".join(errors) if errors else f"{pm.db} is valid")
             return 1 if errors else 0
         if args.cmd != "run" and (errors := pm.validate()):
             print("the database has errors (`pm validate`):\n  " + "\n  ".join(errors))
