@@ -14,6 +14,39 @@ pm milestone add   # editor: first line the title, the rest the description (Mar
 pm run             # work the queue; Ctrl-C stops, `pm run` continues
 ```
 
+### Writing a milestone
+
+The milestone is the only text a worker gets from you; the masterplan, the plans and the tasks are derived from it, and every worker sees it. So write it for an engineer who knows the code but not your intentions: what should be true afterwards, why, what is fixed, what is out of scope, how to tell it's done. Leave the how to the masterplan. In the editor (`pm milestone add`):
+
+```markdown
+Users can export their data as CSV
+
+Users ask for their data outside the app; support exports it by hand today.
+
+## Outcome
+- "Export" on the account page downloads one CSV per table the user owns (projects, entries, tags).
+- Large accounts (100 000 entries) export in under 10 s without blocking the web server.
+
+## Constraints
+- No new dependencies; the stdlib `csv` module is enough.
+- Columns are named as in the API, not the database.
+
+## Out of scope
+- Import, other formats, scheduled exports.
+
+## Done when
+- The export is covered by tests, including an account with no data.
+- The API docs describe the endpoint.
+```
+
+The first line is the title, the rest the description. The same without the editor, e.g. from a script:
+
+```sh
+pm milestone add "Users can export their data as CSV" < milestone-csv-export.md
+```
+
+Questions you can't answer yet don't need to block the milestone: workers turn them into decisions, and `pm run` asks you (`pm decide`).
+
 `pm init` writes `project-manager.toml` from the template `pm/project-manager.toml` (database file name, worker command, usage-limit margin, log folder, editor, the two prompts below) and `tasks.sql` with the schema (`SCHEMA` in `pm/__init__.py`), and commits them; run again, it adds only what is missing. Other commands need both files. Nothing is pushed.
 
 **Storage.** `tasks.sql` is the database: the schema, then one `INSERT` per row, sorted by key. Every command loads it into an in-memory SQLite database; a change rewrites it. So `git diff` shows changed rows, branches that change different rows merge cleanly, and two branches that create the same id conflict on that line (fix the file, then `pm validate`). `pm` commits its own changes (`pm: …`); inside `pm run`, workers commit theirs together with their work. Hand edits are fine; `pm validate` checks them.
