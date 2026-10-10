@@ -12,7 +12,7 @@ Standard library only (Python 3.11+).
 Works on the git repository around the current directory. pm never commits or pushes; workers commit their work.
 Whether the database is committed or ignored is the project's choice. Worker logs: .git/pm-logs/.
 """
-import argparse, contextlib, datetime, json, re, sqlite3, subprocess, sys, time, zoneinfo
+import argparse, contextlib, datetime, json, os, re, sqlite3, subprocess, sys, time, zoneinfo
 from pathlib import Path
 
 
@@ -384,6 +384,35 @@ class Project:
 
     # --- edit commands -----------------------------------------------------------------------
 
+    def edit(self, name, template=""):
+        """Open the user's editor (as `git commit` does) on <git dir>/<name> holding `template`. Returns the saved
+        text, or None if the editor failed or the file was not saved. No comment lines: '#' starts Markdown headings."""
+        path = Path(self.git("rev-parse", "--absolute-git-dir").strip()) / name
+        path.write_text(template, encoding="utf-8")
+        before = path.stat().st_mtime_ns
+        try:
+            editor = self.git("var", "GIT_EDITOR").strip()
+        except subprocess.CalledProcessError:
+            editor = os.environ.get("VISUAL") or os.environ.get("EDITOR") or "vi"
+        try:
+            if subprocess.run(["sh", "-c", f'{editor} "$@"', editor, str(path)], cwd=self.root).returncode != 0:
+                return None
+            text = path.read_text(encoding="utf-8")
+            if path.stat().st_mtime_ns == before and text == template:
+                return None
+        finally:
+            path.unlink(missing_ok=True)
+        return text
+
+    def milestone_edit(self):
+        """`pm milestone add` without a title: the first line written in the editor is the title, the rest the
+        description. Returns the new milestone id, or None if aborted (not saved, or nothing written)."""
+        text = self.edit("PM_MILESTONE")
+        if text is None or not text.strip():
+            return None
+        title, _, description = text.strip().partition("\n")
+        return self.milestone_add(title.strip(), description.strip())
+
     def milestone_add(self, title, description=""):
         with self.connect(write=True) as db:
             mid = next_id("M", [r[0] for r in db.execute("SELECT id FROM milestone")], 3)
@@ -651,9 +680,9 @@ def main(argv=None):
     r.add_argument("--dry-run", action="store_true", help="print the next worker command; change nothing")
 
     ms = sub.add_parser("milestone", help="add or change milestones").add_subparsers(dest="action", required=True)
-    ma = ms.add_parser("add", help="new open milestone; prints its id")
-    ma.add_argument("title")
-    ma.add_argument("--description", type=text_arg, help="Markdown, or - for stdin")
+    ma = ms.add_parser("add", help="new open milestone; prints its id. Without a title: write it in your editor "
+                       "(first line: title, the rest: description); with a title: the description is read from stdin")
+    ma.add_argument("title", nargs="?")
     mset = ms.add_parser("set", help="set milestone fields")
     mset.add_argument("milestone")
     mset.add_argument("--title")
@@ -730,7 +759,14 @@ def main(argv=None):
             return pm.run(once=args.once, dry_run=args.dry_run)
         elif args.cmd == "milestone":
             if args.action == "add":
-                print(pm.milestone_add(args.title, args.description))
+                if args.title is None:
+                    mid = pm.milestone_edit()
+                    if mid is None:
+                        print("pm: aborted, no milestone added")
+                        return 1
+                else:
+                    mid = pm.milestone_add(args.title, sys.stdin.read())
+                print(mid)
             else:
                 pm.milestone_set(args.milestone, title=args.title, status=args.status, description=args.description)
         elif args.cmd == "masterplan":

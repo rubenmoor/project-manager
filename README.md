@@ -9,7 +9,7 @@ One Python file, standard library only (Python 3.11+), plus `git` and `claude`. 
 In the project's git repository:
 
 ```sh
-pm milestone add "First milestone" --description "What it achieves, how you know it's done."
+pm milestone add   # editor: first line the title, the rest the description (Markdown)
 pm sync      # masterplan stub: tasks that write the masterplan and split it into plans and tasks
 pm run       # work the queue; Ctrl-C stops, `pm run` continues
 ```
@@ -26,7 +26,9 @@ The first command creates `tasks.dbsqlite` (schema: `SCHEMA` in `pm.py`). Commit
 | `sync` | Stub masterplans of new milestones; mark finished milestones `implemented` |
 | `decide` | Answer pending decisions (number, text, `s` skip, `x <reason>` irrelevant: drops the tasks it blocks) |
 | `run [--once] [--dry-run]` | Work the queue until it is empty, a worker fails, or the tree has uncommitted changes |
-| `milestone add <title>`, `milestone set <M>` | `--title`, `--status`, `--description` |
+| `milestone add` | In your editor (as `git commit`): first line title, rest description; quit unsaved or save empty to abort |
+| `milestone add <title> < description.md` | Non-interactive: the description from stdin |
+| `milestone set <M>` | `--title`, `--status`, `--description` |
 | `masterplan <M>` | `--status`, `--goal`, `--scope`, `--exit-criteria` |
 | `plan add <M> <title>`, `plan priority <M-P> <N\|none>` | `--description`, `--priority` |
 | `task add <M-P> <title> --description …`, `task done\|drop <task> <note>`, `task block <task> <D>`, `task priority <task> <N\|none>` | `--priority`, `--blocked-by` |
