@@ -1,60 +1,120 @@
 #!/usr/bin/env python3
-"""pm: a project manager for Claude Code workers (README.md). Milestones -> masterplan -> plans ->
-tasks, one TOML file per milestone (plans/Mnnn.toml), decisions for the human in
-plans/pm-decisions.toml. The task queue is computed: open tasks of open milestones that no pending decision blocks, highest priority first, then
-by task id. Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
+"""pm: a project manager for Claude Code workers (README.md). Milestones -> masterplan -> plans -> tasks, plus
+decisions for the human, in an SQLite database in the project (tasks.dbsqlite, created by the first command;
+the schema is SCHEMA below). The task queue is computed (the `queue` view): open tasks of open milestones that no
+pending decision blocks, highest priority first, then by task id. Worked one task at a time by `claude -p`.
+Standard library only (Python 3.11+).
 
     pm status | queue | show <task> | validate | sync | decide | run [--once] [--dry-run]
-    pm task add|done|drop|block|priority …   pm plan add|priority …
-    pm decision add …                         pm masterplan <milestone> …
+    pm milestone add|set …   pm masterplan <milestone> …   pm plan add|priority …
+    pm task add|done|drop|block|priority …   pm decision add …
 
-Works on the git repository around the current directory; --dir names another folder than plans/.
-`sync`, `decide` and `run` commit the plans folder ("pm: …"); the edit commands don't (the worker
-commits). Nothing is pushed. Worker logs: .git/pm-logs/.
+Works on the git repository around the current directory. The database is listed in .git/info/exclude and never
+committed; workers commit their code. Nothing is pushed. Worker logs: .git/pm-logs/.
 """
-import argparse, datetime, json, re, subprocess, sys, time, tomllib, zoneinfo
+import argparse, contextlib, datetime, json, re, sqlite3, subprocess, sys, time, zoneinfo
 from pathlib import Path
 
 
-MID_RE = re.compile(r"^M\d{3}$")
-PID_RE = re.compile(r"^P\d{3}$")
-TID_RE = re.compile(r"^T\d{3}$")
-DID_RE = re.compile(r"^D\d{4}$")
+DB_FILE = "tasks.dbsqlite"
 QID_RE = re.compile(r"^(M\d{3})-(P\d{3})-(T\d{3})$")
 PLAN_REF_RE = re.compile(r"^(M\d{3})-(P\d{3})$")
-MILESTONE_FILE_RE = re.compile(r"^M\d{3}\.toml$")
-
+MID_RE = re.compile(r"^M\d{3}$")
 MILESTONE_STATES = ("open", "implemented")
 MASTER_STATES = ("stub", "draft", "agreed")
-TASK_STATES = ("open", "done", "dropped")
-DECISION_STATES = ("pending", "answered", "irrelevant")
 
-# Key order in the files; a key not listed here is a format error.
-MILESTONE_KEYS = ("id", "title", "status", "goal")
-MASTER_KEYS = ("status", "goal", "scope", "exit_criteria")
-PLAN_KEYS = ("id", "title", "priority", "goal")
-TASK_KEYS = ("id", "plan", "subject", "status", "priority", "blocked_by", "note", "details")
-DECISION_KEYS = ("id", "question", "status", "options", "context", "answer", "reason", "closed")
-TEXT_KEYS = {"goal", "scope", "exit_criteria", "details", "context"}
+SCHEMA_VERSION = 1
+SCHEMA = """
+CREATE TABLE milestone (
+    id          TEXT PRIMARY KEY CHECK (id GLOB 'M[0-9][0-9][0-9]'),
+    title       TEXT NOT NULL CHECK (trim(title) <> ''),
+    status      TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'implemented')),
+    description TEXT NOT NULL DEFAULT ''                   -- Markdown: what it achieves, how you know it's done
+) STRICT;
 
-DECISIONS_FILE = "pm-decisions.toml"
+CREATE TABLE masterplan (                                  -- missing until `pm sync` writes the stub
+    milestone     TEXT PRIMARY KEY REFERENCES milestone (id),
+    status        TEXT NOT NULL DEFAULT 'stub' CHECK (status IN ('stub', 'draft', 'agreed')),
+    goal          TEXT NOT NULL DEFAULT '',
+    scope         TEXT NOT NULL DEFAULT '',                -- in and out
+    exit_criteria TEXT NOT NULL DEFAULT ''                 -- checkable
+) STRICT;
+
+CREATE TABLE plan (
+    milestone   TEXT NOT NULL REFERENCES milestone (id),
+    id          TEXT NOT NULL CHECK (id GLOB 'P[0-9][0-9][0-9]'),
+    title       TEXT NOT NULL CHECK (trim(title) <> ''),
+    priority    INTEGER,                                   -- NULL: 0
+    description TEXT NOT NULL DEFAULT '',
+    PRIMARY KEY (milestone, id)
+) STRICT;
+
+CREATE TABLE task (
+    milestone   TEXT NOT NULL,
+    plan        TEXT NOT NULL,
+    id          TEXT NOT NULL CHECK (id GLOB 'T[0-9][0-9][0-9]'),
+    title       TEXT NOT NULL CHECK (trim(title) <> ''),
+    status      TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done', 'dropped')),
+    priority    INTEGER,                                   -- NULL: the plan's
+    note        TEXT,                                      -- done: date and files or commit; dropped: the reason
+    description TEXT NOT NULL DEFAULT '',                  -- Markdown: what to do, files, acceptance criteria
+    PRIMARY KEY (milestone, plan, id),
+    FOREIGN KEY (milestone, plan) REFERENCES plan (milestone, id),
+    CONSTRAINT "an open task needs a description" CHECK (status <> 'open' OR trim(description) <> '')
+) STRICT;
+
+CREATE TABLE decision (                                    -- a question for the human
+    id       TEXT PRIMARY KEY CHECK (id GLOB 'D[0-9][0-9][0-9][0-9]'),
+    question TEXT NOT NULL CHECK (trim(question) <> ''),
+    status   TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'answered', 'irrelevant')),
+    options  TEXT NOT NULL DEFAULT '[]' CHECK (json_type(options) = 'array'),  -- JSON, recommended first
+    context  TEXT NOT NULL DEFAULT '',
+    answer   TEXT,
+    reason   TEXT,                                         -- why it is irrelevant
+    closed   TEXT,                                         -- YYYY-MM-DD
+    CONSTRAINT "pending: no answer, reason or closed; answered: answer and closed; irrelevant: reason and closed"
+    CHECK (status = 'pending' AND answer IS NULL AND reason IS NULL AND closed IS NULL
+           OR status = 'answered' AND answer IS NOT NULL AND closed IS NOT NULL
+           OR status = 'irrelevant' AND reason IS NOT NULL AND closed IS NOT NULL)
+) STRICT;
+
+CREATE TABLE task_decision (                               -- the task waits for the decision while it is pending
+    milestone TEXT NOT NULL,
+    plan      TEXT NOT NULL,
+    task      TEXT NOT NULL,
+    decision  TEXT NOT NULL REFERENCES decision (id),
+    PRIMARY KEY (milestone, plan, task, decision),
+    FOREIGN KEY (milestone, plan, task) REFERENCES task (milestone, plan, id)
+) STRICT;
+
+CREATE VIEW queue AS
+SELECT coalesce(t.priority, p.priority, 0) AS priority, t.milestone || '-' || t.plan || '-' || t.id AS task, t.title
+FROM task t
+JOIN plan p ON p.milestone = t.milestone AND p.id = t.plan
+JOIN milestone m ON m.id = t.milestone
+WHERE m.status = 'open' AND t.status = 'open'
+  AND NOT EXISTS (SELECT 1 FROM task_decision td JOIN decision d ON d.id = td.decision
+                  WHERE d.status = 'pending' AND td.milestone = t.milestone AND td.plan = t.plan AND td.task = t.id)
+ORDER BY priority DESC, task;
+"""
+
 WORKER_TOOLS = "Bash Read Edit Write Glob Grep"
 WORKER_PROMPT = """You are the worker for task {qid}. Follow the project's own instructions for agents \
 (AGENTS.md, CLAUDE.md or similar, if there are any), then do task {qid} and nothing else.
 
 Rules:
-1. Work on {qid} only. Change {dir}/*.toml only through `pm` (prose fields may be edited by hand).
-2. Follow-up work: `pm task add <milestone>-<plan> "<subject>" --details "<text>"` in the same plan, or \
-`pm plan add <milestone> "<title>" --goal "<text>"` and tasks in it for work outside this plan. Set \
+1. Work on {qid} only. Change milestones, plans, tasks and decisions only through `pm`, never {db} directly.
+2. Follow-up work: `pm task add <milestone>-<plan> "<title>" --description "<text>"` in the same plan, or \
+`pm plan add <milestone> "<title>" --description "<text>"` and tasks in it for work outside this plan. Set \
 priorities (`--priority N`, positive = earlier) only where the default order (plan, then task id) is wrong.
 3. Needs a human answer: `pm decision add "<question>" --context "<text>" --option "<recommended>" \
 --option "<other>" --blocks <task ids>`. If {qid} itself is blocked, include it in --blocks, commit what \
 is done and stop.
 4. Finished: `pm task done {qid} "<YYYY-MM-DD, files or commit>"` or `pm task drop {qid} "<reason>"`. Run \
-`pm validate` and the project's checks for what you changed. Commit everything in one commit, message \
-"{qid} <subject>". Don't push. Stop.
+the project's checks for what you changed. Commit your work in one commit, message "{qid} <title>" ({db} is \
+not tracked). Don't push. Stop.
 
-The task, its plan and its milestone ({dir}/{mid}.toml; `pm show {qid}` prints this again):
+The task, its plan and its milestone (`pm show {qid}` prints this again):
 
 {show}"""
 
@@ -102,376 +162,188 @@ def limit_reset(msg, now=None):
 
 
 class FormatError(Exception):
-    """A file in the plans folder breaks the format (README.md), or a command names something that doesn't exist."""
+    """The database breaks the schema, or a command names something that doesn't exist."""
 
 
 def today():
     return datetime.date.today().isoformat()
 
 
-# --- TOML writing (tomllib only reads) ---------------------------------------------------------
-
-def toml_value(v, prose=False):
-    """A TOML value; prose (TEXT_KEYS) is written as a multi-line literal string whenever it can be."""
-    if isinstance(v, bool):
-        return "true" if v else "false"
-    if isinstance(v, int):
-        return str(v)
-    if isinstance(v, list):
-        return "[" + ", ".join(toml_value(x) for x in v) + "]"
-    s = str(v)
-    plain = not any(ord(c) < 32 and c not in "\n\t" for c in s)
-    if ("\n" in s or prose) and s and plain and "'''" not in s:
-        return "'''\n" + s + "\n'''"  # literal: prose stays as typed, no escapes
-    return json.dumps(s, ensure_ascii=False)  # a JSON string is a valid TOML basic string
-
-
-def toml_table(lines, table, keys):
-    for k in keys:
-        if k in table:
-            lines.append(f"{k} = {toml_value(table[k], prose=k in TEXT_KEYS)}")
-
-
-def dump_milestone(m):
-    lines = [f"# Milestone {m['id']} (pm). Edit with `pm` or by hand; check with `pm validate`.", ""]
-    toml_table(lines, m, MILESTONE_KEYS)
-    if "masterplan" in m:
-        lines += ["", "[masterplan]"]
-        toml_table(lines, m["masterplan"], MASTER_KEYS)
-    for p in m.get("plans", []):
-        lines += ["", "[[plans]]"]
-        toml_table(lines, p, PLAN_KEYS)
-    for t in m.get("tasks", []):
-        lines += ["", "[[tasks]]"]
-        toml_table(lines, t, TASK_KEYS)
-    return "\n".join(lines) + "\n"
-
-
-def dump_decisions(ds):
-    lines = ["# Decisions for the human (pm). Edit with `pm decision add` and `pm decide`.", ""]
-    for d in ds:
-        lines += ["[[decisions]]"]
-        toml_table(lines, d, DECISION_KEYS)
-        lines.append("")
-    return "\n".join(lines).rstrip("\n") + "\n"
-
-
-def normalize(table):
-    """Prose fields are stored stripped, so a file round-trips through dump unchanged."""
-    for k in TEXT_KEYS & table.keys():
-        if isinstance(table[k], str):
-            table[k] = table[k].strip()
-    return table
-
-
-# --- model helpers ----------------------------------------------------------------------------
-
-def qid_of(m, t):
-    return f"{m['id']}-{t['plan']}-{t['id']}"
-
-
-def plan_of(m, pid):
-    return next((p for p in m.get("plans", []) if p["id"] == pid), None)
-
-
-def priority(m, t):
-    """A task's own priority, else its plan's, else 0."""
-    if "priority" in t:
-        return t["priority"]
-    return (plan_of(m, t["plan"]) or {}).get("priority", 0)
-
-
 def next_id(prefix, ids, width):
     return f"{prefix}{max((int(i[1:]) for i in ids), default=0) + 1:0{width}d}"
 
 
-def is_int(v):
-    return isinstance(v, int) and not isinstance(v, bool)
+def qid_of(t):
+    return f"{t['milestone']}-{t['plan']}-{t['id']}"
 
 
 class Project:
-    def __init__(self, root, claude="claude", out=sys.stdout, plans_dir="plans"):
+    def __init__(self, root, claude="claude", out=sys.stdout, db=DB_FILE):
         self.root = Path(root)
-        self.dir = plans_dir
-        self.plans = self.root / plans_dir
+        self.db = db
+        self.db_path = self.root / db
         self.claude = claude
         self.out = out
 
     def say(self, *args):
         print(*args, file=self.out, flush=True)
 
-    # --- files -------------------------------------------------------------------------------
+    # --- database ----------------------------------------------------------------------------
 
-    def milestone_path(self, mid):
-        return self.plans / f"{mid}.toml"
-
-    def milestone_ids(self):
-        return sorted(p.stem for p in self.plans.glob("M*.toml") if MILESTONE_FILE_RE.match(p.name))
-
-    def read_toml(self, path):
+    @contextlib.contextmanager
+    def connect(self, write=False):
+        """A connection with foreign keys on; write: one transaction, rolled back if the block raises.
+        The first connection creates the database and keeps it out of git."""
+        new = not self.db_path.exists()
+        con = sqlite3.connect(self.db_path, isolation_level=None)
         try:
-            return tomllib.loads(path.read_text(encoding="utf-8"))
-        except tomllib.TOMLDecodeError as e:
-            raise FormatError(f"{path.name}: {e}") from None
+            con.row_factory = sqlite3.Row
+            con.execute("PRAGMA foreign_keys = ON")
+            version = con.execute("PRAGMA user_version").fetchone()[0]
+            if version == 0 and not con.execute("SELECT 1 FROM sqlite_schema").fetchone():
+                con.executescript(f"BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;")
+                version = SCHEMA_VERSION
+            if version != SCHEMA_VERSION:
+                raise FormatError(f"{self.db}: schema version {version}, this pm knows {SCHEMA_VERSION}")
+            if new:
+                self.exclude()
+            if write:
+                con.execute("BEGIN IMMEDIATE")
+            yield con
+            if con.in_transaction:
+                con.execute("COMMIT")
+        except sqlite3.IntegrityError as e:
+            raise FormatError(f"the change breaks the schema, nothing written: {e}") from None
+        except sqlite3.DatabaseError as e:
+            raise FormatError(f"{self.db}: {e}") from None
+        finally:
+            con.close()  # an open transaction is rolled back
 
-    def load(self, mid):
-        path = self.milestone_path(mid)
-        if not path.exists():
-            raise FormatError(f"no milestone {mid} ({self.dir}/{mid}.toml)")
-        m = normalize(self.read_toml(path))
-        if isinstance(m.get("masterplan"), dict):
-            normalize(m["masterplan"])
-        for x in m.get("plans", []) + m.get("tasks", []):
-            if isinstance(x, dict):
-                normalize(x)
-        return m
+    def exclude(self):
+        """List the database (and its journal) in .git/info/exclude: it is state, not source."""
+        path = Path(self.git("rev-parse", "--git-path", "info/exclude").strip())
+        path = path if path.is_absolute() else self.root / path
+        line = f"/{self.db}*"
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+        if line not in text.splitlines():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text + ("" if not text or text.endswith("\n") else "\n") + line + "\n", encoding="utf-8")
 
-    def milestones(self):
-        return [self.load(mid) for mid in self.milestone_ids()]
+    def rows(self, sql, *args):
+        with self.connect() as db:
+            return [dict(r) for r in db.execute(sql, args)]
 
-    def open_milestones(self):
-        return [m for m in self.milestones() if m.get("status") == "open"]
-
-    def save(self, m):
-        self.milestone_path(m["id"]).write_text(dump_milestone(m), encoding="utf-8")
-
-    def decisions(self):
-        path = self.plans / DECISIONS_FILE
-        if not path.exists():
-            return []
-        return [normalize(d) for d in self.read_toml(path).get("decisions", [])]
-
-    def save_decisions(self, ds):
-        (self.plans / DECISIONS_FILE).write_text(dump_decisions(ds), encoding="utf-8")
-
-    def pending(self):
-        return [d for d in self.decisions() if d.get("status") == "pending"]
-
-    def find(self, qid):
-        """(milestone, task) for a qualified task id."""
+    @staticmethod
+    def find(db, qid):
+        """The task row for a qualified task id."""
         q = QID_RE.match(qid)
         if not q:
             raise FormatError(f"not a task id (Mnnn-Pnnn-Tnnn): {qid}")
-        m = self.load(q[1])
-        t = next((t for t in m.get("tasks", []) if t["plan"] == q[2] and t["id"] == q[3]), None)
+        t = db.execute("SELECT * FROM task WHERE milestone = ? AND plan = ? AND id = ?", q.groups()).fetchone()
         if t is None:
             raise FormatError(f"no task {qid}")
-        return m, t
+        return dict(t)
+
+    @staticmethod
+    def plan_key(db, plan_ref):
+        r = PLAN_REF_RE.match(plan_ref)
+        if not r:
+            raise FormatError(f"not a plan (Mnnn-Pnnn): {plan_ref}")
+        if not db.execute("SELECT 1 FROM plan WHERE milestone = ? AND id = ?", r.groups()).fetchone():
+            raise FormatError(f"no plan {plan_ref}")
+        return r.groups()
+
+    @staticmethod
+    def check_milestone(db, mid):
+        if not db.execute("SELECT 1 FROM milestone WHERE id = ?", (mid,)).fetchone():
+            raise FormatError(f"no milestone {mid}")
+
+    @staticmethod
+    def block(db, t, did):
+        if not db.execute("SELECT 1 FROM decision WHERE id = ?", (did,)).fetchone():
+            raise FormatError(f"no decision {did}")
+        db.execute("INSERT OR IGNORE INTO task_decision VALUES (?, ?, ?, ?)", (t["milestone"], t["plan"], t["id"], did))
+
+    def pending(self):
+        ds = self.rows("SELECT * FROM decision WHERE status = 'pending' ORDER BY id")
+        for d in ds:
+            d["options"] = json.loads(d["options"])
+        return ds
+
+    def blockers(self, db, t, pending=False):
+        return [r[0] for r in db.execute(
+            "SELECT d.id FROM task_decision td JOIN decision d ON d.id = td.decision WHERE td.milestone = ? "
+            "AND td.plan = ? AND td.task = ?" + (" AND d.status = 'pending'" if pending else "") + " ORDER BY d.id",
+            (t["milestone"], t["plan"], t["id"]))]
+
+    def queue(self):
+        """[(priority, qid, title)]: the `queue` view."""
+        return [tuple(r.values()) for r in self.rows("SELECT * FROM queue")]
 
     # --- git ---------------------------------------------------------------------------------
 
     def git(self, *args):
         return subprocess.run(["git", *args], cwd=self.root, capture_output=True, text=True, check=True).stdout
 
-    def dirty(self, *paths):
-        return bool(self.git("status", "--porcelain", "--", *paths).strip())
-
-    def commit(self, message):
-        if not self.dirty(self.dir):
-            return False
-        self.git("add", "-A", "--", self.dir)
-        self.git("commit", "-q", "-m", f"pm: {message}", "--", self.dir)
-        return True
+    def dirty(self):
+        return bool(self.git("status", "--porcelain").strip())
 
     # --- validate ----------------------------------------------------------------------------
 
-    def check_decisions(self, ds):
-        errors, seen = [], set()
-        for i, d in enumerate(ds):
-            where = f"{DECISIONS_FILE}: decision {i + 1}"
-            if not isinstance(d, dict):
-                errors.append(f"{where}: not a table")
-                continue
-            errors += [f"{where}: unknown key {k!r}" for k in d.keys() - set(DECISION_KEYS)]
-            did = d.get("id")
-            if not isinstance(did, str) or not DID_RE.match(did):
-                errors.append(f"{where}: id must be Dnnnn")
-            elif did in seen:
-                errors.append(f"{DECISIONS_FILE}: {did} is used twice")
-            else:
-                seen.add(did)
-                where = f"{DECISIONS_FILE}: {did}"
-            if not isinstance(d.get("question"), str) or not d["question"].strip():
-                errors.append(f"{where}: question is missing")
-            if d.get("status") not in DECISION_STATES:
-                errors.append(f"{where}: status must be one of {', '.join(DECISION_STATES)}")
-            if not isinstance(d.get("options", []), list) or not all(isinstance(o, str) for o in d.get("options", [])):
-                errors.append(f"{where}: options must be a list of strings")
-            for k in ("context", "answer", "reason", "closed"):
-                if k in d and not isinstance(d[k], str):
-                    errors.append(f"{where}: {k} must be a string")
-            if d.get("status") == "answered" and not (d.get("answer") and d.get("closed")):
-                errors.append(f"{where}: an answered decision needs answer and closed")
-            if d.get("status") == "irrelevant" and not d.get("closed"):
-                errors.append(f"{where}: an irrelevant decision needs closed")
-            if d.get("status") == "pending" and ("answer" in d or "closed" in d):
-                errors.append(f"{where}: a pending decision has no answer or closed")
-        return errors
-
-    def check_milestone(self, m, fname, dids):
-        errors = []
-        errors += [f"{fname}: unknown key {k!r}" for k in m.keys() - set(MILESTONE_KEYS) - {"masterplan", "plans", "tasks"}]
-        if m.get("id") != fname.removesuffix(".toml"):
-            errors.append(f"{fname}: id must be {fname.removesuffix('.toml')!r}")
-        if not isinstance(m.get("title"), str) or not m["title"].strip():
-            errors.append(f"{fname}: title is missing")
-        if m.get("status") not in MILESTONE_STATES:
-            errors.append(f"{fname}: status must be one of {', '.join(MILESTONE_STATES)}")
-        if not isinstance(m.get("goal", ""), str):
-            errors.append(f"{fname}: goal must be a string")
-        mp = m.get("masterplan")
-        if mp is not None:
-            if not isinstance(mp, dict):
-                errors.append(f"{fname}: masterplan must be a table")
-            else:
-                errors += [f"{fname}: [masterplan] unknown key {k!r}" for k in mp.keys() - set(MASTER_KEYS)]
-                if mp.get("status") not in MASTER_STATES:
-                    errors.append(f"{fname}: [masterplan] status must be one of {', '.join(MASTER_STATES)}")
-                errors += [f"{fname}: [masterplan] {k} must be a string" for k in MASTER_KEYS[1:]
-                           if k in mp and not isinstance(mp[k], str)]
-        plans, pids = m.get("plans", []), set()
-        if not isinstance(plans, list):
-            return errors + [f"{fname}: plans must be [[plans]] tables"]
-        for i, p in enumerate(plans):
-            where = f"{fname}: plan {i + 1}"
-            if not isinstance(p, dict):
-                errors.append(f"{where}: not a table")
-                continue
-            errors += [f"{where}: unknown key {k!r}" for k in p.keys() - set(PLAN_KEYS)]
-            pid = p.get("id")
-            if not isinstance(pid, str) or not PID_RE.match(pid):
-                errors.append(f"{where}: id must be Pnnn")
-            elif pid in pids:
-                errors.append(f"{fname}: plan {pid} is used twice")
-            else:
-                pids.add(pid)
-                where = f"{fname}: {pid}"
-            if not isinstance(p.get("title"), str) or not p["title"].strip():
-                errors.append(f"{where}: title is missing")
-            if "priority" in p and not is_int(p["priority"]):
-                errors.append(f"{where}: priority must be an integer")
-            if "goal" in p and not isinstance(p["goal"], str):
-                errors.append(f"{where}: goal must be a string")
-        tasks, tids = m.get("tasks", []), set()
-        if not isinstance(tasks, list):
-            return errors + [f"{fname}: tasks must be [[tasks]] tables"]
-        for i, t in enumerate(tasks):
-            where = f"{fname}: task {i + 1}"
-            if not isinstance(t, dict):
-                errors.append(f"{where}: not a table")
-                continue
-            errors += [f"{where}: unknown key {k!r}" for k in t.keys() - set(TASK_KEYS)]
-            if not isinstance(t.get("id"), str) or not TID_RE.match(t["id"]):
-                errors.append(f"{where}: id must be Tnnn")
-            elif t.get("plan") not in pids:
-                errors.append(f"{where} ({t['id']}): plan {t.get('plan')!r} is not a plan of {m.get('id')}")
-            elif (t["plan"], t["id"]) in tids:
-                errors.append(f"{fname}: task {t['plan']}-{t['id']} is used twice")
-            else:
-                tids.add((t["plan"], t["id"]))
-                where = f"{fname}: {t['plan']}-{t['id']}"
-            if not isinstance(t.get("subject"), str) or not t["subject"].strip():
-                errors.append(f"{where}: subject is missing")
-            if t.get("status") not in TASK_STATES:
-                errors.append(f"{where}: status must be one of {', '.join(TASK_STATES)}")
-            if "priority" in t and not is_int(t["priority"]):
-                errors.append(f"{where}: priority must be an integer")
-            blocked = t.get("blocked_by", [])
-            if not isinstance(blocked, list) or not all(isinstance(d, str) for d in blocked):
-                errors.append(f"{where}: blocked_by must be a list of decision ids")
-            else:
-                errors += [f"{where}: blocked_by names {d}, which is not in {DECISIONS_FILE}"
-                           for d in blocked if d not in dids]
-            for k in ("note", "details"):
-                if k in t and not isinstance(t[k], str):
-                    errors.append(f"{where}: {k} must be a string")
-            if t.get("status") == "open" and not (t.get("details") or "").strip():
-                errors.append(f"{where}: an open task needs details")
-        return errors
-
     def validate(self):
-        """Every format error in the plans folder, as a list of messages (empty: all good)."""
-        errors = []
+        """Every problem in the database, as a list of messages (empty: all good). The schema's constraints
+        hold for every write; this catches what a hand edit with foreign keys off, or a broken file, leaves."""
         try:
-            ds = self.decisions()
+            with self.connect() as db:
+                errors = [r[0] for r in db.execute("PRAGMA integrity_check") if r[0] != "ok"]
+                for table, rowid, parent, _ in db.execute("PRAGMA foreign_key_check").fetchall():
+                    row = dict(db.execute(f"SELECT * FROM {table} WHERE rowid = ?", (rowid,)).fetchone())
+                    key = ", ".join(f"{k} {v}" for k, v in row.items()
+                                    if k in ("milestone", "plan", "task", "id", "decision"))
+                    errors.append(f"{table} ({key}): no such {parent}")
+                return errors
         except FormatError as e:
-            errors.append(str(e))
-            ds = []
-        errors += self.check_decisions(ds)
-        dids = {d.get("id") for d in ds}
-        for mid in self.milestone_ids():
-            try:
-                m = self.read_toml(self.milestone_path(mid))
-            except FormatError as e:
-                errors.append(str(e))
-                continue
-            errors += self.check_milestone(m, f"{mid}.toml", dids)
-        return errors
-
-    def guarded(self, change):
-        """Apply `change()` (which writes files in the plans folder); undo every write if it is no longer valid."""
-        files = [self.milestone_path(mid) for mid in self.milestone_ids()] + [self.plans / DECISIONS_FILE]
-        before = {f: f.read_text(encoding="utf-8") if f.exists() else None for f in files}
-        result = change()
-        errors = self.validate()
-        if errors:
-            for f in set(files) | {self.milestone_path(mid) for mid in self.milestone_ids()}:
-                if before.get(f) is None:
-                    f.unlink(missing_ok=True)
-                else:
-                    f.write_text(before[f], encoding="utf-8")
-            raise FormatError("the change would make the plans folder invalid, nothing written:\n  " + "\n  ".join(errors))
-        return result
-
-    # --- queue -------------------------------------------------------------------------------
-
-    def blocked(self, t, pending_ids):
-        return any(d in pending_ids for d in t.get("blocked_by", []))
-
-    def queue(self):
-        """[(priority, qid, subject)]: open, unblocked tasks of open milestones; highest priority first, then id."""
-        pending_ids = {d["id"] for d in self.pending()}
-        rows = [(priority(m, t), qid_of(m, t), t["subject"]) for m in self.open_milestones()
-                for t in m.get("tasks", []) if t["status"] == "open" and not self.blocked(t, pending_ids)]
-        return sorted(rows, key=lambda r: (-r[0], r[1]))
+            return [str(e)]
 
     # --- sync --------------------------------------------------------------------------------
 
-    def stub(self, m):
+    @staticmethod
+    def stub(db, mid, description):
         """Masterplan stub and plan P001, which writes the masterplan (README.md, sync)."""
-        mid = m["id"]
-        m["masterplan"] = {"status": "stub", "goal": m.get("goal", "")}
-        if m.get("plans"):
+        db.execute("INSERT INTO masterplan (milestone, goal) VALUES (?, ?)", (mid, description))
+        if db.execute("SELECT 1 FROM plan WHERE milestone = ?", (mid,)).fetchone():
             return
-        m["plans"] = [{"id": "P001", "title": "write masterplan",
-                       "goal": f"Turn milestone {mid} into a masterplan with plans and tasks."}]
-        m["tasks"] = [
-            {"id": "T001", "plan": "P001", "subject": "write goal, scope and exit criteria of the masterplan",
-             "status": "open", "details": (
-                 f"Read milestone {mid} (`pm show {mid}-P001-T001` shows it), the plans and decisions it cites and "
-                 f"the code it touches. Write the masterplan's goal, scope (in and out) and exit criteria (checkable): "
-                 f"`pm masterplan {mid} --goal … --scope … --exit-criteria …`. Every question only a human "
-                 "can answer becomes a decision (`pm decision add`).")},
-            {"id": "T002", "plan": "P001", "subject": "split the milestone into plans with tasks",
-             "status": "open", "details": (
-                 f"Split {mid} into plans P002, P003, … (`pm plan add {mid} <title> --goal …`), each with tasks small "
-                 f"enough for one worker run (`pm task add {mid}-Pnnn <subject> --details …`). Order them with "
-                 "priorities where the default (plan, then task id) is wrong. Then "
-                 f"`pm masterplan {mid} --status draft`.")}]
+        db.execute("INSERT INTO plan (milestone, id, title, description) VALUES (?, 'P001', 'write masterplan', ?)",
+                   (mid, f"Turn milestone {mid} into a masterplan with plans and tasks."))
+        db.executemany("INSERT INTO task (milestone, plan, id, title, description) VALUES (?, 'P001', ?, ?, ?)", [
+            (mid, "T001", "write goal, scope and exit criteria of the masterplan",
+             f"Read milestone {mid} (`pm show {mid}-P001-T001` shows it), the plans and decisions it cites and "
+             f"the code it touches. Write the masterplan's goal, scope (in and out) and exit criteria (checkable): "
+             f"`pm masterplan {mid} --goal … --scope … --exit-criteria …`. Every question only a human "
+             "can answer becomes a decision (`pm decision add`)."),
+            (mid, "T002", "split the milestone into plans with tasks",
+             f"Split {mid} into plans P002, P003, … (`pm plan add {mid} <title> --description …`), each with tasks "
+             f"small enough for one worker run (`pm task add {mid}-Pnnn <title> --description …`). Order them with "
+             "priorities where the default (plan, then task id) is wrong. Then "
+             f"`pm masterplan {mid} --status draft`.")])
 
     def sync(self):
         """Stub masterplans of open milestones that have none; close finished milestones. Returns the changes."""
         changes = []
-        for m in self.open_milestones():
-            if "masterplan" not in m:
-                self.stub(m)
-                self.save(m)
-                changes.append(f"{m['id']} masterplan stub")
-            elif (m["masterplan"]["status"] != "stub" and m.get("tasks")
-                  and all(t["status"] != "open" for t in m["tasks"])):
-                m["status"] = "implemented"
-                self.save(m)
-                changes.append(f"{m['id']} implemented")
+        with self.connect(write=True) as db:
+            for mid, description in db.execute(
+                    "SELECT id, description FROM milestone WHERE status = 'open' "
+                    "AND id NOT IN (SELECT milestone FROM masterplan) ORDER BY id").fetchall():
+                self.stub(db, mid, description)
+                changes.append(f"{mid} masterplan stub")
+            for (mid,) in db.execute(
+                    "SELECT m.id FROM milestone m JOIN masterplan mp ON mp.milestone = m.id "
+                    "WHERE m.status = 'open' AND mp.status <> 'stub' "
+                    "AND EXISTS (SELECT 1 FROM task t WHERE t.milestone = m.id) "
+                    "AND NOT EXISTS (SELECT 1 FROM task t WHERE t.milestone = m.id AND t.status = 'open') "
+                    "ORDER BY m.id").fetchall():
+                db.execute("UPDATE milestone SET status = 'implemented' WHERE id = ?", (mid,))
+                changes.append(f"{mid} implemented")
         return changes
 
     # --- decide ------------------------------------------------------------------------------
@@ -479,33 +351,33 @@ class Project:
     def resolve(self, did, answer=None, irrelevant=None):
         """Close a pending decision. Answered: its tasks unblock by themselves. Irrelevant: the open tasks it
         blocks are dropped."""
-        ds = self.decisions()
-        d = next((x for x in ds if x["id"] == did and x["status"] == "pending"), None)
-        if d is None:
-            raise FormatError(f"no pending decision {did}")
-        if irrelevant is None:
-            d.update(status="answered", answer=answer, closed=today())
-        else:
-            d.update(status="irrelevant", reason=irrelevant, closed=today())
-            for m in self.open_milestones():
-                hit = [t for t in m.get("tasks", []) if t["status"] == "open" and did in t.get("blocked_by", [])]
-                for t in hit:
-                    t.update(status="dropped", note=f"{did} irrelevant")
-                if hit:
-                    self.save(m)
-        self.save_decisions(ds)
+        with self.connect(write=True) as db:
+            if not db.execute("SELECT 1 FROM decision WHERE id = ? AND status = 'pending'", (did,)).fetchone():
+                raise FormatError(f"no pending decision {did}")
+            if irrelevant is None:
+                db.execute("UPDATE decision SET status = 'answered', answer = ?, closed = ? WHERE id = ?",
+                           (answer, today(), did))
+                return
+            db.execute("UPDATE decision SET status = 'irrelevant', reason = ?, closed = ? WHERE id = ?",
+                       (irrelevant, today(), did))
+            db.execute("UPDATE task SET status = 'dropped', note = ? WHERE status = 'open' "
+                       "AND milestone IN (SELECT id FROM milestone WHERE status = 'open') "
+                       "AND EXISTS (SELECT 1 FROM task_decision td WHERE td.decision = ? AND td.milestone = "
+                       "task.milestone AND td.plan = task.plan AND td.task = task.id)", (f"{did} irrelevant", did))
 
     def decide(self, ask=input):
         """Ask about every pending decision; returns how many were closed."""
         closed = 0
         for d in self.pending():
-            opts = d.get("options", [])
-            blocks = [qid_of(m, t) for m in self.milestones() for t in m.get("tasks", [])
-                      if d["id"] in t.get("blocked_by", []) and t["status"] == "open"]
+            opts = d["options"]
+            blocks = [r["qid"] for r in self.rows(
+                "SELECT t.milestone || '-' || t.plan || '-' || t.id AS qid FROM task_decision td JOIN task t "
+                "ON t.milestone = td.milestone AND t.plan = td.plan AND t.id = td.task "
+                "WHERE td.decision = ? AND t.status = 'open' ORDER BY qid", d["id"])]
             self.say(f"\n{d['id']} {d['question']}")
             if blocks:
                 self.say(f"  blocks: {', '.join(blocks)}")
-            if d.get("context"):
+            if d["context"]:
                 self.say("  " + d["context"].replace("\n", "\n  "))
             for n, o in enumerate(opts, 1):
                 self.say(f"  {n}) {o}{'  (recommended)' if n == 1 else ''}")
@@ -522,134 +394,113 @@ class Project:
             closed += 1
         return closed
 
-    # --- edit commands (used by workers; no commit) -------------------------------------------
+    # --- edit commands -----------------------------------------------------------------------
 
-    def task_add(self, plan_ref, subject, details, prio=None, blocked_by=()):
-        r = PLAN_REF_RE.match(plan_ref)
-        if not r:
-            raise FormatError(f"not a plan (Mnnn-Pnnn): {plan_ref}")
+    def milestone_add(self, title, description=""):
+        with self.connect(write=True) as db:
+            mid = next_id("M", [r[0] for r in db.execute("SELECT id FROM milestone")], 3)
+            db.execute("INSERT INTO milestone (id, title, description) VALUES (?, ?, ?)",
+                       (mid, title, (description or "").strip()))
+        return mid
 
-        def change():
-            m = self.load(r[1])
-            if not plan_of(m, r[2]):
-                raise FormatError(f"no plan {plan_ref}")
-            tid = next_id("T", [t["id"] for t in m.get("tasks", []) if t["plan"] == r[2]], 3)
-            t = {"id": tid, "plan": r[2], "subject": subject, "status": "open"}
-            if prio is not None:
-                t["priority"] = prio
-            if blocked_by:
-                t["blocked_by"] = list(blocked_by)
-            t["details"] = details.strip()
-            m.setdefault("tasks", []).append(t)
-            self.save(m)
-            return f"{plan_ref}-{tid}"
-        return self.guarded(change)
-
-    def task_set(self, qid, **fields):
-        """Set fields of a task; a value None removes the field."""
-        def change():
-            m, t = self.find(qid)
+    def milestone_set(self, mid, **fields):
+        """Set fields of a milestone (title, status, description); None leaves a field as it is."""
+        with self.connect(write=True) as db:
+            self.check_milestone(db, mid)
             for k, v in fields.items():
-                if v is None:
-                    t.pop(k, None)
-                else:
-                    t[k] = v
-            self.save(m)
-        self.guarded(change)
-
-    def task_block(self, qid, did):
-        m, t = self.find(qid)
-        self.task_set(qid, blocked_by=sorted(set(t.get("blocked_by", [])) | {did}))
-
-    def plan_add(self, mid, title, goal=None, prio=None):
-        def change():
-            m = self.load(mid)
-            pid = next_id("P", [p["id"] for p in m.get("plans", [])], 3)
-            p = {"id": pid, "title": title}
-            if prio is not None:
-                p["priority"] = prio
-            if goal:
-                p["goal"] = goal.strip()
-            m.setdefault("plans", []).append(p)
-            self.save(m)
-            return f"{mid}-{pid}"
-        return self.guarded(change)
-
-    def plan_priority(self, plan_ref, prio):
-        r = PLAN_REF_RE.match(plan_ref)
-        if not r:
-            raise FormatError(f"not a plan (Mnnn-Pnnn): {plan_ref}")
-
-        def change():
-            m = self.load(r[1])
-            p = plan_of(m, r[2])
-            if not p:
-                raise FormatError(f"no plan {plan_ref}")
-            if prio is None:
-                p.pop("priority", None)
-            else:
-                p["priority"] = prio
-            self.save(m)
-        self.guarded(change)
+                if v is not None:
+                    db.execute(f"UPDATE milestone SET {k} = ? WHERE id = ?", (v.strip(), mid))
 
     def masterplan_set(self, mid, **fields):
-        def change():
-            m = self.load(mid)
-            mp = m.setdefault("masterplan", {"status": "stub"})
-            mp.update({k: v.strip() for k, v in fields.items() if v is not None})
-            self.save(m)
-        self.guarded(change)
+        with self.connect(write=True) as db:
+            self.check_milestone(db, mid)
+            db.execute("INSERT OR IGNORE INTO masterplan (milestone) VALUES (?)", (mid,))
+            for k, v in fields.items():
+                if v is not None:
+                    db.execute(f"UPDATE masterplan SET {k} = ? WHERE milestone = ?", (v.strip(), mid))
+
+    def plan_add(self, mid, title, description=None, prio=None):
+        with self.connect(write=True) as db:
+            self.check_milestone(db, mid)
+            pid = next_id("P", [r[0] for r in db.execute("SELECT id FROM plan WHERE milestone = ?", (mid,))], 3)
+            db.execute("INSERT INTO plan (milestone, id, title, priority, description) VALUES (?, ?, ?, ?, ?)",
+                       (mid, pid, title, prio, (description or "").strip()))
+        return f"{mid}-{pid}"
+
+    def plan_priority(self, plan_ref, prio):
+        with self.connect(write=True) as db:
+            mid, pid = self.plan_key(db, plan_ref)
+            db.execute("UPDATE plan SET priority = ? WHERE milestone = ? AND id = ?", (prio, mid, pid))
+
+    def task_add(self, plan_ref, title, description, prio=None, blocked_by=()):
+        with self.connect(write=True) as db:
+            mid, pid = self.plan_key(db, plan_ref)
+            tid = next_id("T", [r[0] for r in db.execute(
+                "SELECT id FROM task WHERE milestone = ? AND plan = ?", (mid, pid))], 3)
+            db.execute("INSERT INTO task (milestone, plan, id, title, priority, description) VALUES (?, ?, ?, ?, ?, ?)",
+                       (mid, pid, tid, title, prio, description.strip()))
+            for did in blocked_by:
+                self.block(db, {"milestone": mid, "plan": pid, "id": tid}, did)
+        return f"{plan_ref}-{tid}"
+
+    def task_set(self, qid, **fields):
+        """Set fields of a task (status, note, priority); a value None clears it."""
+        with self.connect(write=True) as db:
+            t = self.find(db, qid)
+            for k, v in fields.items():
+                db.execute(f"UPDATE task SET {k} = ? WHERE milestone = ? AND plan = ? AND id = ?",
+                           (v, t["milestone"], t["plan"], t["id"]))
+
+    def task_block(self, qid, did):
+        with self.connect(write=True) as db:
+            self.block(db, self.find(db, qid), did)
 
     def decision_add(self, question, context=None, options=(), blocks=()):
-        def change():
-            ds = self.decisions()
-            did = next_id("D", [d["id"] for d in ds], 4)
-            d = {"id": did, "question": question, "status": "pending"}
-            if options:
-                d["options"] = list(options)
-            if context:
-                d["context"] = context.strip()
-            self.save_decisions(ds + [d])
+        with self.connect(write=True) as db:
+            did = next_id("D", [r[0] for r in db.execute("SELECT id FROM decision")], 4)
+            db.execute("INSERT INTO decision (id, question, options, context) VALUES (?, ?, ?, ?)",
+                       (did, question, json.dumps(list(options), ensure_ascii=False), (context or "").strip()))
             for qid in blocks:
-                m, t = self.find(qid)
-                t["blocked_by"] = sorted(set(t.get("blocked_by", [])) | {did})
-                self.save(m)
-            return did
-        return self.guarded(change)
+                self.block(db, self.find(db, qid), did)
+        return did
 
     # --- show --------------------------------------------------------------------------------
 
     def show(self, qid):
-        m, t = self.find(qid)
-        p = plan_of(m, t["plan"])
-        mp = m.get("masterplan", {})
-        ds = {d["id"]: d for d in self.decisions()}
-        out = [f"Milestone {m['id']} {m['title']} ({m['status']})", m.get("goal", ""), "",
+        with self.connect() as db:
+            t = self.find(db, qid)
+            m = dict(db.execute("SELECT * FROM milestone WHERE id = ?", (t["milestone"],)).fetchone())
+            mp = dict(db.execute("SELECT * FROM masterplan WHERE milestone = ?", (m["id"],)).fetchone() or {})
+            p = dict(db.execute("SELECT * FROM plan WHERE milestone = ? AND id = ?", (m["id"], t["plan"])).fetchone())
+            siblings = db.execute("SELECT id, status, title FROM task WHERE milestone = ? AND plan = ? ORDER BY id",
+                                  (m["id"], p["id"])).fetchall()
+            ds = db.execute("SELECT d.* FROM task_decision td JOIN decision d ON d.id = td.decision WHERE "
+                            "td.milestone = ? AND td.plan = ? AND td.task = ? ORDER BY d.id",
+                            (m["id"], p["id"], t["id"])).fetchall()
+        prio = t["priority"] if t["priority"] is not None else p["priority"] or 0
+        out = [f"Milestone {m['id']} {m['title']} ({m['status']})", m["description"], "",
                f"Masterplan ({mp.get('status', 'none')})"]
         for k in ("goal", "scope", "exit_criteria"):
             if mp.get(k):
                 out += [f"{k.replace('_', ' ')}:", mp[k]]
-        out += ["", f"Plan {m['id']}-{p['id']} {p['title']} (priority {p.get('priority', 0)})"]
-        if p.get("goal"):
-            out.append(p["goal"])
-        for x in m.get("tasks", []):
-            if x["plan"] == p["id"]:
-                out.append(f"  {x['id']} [{x['status']}] {x['subject']}" + (" ← this task" if x is t else ""))
-        out += ["", f"Task {qid}: {t['subject']} ({t['status']}, priority {priority(m, t)})"]
-        if t.get("note"):
+        out += ["", f"Plan {m['id']}-{p['id']} {p['title']} (priority {p['priority'] or 0})"]
+        if p["description"]:
+            out.append(p["description"])
+        for x in siblings:
+            out.append(f"  {x['id']} [{x['status']}] {x['title']}" + (" ← this task" if x["id"] == t["id"] else ""))
+        out += ["", f"Task {qid}: {t['title']} ({t['status']}, priority {prio})"]
+        if t["note"]:
             out.append(f"note: {t['note']}")
-        out += [t.get("details", "")]
-        for did in t.get("blocked_by", []):
-            d = ds.get(did, {})
-            state = d.get("status", "?")
-            said = d.get("answer") or d.get("reason") or ""
-            out.append(f"Decision {did} ({state}): {d.get('question', '?')}" + (f" → {said}" if said else ""))
+        out.append(t["description"])
+        for d in ds:
+            said = d["answer"] or d["reason"] or ""
+            out.append(f"Decision {d['id']} ({d['status']}): {d['question']}" + (f" → {said}" if said else ""))
         return "\n".join(out).rstrip() + "\n"
 
     # --- run ---------------------------------------------------------------------------------
 
     def worker_command(self, qid):
-        prompt = WORKER_PROMPT.format(qid=qid, mid=qid[:4], dir=self.dir, show=self.show(qid))
+        prompt = WORKER_PROMPT.format(qid=qid, db=self.db, show=self.show(qid))
         return [self.claude, "-p", prompt, "--permission-mode", "acceptEdits", "--allowedTools", WORKER_TOOLS]
 
     @property
@@ -700,41 +551,38 @@ class Project:
             return "failed", f"exit {code}\n{tail}"
         errors = self.validate()
         if errors:
-            return "failed", "the plans folder is no longer valid:\n  " + "\n  ".join(errors)
+            return "failed", "the database is no longer valid:\n  " + "\n  ".join(errors)
         if self.dirty():
             return "failed", "the worker left uncommitted changes (git status)"
-        _, t = self.find(qid)
+        with self.connect() as db:
+            t = self.find(db, qid)
+            blocked = self.blockers(db, t, pending=True)
         if t["status"] != "open":
-            return "done", t["status"] + (f": {t['note']}" if t.get("note") else "")
-        if self.blocked(t, {d["id"] for d in self.pending()}):
-            return "blocked", "waits for " + ", ".join(t["blocked_by"])
+            return "done", t["status"] + (f": {t['note']}" if t["note"] else "")
+        if blocked:
+            return "blocked", "waits for " + ", ".join(blocked)
         return "failed", f"exit 0, but {qid} is still open and not blocked\n{tail}"
 
     def run(self, once=False, dry_run=False, interactive=None, ask=input):
         interactive = sys.stdin.isatty() if interactive is None else interactive
-        if dry_run:  # changes nothing: no sync, no commit
-            errors = self.validate()
-            if errors:
-                self.say("the plans folder has format errors:\n  " + "\n  ".join(errors))
-                return 1
-            q = self.queue()
-            if not q:
-                self.say("Queue empty (`pm sync` stubs masterplans for open milestones).")
-                return 0
-            self.say(" ".join(f"'{a}'" if " " in a else a for a in self.worker_command(q[0][1])))
-            return 0
         while True:
             errors = self.validate()
             if errors:
-                self.say("the plans folder has format errors:\n  " + "\n  ".join(errors))
+                self.say("the database has errors:\n  " + "\n  ".join(errors))
                 return 1
-            changes = self.sync()
-            if changes:
-                self.commit("sync: " + ", ".join(changes))
-            if interactive and self.pending() and self.decide(ask):
-                self.commit("decisions answered")
-            if not self.open_milestones():
-                self.say("No open milestone.")
+            if dry_run:  # changes nothing: no sync
+                q = self.queue()
+                if not q:
+                    self.say("Queue empty (`pm sync` stubs masterplans for open milestones).")
+                else:
+                    self.say(" ".join(f"'{a}'" if " " in a else a for a in self.worker_command(q[0][1])))
+                return 0
+            for change in self.sync():
+                self.say(f"sync: {change}")
+            if interactive and self.pending():
+                self.decide(ask)
+            if not self.rows("SELECT 1 FROM milestone WHERE status = 'open'"):
+                self.say("No open milestone (`pm milestone add` starts one).")
                 return 0
             q = self.queue()
             if not q:
@@ -750,22 +598,25 @@ class Project:
                 self.say(f"\n{qid} failed: {message}")
                 return 1
             self.say(f"\n{qid}: {result} ({message})")
-            changes = self.sync()
-            self.commit(f"{qid} {result}" + (f"; {', '.join(changes)}" if changes else ""))
+            for change in self.sync():
+                self.say(f"sync: {change}")
             if once:
                 return 0
 
     # --- status ------------------------------------------------------------------------------
 
     def status(self):
-        for m in self.open_milestones():
-            if "masterplan" not in m:
+        for m in self.rows(
+                "SELECT m.id, m.title, mp.status AS masterplan, "
+                "(SELECT count(*) FROM plan p WHERE p.milestone = m.id) AS plans, "
+                "(SELECT count(*) FROM task t WHERE t.milestone = m.id) AS tasks, "
+                "(SELECT count(*) FROM task t WHERE t.milestone = m.id AND t.status <> 'open') AS closed "
+                "FROM milestone m LEFT JOIN masterplan mp ON mp.milestone = m.id WHERE m.status = 'open' ORDER BY m.id"):
+            if m["masterplan"] is None:
                 self.say(f"{m['id']} {m['title']}: no masterplan yet")
-                continue
-            ts = m.get("tasks", [])
-            done = sum(t["status"] != "open" for t in ts)
-            self.say(f"{m['id']} {m['title']}: masterplan {m['masterplan']['status']}, {len(m.get('plans', []))} "
-                     f"plan(s), {done}/{len(ts)} tasks closed")
+            else:
+                self.say(f"{m['id']} {m['title']}: masterplan {m['masterplan']}, {m['plans']} plan(s), "
+                         f"{m['closed']}/{m['tasks']} tasks closed")
         self.print_queue(limit=10)
         pending = self.pending()
         self.say(f"\nPending decisions ({len(pending)}):")
@@ -775,8 +626,8 @@ class Project:
     def print_queue(self, limit=None):
         q = self.queue()
         self.say(f"\nQueue ({len(q)}):")
-        for prio, qid, subject in q[:limit]:
-            self.say(f"  {prio:+d} {qid} {subject}" if prio else f"     {qid} {subject}")
+        for prio, qid, title in q[:limit]:
+            self.say(f"  {prio:+d} {qid} {title}" if prio else f"     {qid} {title}")
         if limit and len(q) > limit:
             self.say(f"  … {len(q) - limit} more (`pm queue`)")
 
@@ -798,11 +649,11 @@ def prio_arg(v):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="pm", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", help="the project's git repository (default: the one around the current directory)")
-    ap.add_argument("--dir", default="plans", help="folder of the milestone files, relative to the root (default: plans)")
+    ap.add_argument("--db", default=DB_FILE, help=f"the database, relative to the root (default: {DB_FILE})")
     ap.add_argument("--claude", default="claude", help=argparse.SUPPRESS)  # tests: a fake worker
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name, text in [("status", "open milestones, the queue, pending decisions"), ("queue", "the whole queue"),
-                       ("validate", "check every file in the plans folder"), ("sync", "stub masterplans, close milestones"),
+                       ("validate", "check the database"), ("sync", "stub masterplans, close milestones"),
                        ("decide", "answer pending decisions in the terminal")]:
         sub.add_parser(name, help=text)
     s = sub.add_parser("show", help="a task with its plan, milestone and decisions")
@@ -811,11 +662,37 @@ def main(argv=None):
     r.add_argument("--once", action="store_true", help="stop after one task")
     r.add_argument("--dry-run", action="store_true", help="print the next worker command; change nothing")
 
+    ms = sub.add_parser("milestone", help="add or change milestones").add_subparsers(dest="action", required=True)
+    ma = ms.add_parser("add", help="new open milestone; prints its id")
+    ma.add_argument("title")
+    ma.add_argument("--description", type=text_arg, help="Markdown, or - for stdin")
+    mset = ms.add_parser("set", help="set milestone fields")
+    mset.add_argument("milestone")
+    mset.add_argument("--title")
+    mset.add_argument("--status", choices=MILESTONE_STATES)
+    mset.add_argument("--description", type=text_arg)
+
+    mp = sub.add_parser("masterplan", help="set masterplan fields")
+    mp.add_argument("milestone")
+    mp.add_argument("--status", choices=MASTER_STATES)
+    for k in ("goal", "scope", "exit-criteria"):
+        mp.add_argument(f"--{k}", type=text_arg)
+
+    p = sub.add_parser("plan", help="add or change plans").add_subparsers(dest="action", required=True)
+    pa = p.add_parser("add", help="new plan; prints its id")
+    pa.add_argument("milestone")
+    pa.add_argument("title")
+    pa.add_argument("--description", type=text_arg)
+    pa.add_argument("--priority", type=int)
+    pp = p.add_parser("priority", help="integer, or none for 0")
+    pp.add_argument("plan", help="Mnnn-Pnnn")
+    pp.add_argument("priority", type=prio_arg)
+
     t = sub.add_parser("task", help="add or change tasks").add_subparsers(dest="action", required=True)
     a = t.add_parser("add", help="new task; prints its id")
     a.add_argument("plan", help="Mnnn-Pnnn")
-    a.add_argument("subject")
-    a.add_argument("--details", required=True, type=text_arg, help="text, or - for stdin")
+    a.add_argument("title")
+    a.add_argument("--description", required=True, type=text_arg, help="Markdown, or - for stdin")
     a.add_argument("--priority", type=int)
     a.add_argument("--blocked-by", nargs="+", default=[], metavar="Dnnnn")
     for verb, text in [("done", "note: date, files or commit"), ("drop", "reason")]:
@@ -829,16 +706,6 @@ def main(argv=None):
     tp.add_argument("task")
     tp.add_argument("priority", type=prio_arg)
 
-    p = sub.add_parser("plan", help="add or change plans").add_subparsers(dest="action", required=True)
-    pa = p.add_parser("add", help="new plan; prints its id")
-    pa.add_argument("milestone")
-    pa.add_argument("title")
-    pa.add_argument("--goal", type=text_arg)
-    pa.add_argument("--priority", type=int)
-    pp = p.add_parser("priority", help="integer, or none for 0")
-    pp.add_argument("plan", help="Mnnn-Pnnn")
-    pp.add_argument("priority", type=prio_arg)
-
     d = sub.add_parser("decision", help="ask the human").add_subparsers(dest="action", required=True)
     da = d.add_parser("add", help="new pending decision; prints its id")
     da.add_argument("question")
@@ -846,25 +713,19 @@ def main(argv=None):
     da.add_argument("--option", action="append", default=[], help="repeat; the recommended one first")
     da.add_argument("--blocks", nargs="+", default=[], metavar="TASK")
 
-    mp = sub.add_parser("masterplan", help="set masterplan fields")
-    mp.add_argument("milestone")
-    mp.add_argument("--status", choices=MASTER_STATES)
-    for k in ("goal", "scope", "exit-criteria"):
-        mp.add_argument(f"--{k}", type=text_arg)
-
     args = ap.parse_args(argv)
     root = args.root or git_root()
     if root is None:
         print("pm: not inside a git repository (or pass --root)")
         return 2
-    pm = Project(root=root, claude=args.claude, plans_dir=args.dir)
+    pm = Project(root=root, claude=args.claude, db=args.db)
     try:
         if args.cmd == "validate":
             errors = pm.validate()
-            print("\n".join(errors) if errors else "the plans folder is valid")
+            print("\n".join(errors) if errors else f"{args.db} is valid")
             return 1 if errors else 0
         if args.cmd != "run" and (errors := pm.validate()):
-            print("the plans folder has format errors (`pm validate`):\n  " + "\n  ".join(errors))
+            print("the database has errors (`pm validate`):\n  " + "\n  ".join(errors))
             return 1
         if args.cmd == "status":
             pm.status()
@@ -875,16 +736,26 @@ def main(argv=None):
         elif args.cmd == "sync":
             changes = pm.sync()
             print("sync: " + (", ".join(changes) if changes else "nothing to do"))
-            if changes:
-                pm.commit("sync: " + ", ".join(changes))
         elif args.cmd == "decide":
-            if pm.decide():
-                pm.commit("decisions answered")
+            pm.decide()
         elif args.cmd == "run":
             return pm.run(once=args.once, dry_run=args.dry_run)
+        elif args.cmd == "milestone":
+            if args.action == "add":
+                print(pm.milestone_add(args.title, args.description))
+            else:
+                pm.milestone_set(args.milestone, title=args.title, status=args.status, description=args.description)
+        elif args.cmd == "masterplan":
+            pm.masterplan_set(args.milestone, status=args.status, goal=args.goal, scope=args.scope,
+                              exit_criteria=args.exit_criteria)
+        elif args.cmd == "plan":
+            if args.action == "add":
+                print(pm.plan_add(args.milestone, args.title, args.description, args.priority))
+            else:
+                pm.plan_priority(args.plan, args.priority)
         elif args.cmd == "task":
             if args.action == "add":
-                print(pm.task_add(args.plan, args.subject, args.details, args.priority, args.blocked_by))
+                print(pm.task_add(args.plan, args.title, args.description, args.priority, args.blocked_by))
             elif args.action == "done":
                 pm.task_set(args.task, status="done", note=args.note)
             elif args.action == "drop":
@@ -893,16 +764,8 @@ def main(argv=None):
                 pm.task_block(args.task, args.decision)
             else:
                 pm.task_set(args.task, priority=args.priority)
-        elif args.cmd == "plan":
-            if args.action == "add":
-                print(pm.plan_add(args.milestone, args.title, args.goal, args.priority))
-            else:
-                pm.plan_priority(args.plan, args.priority)
         elif args.cmd == "decision":
             print(pm.decision_add(args.question, args.context, args.option, args.blocks))
-        elif args.cmd == "masterplan":
-            pm.masterplan_set(args.milestone, status=args.status, goal=args.goal, scope=args.scope,
-                              exit_criteria=args.exit_criteria)
         return 0
     except FormatError as e:
         print(f"pm: {e}")
