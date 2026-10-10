@@ -2,7 +2,7 @@
 
 Task queue for [Claude Code](https://claude.com/claude-code) workers. A project's work is **milestones → plans → tasks** in SQLite, kept in git as SQL text; `pm run` works the queue one task at a time with `claude -p`, waits out usage limits, and asks you the questions workers raise.
 
-Python package `pm/` (code in `__init__.py`, the config template `project-manager.toml`), standard library only (Python 3.11+), plus `git` and `claude`. Install: `nix run github:<you>/pm`, `pipx install .`, or `python3 -m pm` with this repository on `PYTHONPATH`.
+Python package `pm/` (code in `__init__.py`, the config template `project-manager.toml`, the agent reference `instructions.md`), standard library only (Python 3.11+), plus `git` and `claude`. Install: `nix run github:<you>/pm`, `pipx install .`, or `python3 -m pm` with this repository on `PYTHONPATH`.
 
 ## Use
 
@@ -62,6 +62,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 | | |
 |---|---|
 | `init` | Write and commit the config and the database (missing ones only) |
+| `instructions` | The full reference for agents (`pm/instructions.md`): every command with examples, recipes, errors |
 | `status`, `queue`, `show <task>`, `validate` | Inspect |
 | `decide` | Answer pending decisions (number, text, `s` skip, `x <reason>` irrelevant: drops the tasks it blocks) |
 | `run [--once] [--dry-run]` | Work the queue until it is empty, a worker fails, or the tree has uncommitted changes |
@@ -77,4 +78,4 @@ Global: `--root <repo>`. A text value `-` reads stdin.
 
 ## Workers
 
-Each task runs the configured `worker` command (default: `claude -p` with `Bash Read Edit Write Glob Grep` allowed). The prompt (`WORKER_PROMPT` in `pm/__init__.py`) holds the task with its plan and milestone, and the `pm` commands the worker may use: `plan add`, `plan edit`, `task add`, `decision add`, `task-pending-decision`, `task done|drop`. **The worker has full shell access in the project.** Logs: `.git/pm-logs/task-<id>.log` (`log_dir`). On a usage limit, `pm` waits for the reset and retries.
+Each task runs the configured `worker` command (default: `claude -p` with `Bash Read Edit Write Glob Grep` allowed). The prompt (`WORKER_PROMPT` in `pm/__init__.py`) holds the task with its plan and milestone, and the `pm` commands the worker may use: `plan add`, `plan edit`, `task add`, `decision add`, `task-pending-decision`, `task done|drop`. It points the worker to `pm instructions` for examples of every command. Agents outside `pm run`, e.g. a Claude session asked to plan work, should run `pm instructions` too: say so in the project's `AGENTS.md` or `CLAUDE.md`. **The worker has full shell access in the project.** Logs: `.git/pm-logs/task-<id>.log` (`log_dir`). On a usage limit, `pm` waits for the reset and retries.
