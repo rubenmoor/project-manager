@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """pm: a project manager for Claude Code workers (README.md). Milestones -> plans -> tasks, plus decisions for the
-human, in an SQLite database in the project (tasks.dbsqlite; the schema is SCHEMA below). A new milestone comes with
+human, in SQLite: the project keeps them as SQL text in tasks.sql, tracked by git, which every command loads
+into an in-memory database (the schema is SCHEMA below). A new milestone comes with
 a first plan, the masterplan (description "tbd."), and a task that writes it; a new or edited plan queues a task that splits it
 into tasks. The
 queue (the `queue` view): open tasks of open milestones that no pending decision blocks, highest priority first,
@@ -11,17 +12,18 @@ then by milestone, plan and task. Worked one task at a time by `claude -p`. Stan
     pm decision add …   pm task-pending-decision <task> <decision>
 
 Works on the git repository around the current directory. Settings: project-manager.toml, written with defaults
-and committed by the first command. Otherwise pm never commits; workers commit their work. Nothing is pushed.
+and committed by the first command. pm commits its own changes to tasks.sql; workers commit them with their work.
+Nothing is pushed.
 """
-import argparse, contextlib, datetime, json, os, re, sqlite3, subprocess, sys, time, tomllib, zoneinfo
+import argparse, contextlib, datetime, fcntl, json, os, re, sqlite3, subprocess, sys, time, tomllib, zoneinfo
 from pathlib import Path
 
 
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = """# pm configuration. Delete this file to get the defaults back.
 
-# SQLite database, relative to the project root.
-database = "tasks.dbsqlite"
+# Milestones, plans, tasks and decisions as SQL text, tracked by git; relative to the project root.
+database = "tasks.sql"
 
 # Command that works one task. "{prompt}" is replaced by the worker prompt.
 worker = ["claude", "-p", "{prompt}", "--permission-mode", "acceptEdits",
@@ -129,7 +131,7 @@ Milestones, plans, tasks and decisions are in {db}; change them only with these 
   pm show <task id>
 
 Finish with `pm task done {id} "<YYYY-MM-DD, files or commit>"` or `pm task drop {id} "<reason>"`, then commit your \
-work in one commit, message "task {id}: <title>". If task {id} itself needs an answer first, make it pending on the \
+work together with {db} in one commit, message "task {id}: <title>". If task {id} itself needs an answer first, make it pending on the \
 decision, commit what is done and stop. Don't push."""
 
 
@@ -184,25 +186,17 @@ def today():
 
 
 def load_config(root, out=sys.stderr):
-    """project-manager.toml in root. If missing: written from CONFIG_TEMPLATE, the database added to
-    .gitignore, both committed."""
+    """project-manager.toml in root; written from CONFIG_TEMPLATE and committed if missing."""
     path = Path(root) / CONFIG_FILE
     if not path.exists():
         path.write_text(CONFIG_TEMPLATE, encoding="utf-8")
-        ignore, line = Path(root) / ".gitignore", f"/{tomllib.loads(CONFIG_TEMPLATE)['database']}*"
-        text = ignore.read_text(encoding="utf-8") if ignore.exists() else ""
-        if line not in text.splitlines():
-            ignore.write_text(text + ("\n" if text and not text.endswith("\n") else "") + line + "\n", encoding="utf-8")
-        files = [CONFIG_FILE, ".gitignore"]
         try:
-            subprocess.run(["git", "add", "--", *files], cwd=root, capture_output=True, check=True)
-            subprocess.run(["git", "commit", "-q", "-m", f"pm: add {CONFIG_FILE}, ignore the database", "--", *files],
+            subprocess.run(["git", "add", "--", CONFIG_FILE], cwd=root, capture_output=True, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", f"pm: add {CONFIG_FILE}", "--", CONFIG_FILE],
                            cwd=root, capture_output=True, check=True)
-            print(f"pm: wrote {CONFIG_FILE} with the defaults, added the database to .gitignore, committed both",
-                  file=out)
+            print(f"pm: wrote and committed {CONFIG_FILE} with the defaults", file=out)
         except subprocess.CalledProcessError as e:
-            print(f"pm: wrote {CONFIG_FILE} and .gitignore; committing them failed: "
-                  f"{(e.stderr or b'').decode().strip()}", file=out)
+            print(f"pm: wrote {CONFIG_FILE}; committing it failed: {(e.stderr or b'').decode().strip()}", file=out)
     try:
         config = tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as e:
@@ -226,6 +220,25 @@ def load_config(root, out=sys.stderr):
     return config
 
 
+def dump(con):
+    """The database as SQL text: schema, then one INSERT per row, sorted by primary key."""
+    out = [f"-- pm database (pm.py). Change it with pm; after a hand edit run `pm validate`.",
+           f"PRAGMA user_version = {SCHEMA_VERSION};", ""]
+    tables = []
+    for kind, name, sql in con.execute("SELECT type, name, sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY rowid"):
+        out += [sql + ";", ""]
+        if kind == "table":
+            tables.append(name)
+    for t in tables:
+        info = con.execute(f"PRAGMA table_info({t})").fetchall()
+        cols = [c[1] for c in info]
+        key = [c[1] for c in sorted(info, key=lambda c: c[5]) if c[5]]
+        rows = con.execute(f"SELECT {', '.join(f'quote({c})' for c in cols)} FROM {t} ORDER BY {', '.join(key)}")
+        out += [f"INSERT INTO {t} ({', '.join(cols)}) VALUES ({', '.join(r)});" for r in rows]
+        out.append("")
+    return "\n".join(out).rstrip() + "\n"
+
+
 class Project:
     def __init__(self, root, config=None, out=sys.stdout):
         self.root = Path(root)
@@ -240,36 +253,65 @@ class Project:
     # --- database ----------------------------------------------------------------------------
 
     @contextlib.contextmanager
+    def lock(self):
+        """Exclusive while one pm process changes the database."""
+        with open(Path(self.git("rev-parse", "--absolute-git-dir").strip()) / "pm.lock", "w") as f:
+            fcntl.flock(f, fcntl.LOCK_EX)
+            yield
+
+    @contextlib.contextmanager
     def connect(self, write=False):
-        """A connection with foreign keys on; write: one transaction, rolled back if the block raises.
-        The first connection creates the database."""
-        con = sqlite3.connect(self.db_path, isolation_level=None)
-        try:
-            con.row_factory = sqlite3.Row
-            con.execute("PRAGMA foreign_keys = ON")
-            version = con.execute("PRAGMA user_version").fetchone()[0]
-            if version == 0 and not con.execute("SELECT 1 FROM sqlite_schema").fetchone():
-                con.executescript(f"BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;")
-                version = SCHEMA_VERSION
-            if version != SCHEMA_VERSION:
-                raise FormatError(f"{self.db}: schema version {version}, this pm knows {SCHEMA_VERSION}")
-            if write:
-                con.execute("BEGIN IMMEDIATE")
-            yield con
-            if con.in_transaction:
-                con.execute("COMMIT")
-        except sqlite3.IntegrityError as e:
-            raise FormatError(f"the change breaks the schema, nothing written: {e}") from None
-        except sqlite3.DatabaseError as e:
-            raise FormatError(f"{self.db}: {e}") from None
-        finally:
-            con.close()  # an open transaction is rolled back
+        """The database file loaded into memory, foreign keys on. write: one transaction under the lock, written
+        back to the file if it changed; nothing is written if the block raises. No file yet: the schema."""
+        with self.lock() if write else contextlib.nullcontext():
+            con = sqlite3.connect(":memory:", isolation_level=None)
+            try:
+                con.row_factory = sqlite3.Row
+                text = self.db_path.read_text(encoding="utf-8") if self.db_path.exists() else None
+                try:
+                    con.executescript(f"BEGIN;\n{text}\nCOMMIT;" if text is not None else
+                                      f"BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;")
+                except sqlite3.Error as e:
+                    raise FormatError(f"{self.db}: {e}") from None
+                version = con.execute("PRAGMA user_version").fetchone()[0]
+                if version != SCHEMA_VERSION:
+                    raise FormatError(f"{self.db}: schema version {version}, this pm knows {SCHEMA_VERSION}")
+                con.execute("PRAGMA foreign_keys = ON")
+                if not write:
+                    yield con
+                    return
+                con.execute("BEGIN")
+                yield con
+                if con.in_transaction:
+                    con.execute("COMMIT")
+                new = dump(con)
+                if new != text:
+                    tmp = self.db_path.with_name(self.db_path.name + ".tmp")
+                    tmp.write_text(new, encoding="utf-8")
+                    os.replace(tmp, self.db_path)
+            except sqlite3.IntegrityError as e:
+                raise FormatError(f"the change breaks the schema, nothing written: {e}") from None
+            except sqlite3.DatabaseError as e:
+                raise FormatError(f"{self.db}: {e}") from None
+            finally:
+                con.close()
 
     def init_db(self):
-        """Create the database with the schema if it doesn't exist."""
+        """Write the database file with the schema, and commit it, if it doesn't exist."""
         if not self.db_path.exists():
-            with self.connect():
+            with self.connect(write=True):
                 pass
+            self.commit_db(f"add {self.db}")
+
+    def commit_db(self, message):
+        """Commit the database file if it changed; not in a worker, which commits it with its work."""
+        if os.environ.get("PM_WORKER") or not self.git("status", "--porcelain", "--", self.db).strip():
+            return
+        try:
+            self.git("add", "--", self.db)
+            self.git("commit", "-q", "-m", f"pm: {message}", "--", self.db)
+        except subprocess.CalledProcessError as e:
+            self.say(f"pm: committing {self.db} failed: {e.stderr.strip()}")
 
     def rows(self, sql, *args):
         with self.connect() as db:
@@ -305,17 +347,15 @@ class Project:
         return subprocess.run(["git", *args], cwd=self.root, capture_output=True, text=True, check=True).stdout
 
     def dirty(self):
-        """Uncommitted changes, apart from the database (and its journal), tracked or not."""
-        return bool(self.git("status", "--porcelain", "--", ".", f":(top,exclude,glob){self.db}*").strip())
+        return bool(self.git("status", "--porcelain").strip())
 
     # --- validate ----------------------------------------------------------------------------
 
     def validate(self):
-        """Every problem in the database (empty: all good): what a hand edit with foreign keys off, or a broken
-        file, leaves."""
+        """Every problem in the database file (empty: all good): SQL errors, broken rules, missing references."""
         try:
             with self.connect() as db:
-                errors = [r[0] for r in db.execute("PRAGMA integrity_check") if r[0] != "ok"]
+                errors = []
                 for table, rowid, parent, _ in db.execute("PRAGMA foreign_key_check").fetchall():
                     row = dict(db.execute(f"SELECT * FROM {table} WHERE rowid = ?", (rowid,)).fetchone())
                     key = ", ".join(f"{k} {v}" for k, v in row.items() if k == "id" or k.endswith("_id"))
@@ -546,8 +586,8 @@ class Project:
         """Run the worker, copying its output to the terminal and the log. Returns the exit code."""
         log.parent.mkdir(parents=True, exist_ok=True)
         with open(log, "w", encoding="utf-8") as f:
-            with subprocess.Popen(cmd, cwd=self.root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                  text=True, bufsize=1) as proc:
+            with subprocess.Popen(cmd, cwd=self.root, env=os.environ | {"PM_WORKER": "1"}, stdout=subprocess.PIPE,
+                                  stderr=subprocess.STDOUT, text=True, bufsize=1) as proc:
                 for line in proc.stdout:
                     f.write(line)
                     self.out.write(line)
@@ -600,6 +640,13 @@ class Project:
             return "blocked", "waits for decision(s) " + ", ".join(blocked)
         return "failed", f"exit 0, but task {tid} is still open and not blocked\n{tail}"
 
+    def close_and_commit(self):
+        closed = self.close_milestones()
+        for mid in closed:
+            self.say(f"milestone {mid} implemented")
+        if closed:
+            self.commit_db(", ".join(f"milestone {mid} implemented" for mid in closed))
+
     def run(self, once=False, dry_run=False, interactive=None, ask=input):
         interactive = sys.stdin.isatty() if interactive is None else interactive
         while True:
@@ -614,10 +661,9 @@ class Project:
                 else:
                     self.say(" ".join(f"'{a}'" if " " in a else a for a in self.worker_command(q[0][1])))
                 return 0
-            for mid in self.close_milestones():
-                self.say(f"milestone {mid} implemented")
-            if interactive and self.pending():
-                self.decide(ask)
+            self.close_and_commit()
+            if interactive and self.pending() and self.decide(ask):
+                self.commit_db("decisions answered")
             if not self.rows("SELECT 1 FROM milestone WHERE status = 'open'"):
                 self.say("No open milestone (`pm milestone add` starts one).")
                 return 0
@@ -635,8 +681,7 @@ class Project:
                 self.say(f"\ntask {tid} failed: {message}")
                 return 1
             self.say(f"\ntask {tid}: {result} ({message})")
-            for mid in self.close_milestones():
-                self.say(f"milestone {mid} implemented")
+            self.close_and_commit()
             if once:
                 return 0
 
@@ -753,6 +798,7 @@ def main(argv=None):
         if args.cmd != "run" and (errors := pm.validate()):
             print("the database has errors (`pm validate`):\n  " + "\n  ".join(errors))
             return 1
+        msg = None
         if args.cmd == "status":
             pm.status()
         elif args.cmd == "queue":
@@ -760,7 +806,7 @@ def main(argv=None):
         elif args.cmd == "show":
             print(pm.show(args.task), end="")
         elif args.cmd == "decide":
-            pm.decide()
+            msg = pm.decide() and "decisions answered"
         elif args.cmd == "run":
             return pm.run(once=args.once, dry_run=args.dry_run)
         elif args.cmd == "milestone":
@@ -768,35 +814,48 @@ def main(argv=None):
                 if not (entry := pm.title_and_description("milestone", args.title)):
                     print("pm: aborted, no milestone added")
                     return 1
-                print(pm.milestone_add(*entry))
+                mid = pm.milestone_add(*entry)
+                print(mid)
+                msg = f"milestone {mid} added: {entry[0]}"
             else:
                 pm.milestone_set(args.milestone, title=args.title, status=args.status, description=args.description)
+                msg = f"milestone {args.milestone} changed"
         elif args.cmd == "plan":
             if args.action == "add":
                 pm.require("milestone", args.milestone)
                 if not (entry := pm.title_and_description("plan", args.title)):
                     print("pm: aborted, no plan added")
                     return 1
-                print(pm.plan_add(args.milestone, *entry, args.priority))
+                pid = pm.plan_add(args.milestone, *entry, args.priority)
+                print(pid)
+                msg = f"plan {pid} added: {entry[0]}"
             else:
                 pm.plan_edit(args.plan, args.title, args.description, args.priority)
+                msg = f"plan {args.plan} changed"
         elif args.cmd == "task":
             if args.action == "add":
                 pm.require("plan", args.plan)
                 if not (entry := pm.title_and_description("task", args.title)):
                     print("pm: aborted, no task added")
                     return 1
-                print(pm.task_add(args.plan, *entry, args.priority))
-            elif args.action == "done":
-                pm.task_set(args.task, status="done", note=args.note)
-            elif args.action == "drop":
-                pm.task_set(args.task, status="dropped", note=args.note)
+                tid = pm.task_add(args.plan, *entry, args.priority)
+                print(tid)
+                msg = f"task {tid} added: {entry[0]}"
+            elif args.action in ("done", "drop"):
+                pm.task_set(args.task, status="done" if args.action == "done" else "dropped", note=args.note)
+                msg = f"task {args.task} {args.action}"
             else:
                 pm.task_set(args.task, priority=args.priority)
+                msg = f"task {args.task} priority"
         elif args.cmd == "decision":
-            print(pm.decision_add(args.question, args.context, args.option))
+            did = pm.decision_add(args.question, args.context, args.option)
+            print(did)
+            msg = f"decision {did} added: {args.question}"
         elif args.cmd == "task-pending-decision":
             pm.task_pending_decision(args.task, args.decision)
+            msg = f"task {args.task} waits for decision {args.decision}"
+        if msg:
+            pm.commit_db(msg)
         return 0
     except FormatError as e:
         print(f"pm: {e}")

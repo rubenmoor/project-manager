@@ -1,6 +1,6 @@
 # pm
 
-Task queue for [Claude Code](https://claude.com/claude-code) workers. A project's work is **milestones → plans → tasks** in an SQLite database; `pm run` works the queue one task at a time with `claude -p`, waits out usage limits, and asks you the questions workers raise.
+Task queue for [Claude Code](https://claude.com/claude-code) workers. A project's work is **milestones → plans → tasks** in SQLite, kept in git as SQL text; `pm run` works the queue one task at a time with `claude -p`, waits out usage limits, and asks you the questions workers raise.
 
 One Python file, standard library only (Python 3.11+), plus `git` and `claude`. Install: `nix run github:<you>/pm`, `pipx install .`, or `python3 pm.py`.
 
@@ -13,7 +13,9 @@ pm milestone add   # editor: first line the title, the rest the description (Mar
 pm run             # work the queue; Ctrl-C stops, `pm run` continues
 ```
 
-Every command first makes sure of two things. If `project-manager.toml` is missing, it writes the defaults (database file name, worker command, usage-limit margin, log folder, editor, the two prompts below), adds the database to `.gitignore` and commits both. If the database is missing, it creates it with the schema (`SCHEMA` in `pm.py`). Otherwise `pm` never commits. Workers commit their own work; nothing is pushed.
+Every command first makes sure of two things. If `project-manager.toml` is missing, it writes the defaults (database file name, worker command, usage-limit margin, log folder, editor, the two prompts below) and commits it. If `tasks.sql` is missing, it writes it with the schema (`SCHEMA` in `pm.py`) and commits it. Nothing is pushed.
+
+**Storage.** `tasks.sql` is the database: the schema, then one `INSERT` per row, sorted by key. Every command loads it into an in-memory SQLite database; a change rewrites it. So `git diff` shows changed rows, branches that change different rows merge cleanly, and two branches that create the same id conflict on that line (fix the file, then `pm validate`). `pm` commits its own changes (`pm: …`); inside `pm run`, workers commit theirs together with their work. Hand edits are fine; `pm validate` checks them.
 
 **Flow.** A new milestone comes with a first plan, the masterplan (description "tbd."), and in it the task "write the masterplan" (`masterplan_prompt`): the worker writes the plan with `pm plan edit`. A new plan, or a plan whose title or description changes, queues "create tasks for plan N" (`plan_tasks_prompt`): the worker splits it into tasks and decisions. A milestone is `implemented` once it has no open task.
 
