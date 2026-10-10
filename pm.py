@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """pm: a project manager for Claude Code workers (README.md). Milestones -> plans -> tasks, plus decisions for the
-human, in an SQLite database in the project (tasks.dbsqlite; the schema is SCHEMA below). A new milestone queues a
-task that writes its first plan, the masterplan; a new or edited plan queues a task that splits it into tasks. The
+human, in an SQLite database in the project (tasks.dbsqlite; the schema is SCHEMA below). A new milestone comes with
+an empty first plan, the masterplan, and a task that writes it; a new or edited plan queues a task that splits it
+into tasks. The
 queue (the `queue` view): open tasks of open milestones that no pending decision blocks, highest priority first,
 then by milestone, plan and task. Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
 
@@ -35,9 +36,10 @@ log_dir = "pm-logs"
 # Editor for `pm milestone add`. Empty: the editor git uses.
 editor = ""
 
-# The task `pm milestone add` queues. {milestone_id} and {milestone_title} are replaced.
+# The task `pm milestone add` queues in the milestone's empty first plan.
+# {milestone_id}, {milestone_title} and {plan_id} are replaced.
 masterplan_prompt = '''
-Write the first plan of this milestone, the masterplan: expand on everything that needs to be done to achieve it.
+Write plan {plan_id}, the masterplan of this milestone: expand on everything that needs to be done to achieve it.
 '''
 
 # The task `pm plan add` and `pm plan edit` queue. {plan_id} and {plan_title} are replaced.
@@ -49,7 +51,7 @@ bring them in line with the plan.
 PROMPT_KEYS = ("masterplan_prompt", "plan_tasks_prompt")
 MILESTONE_STATES = ("open", "implemented")
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 SCHEMA = """
 CREATE TABLE milestone (
     id           INTEGER PRIMARY KEY,
@@ -64,20 +66,17 @@ CREATE TABLE plan (
     milestone_id INTEGER NOT NULL REFERENCES milestone (id),
     title        TEXT NOT NULL CHECK (trim(title) <> ''),
     priority     INTEGER,                                  -- NULL: 0
-    description  TEXT NOT NULL CHECK (trim(description) <> ''),
-    UNIQUE (milestone_id, id)
+    description  TEXT NOT NULL DEFAULT ''                  -- Markdown; empty: the masterplan, not written yet
 ) STRICT;
 
 CREATE TABLE task (
     id           INTEGER PRIMARY KEY,
-    milestone_id INTEGER NOT NULL REFERENCES milestone (id),
-    plan_id      INTEGER,                                  -- NULL: the masterplan task
+    plan_id      INTEGER NOT NULL REFERENCES plan (id),
     title        TEXT NOT NULL CHECK (trim(title) <> ''),
     status       TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done', 'dropped')),
     priority     INTEGER,                                  -- NULL: the plan's
     note         TEXT,                                     -- done: date, files or commit; dropped: reason
     description  TEXT NOT NULL DEFAULT '',                 -- Markdown
-    FOREIGN KEY (milestone_id, plan_id) REFERENCES plan (milestone_id, id),
     CONSTRAINT "an open task needs a description" CHECK (status <> 'open' OR trim(description) <> '')
 ) STRICT;
 
@@ -102,14 +101,15 @@ CREATE TABLE task_decision (                               -- the task waits whi
     PRIMARY KEY (task_id, decision_id)
 ) STRICT;
 
-CREATE INDEX task_milestone_plan ON task (milestone_id, plan_id);
+CREATE INDEX plan_milestone ON plan (milestone_id);
+CREATE INDEX task_plan ON task (plan_id);
 CREATE INDEX task_decision_decision ON task_decision (decision_id);
 
 CREATE VIEW queue AS
 SELECT coalesce(t.priority, p.priority, 0) AS priority, t.id AS task_id, t.title
 FROM task t
-JOIN milestone m ON m.id = t.milestone_id
-LEFT JOIN plan p ON p.id = t.plan_id
+JOIN plan p ON p.id = t.plan_id
+JOIN milestone m ON m.id = p.milestone_id
 WHERE m.status = 'open' AND t.status = 'open'
   AND NOT EXISTS (SELECT 1 FROM task_decision td JOIN decision d ON d.id = td.decision_id
                   WHERE td.task_id = t.id AND d.status = 'pending')
@@ -327,13 +327,13 @@ class Project:
     # --- milestones --------------------------------------------------------------------------
 
     def close_milestones(self):
-        """Mark open milestones implemented that have a plan and no open task."""
+        """Mark open milestones implemented that have no open task."""
         closed = []
         with self.connect(write=True) as db:
             for (mid,) in db.execute(
                     "SELECT m.id FROM milestone m WHERE m.status = 'open' "
-                    "AND EXISTS (SELECT 1 FROM plan p WHERE p.milestone_id = m.id) "
-                    "AND NOT EXISTS (SELECT 1 FROM task t WHERE t.milestone_id = m.id AND t.status = 'open') "
+                    "AND NOT EXISTS (SELECT 1 FROM task t JOIN plan p ON p.id = t.plan_id "
+                    "WHERE p.milestone_id = m.id AND t.status = 'open') "
                     "ORDER BY m.id").fetchall():
                 db.execute("UPDATE milestone SET status = 'implemented' WHERE id = ?", (mid,))
                 closed.append(mid)
@@ -425,12 +425,13 @@ class Project:
         return text.strip()
 
     def milestone_add(self, title, description=""):
-        """A new milestone and the task that writes its masterplan."""
+        """A new milestone with an empty first plan, the masterplan, and the task that writes it."""
         with self.connect(write=True) as db:
             mid = db.execute("INSERT INTO milestone (title, description) VALUES (?, ?)",
                              (title, (description or "").strip())).lastrowid
-            db.execute("INSERT INTO task (milestone_id, title, description) VALUES (?, 'write the masterplan', ?)",
-                       (mid, self.prompt("masterplan_prompt", milestone_id=mid, milestone_title=title)))
+            pid = db.execute("INSERT INTO plan (milestone_id, title) VALUES (?, 'masterplan')", (mid,)).lastrowid
+            db.execute("INSERT INTO task (plan_id, title, description) VALUES (?, 'write the masterplan', ?)",
+                       (pid, self.prompt("masterplan_prompt", milestone_id=mid, milestone_title=title, plan_id=pid)))
         return mid
 
     def milestone_set(self, mid, **fields):
@@ -447,9 +448,8 @@ class Project:
         title = f"create tasks for plan {pid}"
         if not db.execute("SELECT 1 FROM task WHERE plan_id = ? AND title = ? AND status = 'open'",
                           (pid, title)).fetchone():
-            db.execute("INSERT INTO task (milestone_id, plan_id, title, description) VALUES (?, ?, ?, ?)",
-                       (p["milestone_id"], pid, title,
-                        self.prompt("plan_tasks_prompt", plan_id=pid, plan_title=p["title"])))
+            db.execute("INSERT INTO task (plan_id, title, description) VALUES (?, ?, ?)",
+                       (pid, title, self.prompt("plan_tasks_prompt", plan_id=pid, plan_title=p["title"])))
 
     def plan_add(self, mid, title, description, prio=None):
         with self.connect(write=True) as db:
@@ -474,9 +474,9 @@ class Project:
 
     def task_add(self, pid, title, description, prio=None):
         with self.connect(write=True) as db:
-            p = self.get(db, "plan", pid)
-            return db.execute("INSERT INTO task (milestone_id, plan_id, title, priority, description) "
-                              "VALUES (?, ?, ?, ?, ?)", (p["milestone_id"], pid, title, prio, description.strip())).lastrowid
+            self.get(db, "plan", pid)
+            return db.execute("INSERT INTO task (plan_id, title, priority, description) VALUES (?, ?, ?, ?)",
+                              (pid, title, prio, description.strip())).lastrowid
 
     def task_set(self, tid, **fields):
         """Set fields of a task (status, note, priority); a value None clears it."""
@@ -500,20 +500,18 @@ class Project:
         """The task with its plan and milestone: the context a worker gets."""
         with self.connect() as db:
             t = self.get(db, "task", tid)
-            m = self.get(db, "milestone", t["milestone_id"])
-            p = self.get(db, "plan", t["plan_id"]) if t["plan_id"] is not None else None
+            p = self.get(db, "plan", t["plan_id"])
+            m = self.get(db, "milestone", p["milestone_id"])
             plans = db.execute("SELECT id, title FROM plan WHERE milestone_id = ? ORDER BY id", (m["id"],)).fetchall()
-            siblings = db.execute("SELECT id, status, title FROM task WHERE plan_id = ? ORDER BY id",
-                                  (p["id"],)).fetchall() if p else []
+            siblings = db.execute("SELECT id, status, title FROM task WHERE plan_id = ? ORDER BY id", (p["id"],)).fetchall()
             ds = db.execute("SELECT d.* FROM task_decision td JOIN decision d ON d.id = td.decision_id "
                             "WHERE td.task_id = ? ORDER BY d.id", (tid,)).fetchall()
-        prio = t["priority"] if t["priority"] is not None else (p and p["priority"]) or 0
+        prio = t["priority"] if t["priority"] is not None else p["priority"] or 0
         out = [f"# Milestone {m['id']}: {m['title']} ({m['status']}, created {m['created_date']})", "", m["description"],
-               "", "Plans: " + (", ".join(f"{x['id']} {x['title']}" for x in plans) or "none yet"), ""]
-        if p:
-            out += [f"# Plan {p['id']}: {p['title']} (priority {p['priority'] or 0})", "", p["description"], ""]
-            out += [f"- task {x['id']} [{x['status']}] {x['title']}" + (" ← this task" if x["id"] == tid else "")
-                    for x in siblings] + [""]
+               "", "Plans: " + ", ".join(f"{x['id']} {x['title']}" for x in plans), "",
+               f"# Plan {p['id']}: {p['title']} (priority {p['priority'] or 0})", "", p["description"] or "(empty)", ""]
+        out += [f"- task {x['id']} [{x['status']}] {x['title']}" + (" ← this task" if x["id"] == tid else "")
+                for x in siblings] + [""]
         out += [f"# Task {tid}: {t['title']} ({t['status']}, priority {prio})", ""]
         if t["note"]:
             out.append(f"note: {t['note']}")
@@ -638,8 +636,9 @@ class Project:
         for m in self.rows(
                 "SELECT m.id, m.title, m.created_date, "
                 "(SELECT count(*) FROM plan p WHERE p.milestone_id = m.id) AS plans, "
-                "(SELECT count(*) FROM task t WHERE t.milestone_id = m.id) AS tasks, "
-                "(SELECT count(*) FROM task t WHERE t.milestone_id = m.id AND t.status <> 'open') AS closed "
+                "(SELECT count(*) FROM task t JOIN plan p ON p.id = t.plan_id WHERE p.milestone_id = m.id) AS tasks, "
+                "(SELECT count(*) FROM task t JOIN plan p ON p.id = t.plan_id "
+                "WHERE p.milestone_id = m.id AND t.status <> 'open') AS closed "
                 "FROM milestone m WHERE m.status = 'open' ORDER BY m.id"):
             self.say(f"Milestone {m['id']}: {m['title']} (created {m['created_date']}): {m['plans']} plan(s), "
                      f"{m['closed']}/{m['tasks']} tasks closed")
