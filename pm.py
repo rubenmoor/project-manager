@@ -35,6 +35,22 @@ log_dir = "pm-logs"
 
 # Editor for `pm milestone add`. Empty: the editor git uses.
 editor = ""
+
+# Description of the task that `pm milestone add` queues to write the masterplan.
+# {milestone_id} and {milestone_title} are replaced.
+masterplan_prompt = '''
+Write the masterplan for milestone {milestone_id} ({milestone_title}). Read the milestone (`pm show` on this task)
+and the code it touches. Don't change code in this task.
+
+1. Goal, scope (in and out) and exit criteria that can be checked:
+   `pm masterplan {milestone_id} --goal … --scope … --exit-criteria …`
+2. Split the work into plans (`pm plan add {milestone_id} <title> --description …`), each with tasks small
+   enough for one worker run (`pm task add <plan id> <title> --description …`). A task's description says what
+   to do, which files, and how to check it is done. Set priorities only where the default order (plan, then
+   task) is wrong.
+3. Questions only a human can answer become decisions (`pm decision add … --blocks <task ids>`); don't guess.
+4. `pm masterplan {milestone_id} --status draft`
+'''
 """
 MILESTONE_STATES = ("open", "implemented")
 MASTER_STATES = ("stub", "draft", "agreed")
@@ -217,6 +233,8 @@ def load_config(root, out=sys.stderr):
     if not isinstance(m, int) or isinstance(m, bool) or m < 0:
         errors.append("limit_margin_minutes must be an integer >= 0")
     errors += [f"{k} must be a string" for k in ("log_dir", "editor") if not isinstance(config[k], str)]
+    if not isinstance(config["masterplan_prompt"], str) or not config["masterplan_prompt"].strip():
+        errors.append("masterplan_prompt must be a non-empty string")
     if errors:
         raise FormatError(f"{CONFIG_FILE}: " + "; ".join(errors))
     return config
@@ -421,14 +439,10 @@ class Project:
                              (title, (description or "").strip())).lastrowid
             db.execute("INSERT INTO masterplan (milestone_id) VALUES (?)", (mid,))
             pid = db.execute("INSERT INTO plan (milestone_id, title) VALUES (?, 'masterplan')", (mid,)).lastrowid
+            prompt = self.config["masterplan_prompt"].replace("{milestone_id}", str(mid))
             db.execute("INSERT INTO task (plan_id, title, description) VALUES (?, ?, ?)", (
                 pid, f"write the masterplan for milestone {mid}: {title}",
-                f"Read milestone {mid} and the code it touches. Write the masterplan's goal, scope (in and out) and "
-                f"exit criteria (checkable): `pm masterplan {mid} --goal … --scope … --exit-criteria …`. Split the "
-                f"work into plans (`pm plan add {mid} <title> --description …`), each with tasks small enough for "
-                "one worker run (`pm task add <plan id> <title> --description …`); priorities only where the "
-                "default order (plan, then task) is wrong. Questions only a human can answer become decisions "
-                f"(`pm decision add`). Then `pm masterplan {mid} --status draft`."))
+                prompt.replace("{milestone_title}", title).strip()))
         return mid
 
     def milestone_set(self, mid, **fields):
