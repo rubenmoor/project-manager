@@ -15,7 +15,7 @@ pm run             # work the queue; Ctrl-C stops, `pm run` continues
 
 Every command first makes sure of two things. If `project-manager.toml` is missing, it writes the defaults (database file name, worker command, usage-limit margin, log folder, editor, the two prompts below), adds the database to `.gitignore` and commits both. If the database is missing, it creates it with the schema (`SCHEMA` in `pm.py`). Otherwise `pm` never commits. Workers commit their own work; nothing is pushed.
 
-**Flow.** A new milestone comes with an empty first plan, the masterplan, and in it the task "write the masterplan" (`masterplan_prompt`): the worker writes the plan with `pm plan edit`. A new plan, or a plan whose title or description changes, queues "create tasks for plan N" (`plan_tasks_prompt`): the worker splits it into tasks and decisions. A milestone is `implemented` once it has no open task.
+**Flow.** A new milestone comes with a first plan, the masterplan (description "tbd."), and in it the task "write the masterplan" (`masterplan_prompt`): the worker writes the plan with `pm plan edit`. A new plan, or a plan whose title or description changes, queues "create tasks for plan N" (`plan_tasks_prompt`): the worker splits it into tasks and decisions. A milestone is `implemented` once it has no open task.
 
 **Data.** A milestone has a title, a description, a status and a created date; plans belong to a milestone, tasks to a plan, and `task_decision` links tasks to the decisions they wait for. Everything is referenced by its integer id.
 

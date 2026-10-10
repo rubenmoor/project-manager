@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """pm: a project manager for Claude Code workers (README.md). Milestones -> plans -> tasks, plus decisions for the
 human, in an SQLite database in the project (tasks.dbsqlite; the schema is SCHEMA below). A new milestone comes with
-an empty first plan, the masterplan, and a task that writes it; a new or edited plan queues a task that splits it
+a first plan, the masterplan (description "tbd."), and a task that writes it; a new or edited plan queues a task that splits it
 into tasks. The
 queue (the `queue` view): open tasks of open milestones that no pending decision blocks, highest priority first,
 then by milestone, plan and task. Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
@@ -36,7 +36,7 @@ log_dir = "pm-logs"
 # Editor for `pm milestone add`. Empty: the editor git uses.
 editor = ""
 
-# The task `pm milestone add` queues in the milestone's empty first plan.
+# The task `pm milestone add` queues in the milestone's first plan (description "tbd.").
 # {milestone_id}, {milestone_title} and {plan_id} are replaced.
 masterplan_prompt = '''
 Write plan {plan_id}, the masterplan of this milestone: expand on everything that needs to be done to achieve it.
@@ -51,7 +51,7 @@ bring them in line with the plan.
 PROMPT_KEYS = ("masterplan_prompt", "plan_tasks_prompt")
 MILESTONE_STATES = ("open", "implemented")
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 SCHEMA = """
 CREATE TABLE milestone (
     id           INTEGER PRIMARY KEY,
@@ -66,7 +66,7 @@ CREATE TABLE plan (
     milestone_id INTEGER NOT NULL REFERENCES milestone (id),
     title        TEXT NOT NULL CHECK (trim(title) <> ''),
     priority     INTEGER,                                  -- NULL: 0
-    description  TEXT NOT NULL DEFAULT ''                  -- Markdown; empty: the masterplan, not written yet
+    description  TEXT NOT NULL CONSTRAINT "a plan needs a description" CHECK (trim(description) <> '')
 ) STRICT;
 
 CREATE TABLE task (
@@ -434,11 +434,12 @@ class Project:
         return text.strip()
 
     def milestone_add(self, title, description=""):
-        """A new milestone with an empty first plan, the masterplan, and the task that writes it."""
+        """A new milestone with its first plan, the masterplan (a stub), and the task that writes it."""
         with self.connect(write=True) as db:
             mid = db.execute("INSERT INTO milestone (title, description) VALUES (?, ?)",
                              (title, (description or "").strip())).lastrowid
-            pid = db.execute("INSERT INTO plan (milestone_id, title) VALUES (?, 'masterplan')", (mid,)).lastrowid
+            pid = db.execute("INSERT INTO plan (milestone_id, title, description) VALUES (?, 'masterplan', 'tbd.')",
+                             (mid,)).lastrowid
             db.execute("INSERT INTO task (plan_id, title, description) VALUES (?, 'write the masterplan', ?)",
                        (pid, self.prompt("masterplan_prompt", milestone_id=mid, milestone_title=title, plan_id=pid)))
         return mid
@@ -461,8 +462,6 @@ class Project:
                        (pid, title, self.prompt("plan_tasks_prompt", plan_id=pid, plan_title=p["title"])))
 
     def plan_add(self, mid, title, description, prio=None):
-        if not description.strip():
-            raise FormatError("a new plan needs a description")
         with self.connect(write=True) as db:
             self.get(db, "milestone", mid)
             pid = db.execute("INSERT INTO plan (milestone_id, title, priority, description) VALUES (?, ?, ?, ?)",
@@ -520,7 +519,7 @@ class Project:
         prio = t["priority"] if t["priority"] is not None else p["priority"] or 0
         out = [f"# Milestone {m['id']}: {m['title']} ({m['status']}, created {m['created_date']})", "", m["description"],
                "", "Plans: " + ", ".join(f"{x['id']} {x['title']}" for x in plans), "",
-               f"# Plan {p['id']}: {p['title']} (priority {p['priority'] or 0})", "", p["description"] or "(empty)", ""]
+               f"# Plan {p['id']}: {p['title']} (priority {p['priority'] or 0})", "", p["description"], ""]
         out += [f"- task {x['id']} [{x['status']}] {x['title']}" + (" ← this task" if x["id"] == tid else "")
                 for x in siblings] + [""]
         out += [f"# Task {tid}: {t['title']} ({t['status']}, priority {prio})", ""]
