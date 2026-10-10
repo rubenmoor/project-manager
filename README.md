@@ -28,12 +28,11 @@ Every command first makes sure of two things. If `project-manager.toml` is missi
 | `status`, `queue`, `show <task>`, `validate` | Inspect |
 | `decide` | Answer pending decisions (number, text, `s` skip, `x <reason>` irrelevant: drops the tasks it blocks) |
 | `run [--once] [--dry-run]` | Work the queue until it is empty, a worker fails, or the tree has uncommitted changes |
-| `milestone add` | In your editor (as `git commit`): first line title, rest description; quit unsaved or save empty to abort |
-| `milestone add <title> < description.md` | Non-interactive: the description from stdin |
+| `milestone add`, `plan add <milestone>`, `task add <plan>` | In your editor (as `git commit`): first line title, rest description (Markdown); quit unsaved or save empty to abort |
+| `milestone add <title>`, `plan add <milestone> <title>`, `task add <plan> <title>` | Non-interactive: the description from stdin. `plan add` and `task add` also take `--priority` |
 | `milestone set <milestone>` | `--title`, `--status`, `--description` |
-| `plan add <milestone> <title> --description …` | `--priority` |
 | `plan edit <plan>` | `--title`, `--description`, `--priority <N\|none>` |
-| `task add <plan> <title> --description …`, `task done\|drop <task> <note>`, `task priority <task> <N\|none>` | `--priority` |
+| `task done\|drop <task> <note>`, `task priority <task> <N\|none>` | Close a task, set its priority |
 | `decision add <question>` | `--context`, `--option` (recommended first) |
 | `task-pending-decision <task> <decision>` | The task waits until the decision is answered |
 

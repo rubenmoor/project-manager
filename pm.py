@@ -121,9 +121,9 @@ CLAUDE.md or similar), then do task {id} and nothing else.
 
 {show}
 Milestones, plans, tasks and decisions are in {db}; change them only with these commands (a text value - reads stdin):
-  pm plan add <milestone id> "<title>" --description "<Markdown>"     a task to split it into tasks is queued
+  pm plan add <milestone id> "<title>" < description.md     a task to split it into tasks is queued
   pm plan edit <plan id> [--title …] [--description …] [--priority N]
-  pm task add <plan id> "<title>" --description "<Markdown>" [--priority N]   positive priority: earlier
+  pm task add <plan id> "<title>" [--priority N] < description.md     positive priority: earlier
   pm decision add "<question>" [--context "<text>"] [--option "<recommended>"] [--option …]   prints its id
   pm task-pending-decision <task id> <decision id>     the task waits until the human answers
   pm show <task id>
@@ -409,14 +409,23 @@ class Project:
             path.unlink(missing_ok=True)
         return text
 
-    def milestone_edit(self):
-        """`pm milestone add` without a title: the first line written in the editor is the title, the rest the
-        description. Returns the new milestone id, or None if aborted (not saved, or nothing written)."""
-        text = self.edit("PM_MILESTONE")
+    def require(self, table, rid):
+        with self.connect() as db:
+            self.get(db, table, rid)
+
+    def title_and_description(self, what, title):
+        """For `pm <what> add`: with a title, the description from stdin; without, both from the editor (first
+        line: title, the rest: description). None if the editor was quit without saving or saved empty."""
+        if title is not None:
+            return title, sys.stdin.read()
+        if not sys.stdin.isatty():
+            raise FormatError(f"`pm {what} add` without a title needs a terminal; give the title and pipe the "
+                              "description")
+        text = self.edit(f"PM_{what.upper()}")
         if text is None or not text.strip():
             return None
         title, _, description = text.strip().partition("\n")
-        return self.milestone_add(title.strip(), description.strip())
+        return title.strip(), description.strip()
 
     def prompt(self, key, **values):
         text = self.config[key]
@@ -452,6 +461,8 @@ class Project:
                        (pid, title, self.prompt("plan_tasks_prompt", plan_id=pid, plan_title=p["title"])))
 
     def plan_add(self, mid, title, description, prio=None):
+        if not description.strip():
+            raise FormatError("a new plan needs a description")
         with self.connect(write=True) as db:
             self.get(db, "milestone", mid)
             pid = db.execute("INSERT INTO plan (milestone_id, title, priority, description) VALUES (?, ?, ?, ?)",
@@ -698,8 +709,7 @@ def main(argv=None):
     p = sub.add_parser("plan", help="add or change plans").add_subparsers(dest="action", required=True)
     pa = p.add_parser("add", help="new plan; prints its id and queues the task that splits it into tasks")
     pa.add_argument("milestone", type=int)
-    pa.add_argument("title")
-    pa.add_argument("--description", required=True, type=text_arg, help="Markdown, or - for stdin")
+    pa.add_argument("title", nargs="?", help="then the description (Markdown) is read from stdin; without: editor")
     pa.add_argument("--priority", type=int)
     pe = p.add_parser("edit", help="change a plan; a new title or description queues the task that splits it again")
     pe.add_argument("plan", type=int)
@@ -710,8 +720,7 @@ def main(argv=None):
     t = sub.add_parser("task", help="add or change tasks").add_subparsers(dest="action", required=True)
     a = t.add_parser("add", help="new task; prints its id")
     a.add_argument("plan", type=int)
-    a.add_argument("title")
-    a.add_argument("--description", required=True, type=text_arg, help="Markdown, or - for stdin")
+    a.add_argument("title", nargs="?", help="then the description (Markdown) is read from stdin; without: editor")
     a.add_argument("--priority", type=int)
     for verb, text in [("done", "note: date, files or commit"), ("drop", "reason")]:
         x = t.add_parser(verb)
@@ -757,24 +766,28 @@ def main(argv=None):
             return pm.run(once=args.once, dry_run=args.dry_run)
         elif args.cmd == "milestone":
             if args.action == "add":
-                if args.title is None:
-                    mid = pm.milestone_edit()
-                    if mid is None:
-                        print("pm: aborted, no milestone added")
-                        return 1
-                else:
-                    mid = pm.milestone_add(args.title, sys.stdin.read())
-                print(mid)
+                if not (entry := pm.title_and_description("milestone", args.title)):
+                    print("pm: aborted, no milestone added")
+                    return 1
+                print(pm.milestone_add(*entry))
             else:
                 pm.milestone_set(args.milestone, title=args.title, status=args.status, description=args.description)
         elif args.cmd == "plan":
             if args.action == "add":
-                print(pm.plan_add(args.milestone, args.title, args.description, args.priority))
+                pm.require("milestone", args.milestone)
+                if not (entry := pm.title_and_description("plan", args.title)):
+                    print("pm: aborted, no plan added")
+                    return 1
+                print(pm.plan_add(args.milestone, *entry, args.priority))
             else:
                 pm.plan_edit(args.plan, args.title, args.description, args.priority)
         elif args.cmd == "task":
             if args.action == "add":
-                print(pm.task_add(args.plan, args.title, args.description, args.priority))
+                pm.require("plan", args.plan)
+                if not (entry := pm.title_and_description("task", args.title)):
+                    print("pm: aborted, no task added")
+                    return 1
+                print(pm.task_add(args.plan, *entry, args.priority))
             elif args.action == "done":
                 pm.task_set(args.task, status="done", note=args.note)
             elif args.action == "drop":
