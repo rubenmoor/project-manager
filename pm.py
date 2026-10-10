@@ -195,17 +195,24 @@ def qid_of(t):
 
 
 def load_config(root, out=sys.stderr):
-    """project-manager.toml in root; written from CONFIG_TEMPLATE and committed if missing."""
+    """project-manager.toml in root. If missing: written from CONFIG_TEMPLATE, the database added to
+    .gitignore, both committed."""
     path = Path(root) / CONFIG_FILE
     if not path.exists():
         path.write_text(CONFIG_TEMPLATE, encoding="utf-8")
+        ignore, line = Path(root) / ".gitignore", f"/{tomllib.loads(CONFIG_TEMPLATE)['database']}*"
+        text = ignore.read_text(encoding="utf-8") if ignore.exists() else ""
+        if line not in text.splitlines():
+            ignore.write_text(text + ("\n" if text and not text.endswith("\n") else "") + line + "\n", encoding="utf-8")
+        files = [CONFIG_FILE, ".gitignore"]
         try:
-            subprocess.run(["git", "add", "--", CONFIG_FILE], cwd=root, capture_output=True, check=True)
-            subprocess.run(["git", "commit", "-q", "-m", f"pm: add {CONFIG_FILE}", "--", CONFIG_FILE],
+            subprocess.run(["git", "add", "--", *files], cwd=root, capture_output=True, check=True)
+            subprocess.run(["git", "commit", "-q", "-m", f"pm: add {CONFIG_FILE}, ignore the database", "--", *files],
                            cwd=root, capture_output=True, check=True)
-            print(f"pm: wrote and committed {CONFIG_FILE} with the defaults", file=out)
+            print(f"pm: wrote {CONFIG_FILE} with the defaults, added the database to .gitignore, committed both",
+                  file=out)
         except subprocess.CalledProcessError as e:
-            print(f"pm: wrote {CONFIG_FILE} with the defaults; committing it failed: "
+            print(f"pm: wrote {CONFIG_FILE} and .gitignore; committing them failed: "
                   f"{(e.stderr or b'').decode().strip()}", file=out)
     try:
         config = tomllib.loads(path.read_text(encoding="utf-8"))
@@ -266,6 +273,12 @@ class Project:
             raise FormatError(f"{self.db}: {e}") from None
         finally:
             con.close()  # an open transaction is rolled back
+
+    def init_db(self):
+        """Create the database with the schema if it doesn't exist."""
+        if not self.db_path.exists():
+            with self.connect():
+                pass
 
     def rows(self, sql, *args):
         with self.connect() as db:
@@ -789,6 +802,7 @@ def main(argv=None):
         return 2
     try:
         pm = Project(root, load_config(root))
+        pm.init_db()
         if args.cmd == "validate":
             errors = pm.validate()
             print("\n".join(errors) if errors else f"{pm.db} is valid")

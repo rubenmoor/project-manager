@@ -14,7 +14,7 @@ pm sync      # masterplan stub: tasks that write the masterplan and split it int
 pm run       # work the queue; Ctrl-C stops, `pm run` continues
 ```
 
-The first command writes `project-manager.toml` with the defaults and commits it: database file name, worker command, usage-limit margin, log folder, editor. It creates the database (`tasks.dbsqlite`, schema: `SCHEMA` in `pm.py`) on first use; commit it or ignore it. Otherwise `pm` never commits. Workers commit their own work; nothing is pushed.
+Every command first makes sure of two things. If `project-manager.toml` is missing, it writes the defaults (database file name, worker command, usage-limit margin, log folder, editor), adds the database to `.gitignore` and commits both. If the database is missing, it creates it with the schema (`SCHEMA` in `pm.py`). Otherwise `pm` never commits. Workers commit their own work; nothing is pushed.
 
 **Queue** (the `queue` view): open tasks of open milestones that no pending decision blocks, by priority (task's, else plan's, else 0; highest first), then task ID (`M001-P002-T003`).
 
