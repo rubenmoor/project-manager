@@ -2,7 +2,7 @@
 
 Task queue for [Claude Code](https://claude.com/claude-code) workers. A project's work is **milestones → plans → tasks** in SQLite, kept in git as SQL text; `pm run` works the queue one task at a time with `claude -p`, waits out usage limits, and asks you the questions workers raise.
 
-One Python file, standard library only (Python 3.11+), plus `git` and `claude`. Install: `nix run github:<you>/pm`, `pipx install .`, or `python3 pm.py`.
+Python package `pm/` (code in `__init__.py`, the config template `project-manager.toml`), standard library only (Python 3.11+), plus `git` and `claude`. Install: `nix run github:<you>/pm`, `pipx install .`, or `python3 -m pm` with this repository on `PYTHONPATH`.
 
 ## Use
 
@@ -14,7 +14,7 @@ pm milestone add   # editor: first line the title, the rest the description (Mar
 pm run             # work the queue; Ctrl-C stops, `pm run` continues
 ```
 
-`pm init` writes `project-manager.toml` with the defaults (database file name, worker command, usage-limit margin, log folder, editor, the two prompts below) and `tasks.sql` with the schema (`SCHEMA` in `pm.py`), and commits them; run again, it adds only what is missing. Other commands need both files. Nothing is pushed.
+`pm init` writes `project-manager.toml` from the template `pm/project-manager.toml` (database file name, worker command, usage-limit margin, log folder, editor, the two prompts below) and `tasks.sql` with the schema (`SCHEMA` in `pm/__init__.py`), and commits them; run again, it adds only what is missing. Other commands need both files. Nothing is pushed.
 
 **Storage.** `tasks.sql` is the database: the schema, then one `INSERT` per row, sorted by key. Every command loads it into an in-memory SQLite database; a change rewrites it. So `git diff` shows changed rows, branches that change different rows merge cleanly, and two branches that create the same id conflict on that line (fix the file, then `pm validate`). `pm` commits its own changes (`pm: …`); inside `pm run`, workers commit theirs together with their work. Hand edits are fine; `pm validate` checks them.
 
@@ -44,4 +44,4 @@ Global: `--root <repo>`. A text value `-` reads stdin.
 
 ## Workers
 
-Each task runs the configured `worker` command (default: `claude -p` with `Bash Read Edit Write Glob Grep` allowed). The prompt (`WORKER_PROMPT` in `pm.py`) holds the task with its plan and milestone, and the `pm` commands the worker may use: `plan add`, `plan edit`, `task add`, `decision add`, `task-pending-decision`, `task done|drop`. **The worker has full shell access in the project.** Logs: `.git/pm-logs/task-<id>.log` (`log_dir`). On a usage limit, `pm` waits for the reset and retries.
+Each task runs the configured `worker` command (default: `claude -p` with `Bash Read Edit Write Glob Grep` allowed). The prompt (`WORKER_PROMPT` in `pm/__init__.py`) holds the task with its plan and milestone, and the `pm` commands the worker may use: `plan add`, `plan edit`, `task add`, `decision add`, `task-pending-decision`, `task done|drop`. **The worker has full shell access in the project.** Logs: `.git/pm-logs/task-<id>.log` (`log_dir`). On a usage limit, `pm` waits for the reset and retries.

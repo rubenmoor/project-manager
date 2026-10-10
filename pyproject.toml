@@ -14,4 +14,7 @@ dependencies = []
 pm = "pm:main"
 
 [tool.setuptools]
-py-modules = ["pm"]
+packages = ["pm"]
+
+[tool.setuptools.package-data]
+pm = ["project-manager.toml"]

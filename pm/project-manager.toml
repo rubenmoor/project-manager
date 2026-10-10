@@ -1,0 +1,29 @@
+# pm configuration. A setting left out gets its default from pm's own copy of this file.
+
+# Milestones, plans, tasks and decisions as SQL text, tracked by git; relative to the project root.
+database = "tasks.sql"
+
+# Command that works one task. "{prompt}" is replaced by the worker prompt.
+worker = ["claude", "-p", "{prompt}", "--permission-mode", "acceptEdits",
+          "--allowedTools", "Bash Read Edit Write Glob Grep"]
+
+# Minutes to wait after a usage limit resets before retrying the task.
+limit_margin_minutes = 5
+
+# Worker logs. A relative path is inside the git directory, so it is never tracked.
+log_dir = "pm-logs"
+
+# Editor for `pm milestone add`. Empty: the editor git uses.
+editor = ""
+
+# The task `pm milestone add` queues in the milestone's first plan (description "tbd.").
+# {milestone_id}, {milestone_title} and {plan_id} are replaced.
+masterplan_prompt = '''
+Write plan {plan_id}, the masterplan of this milestone: expand on everything that needs to be done to achieve it.
+'''
+
+# The task `pm plan add` and `pm plan edit` queue. {plan_id} and {plan_title} are replaced.
+plan_tasks_prompt = '''
+Split plan {plan_id} into tasks and identify all decisions that need to be made. If the plan already has tasks,
+bring them in line with the plan.
+'''

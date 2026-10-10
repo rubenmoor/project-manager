@@ -1,55 +1,24 @@
-#!/usr/bin/env python3
 """pm: a project manager for Claude Code workers (README.md). Milestones -> plans -> tasks, plus decisions for the
-human, in SQLite: the project keeps them as SQL text in tasks.sql, tracked by git, which every command loads
-into an in-memory database (the schema is SCHEMA below). A new milestone comes with
-a first plan, the masterplan (description "tbd."), and a task that writes it; a new or edited plan queues a task that splits it
-into tasks. The
-queue (the `queue` view): open tasks of open milestones that no pending decision blocks, highest priority first,
-then by milestone, plan and task. Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
+human, in SQLite: the project keeps them as SQL text in tasks.sql, tracked by git, which every command loads into an
+in-memory database (the schema is SCHEMA below). A new milestone comes with a first plan, the masterplan (description
+"tbd."), and a task that writes it; a new or edited plan queues a task that splits it into tasks. The queue (the
+`queue` view): open tasks of open milestones that no pending decision blocks, highest priority first, then by
+milestone, plan and task. Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
 
     pm init | status | queue | show <task> | validate | decide | run [--once] [--dry-run]
     pm milestone add|set …   pm plan add|edit …   pm task add|done|drop|priority …
     pm decision add …   pm task-pending-decision <task> <decision>
 
-Works on the git repository around the current directory. `pm init` writes the settings, project-manager.toml, and
-the database, and commits them. pm commits its own changes to tasks.sql; workers commit them with their work.
-Nothing is pushed.
+Works on the git repository around the current directory. `pm init` writes the settings, project-manager.toml (the
+template is the file of that name next to this one), and the database, and commits them. pm commits its own
+changes to tasks.sql; workers commit them with their work. Nothing is pushed.
 """
 import argparse, contextlib, datetime, fcntl, json, os, re, sqlite3, subprocess, sys, time, tomllib, zoneinfo
 from pathlib import Path
 
 
 CONFIG_FILE = "project-manager.toml"
-CONFIG_TEMPLATE = """# pm configuration. Delete this file to get the defaults back.
-
-# Milestones, plans, tasks and decisions as SQL text, tracked by git; relative to the project root.
-database = "tasks.sql"
-
-# Command that works one task. "{prompt}" is replaced by the worker prompt.
-worker = ["claude", "-p", "{prompt}", "--permission-mode", "acceptEdits",
-          "--allowedTools", "Bash Read Edit Write Glob Grep"]
-
-# Minutes to wait after a usage limit resets before retrying the task.
-limit_margin_minutes = 5
-
-# Worker logs. A relative path is inside the git directory, so it is never tracked.
-log_dir = "pm-logs"
-
-# Editor for `pm milestone add`. Empty: the editor git uses.
-editor = ""
-
-# The task `pm milestone add` queues in the milestone's first plan (description "tbd.").
-# {milestone_id}, {milestone_title} and {plan_id} are replaced.
-masterplan_prompt = '''
-Write plan {plan_id}, the masterplan of this milestone: expand on everything that needs to be done to achieve it.
-'''
-
-# The task `pm plan add` and `pm plan edit` queue. {plan_id} and {plan_title} are replaced.
-plan_tasks_prompt = '''
-Split plan {plan_id} into tasks and identify all decisions that need to be made. If the plan already has tasks,
-bring them in line with the plan.
-'''
-"""
+CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 PROMPT_KEYS = ("masterplan_prompt", "plan_tasks_prompt")
 MILESTONE_STATES = ("open", "implemented")
 
@@ -237,7 +206,7 @@ def load_config(root):
 
 def dump(con):
     """The database as SQL text: schema, then one INSERT per row, sorted by primary key."""
-    out = [f"-- pm database (pm.py). Change it with pm; after a hand edit run `pm validate`.",
+    out = [f"-- pm database. Change it with pm; after a hand edit run `pm validate`.",
            f"PRAGMA user_version = {SCHEMA_VERSION};", ""]
     tables = []
     for kind, name, sql in con.execute("SELECT type, name, sql FROM sqlite_schema WHERE sql IS NOT NULL ORDER BY rowid"):
@@ -879,6 +848,3 @@ def main(argv=None):
         print("\nStopped. `pm run` continues with the same task.")
         return 130
 
-
-if __name__ == "__main__":
-    sys.exit(main())
