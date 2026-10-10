@@ -88,11 +88,3 @@ The worker has unrestricted shell access in the project (`Bash`), which it needs
 2. Follow-up work: `pm task add` in the same plan, or `pm plan add` and tasks in it for work outside this plan. Priorities only where the default order (plan, then task ID) is wrong.
 3. Needs a human answer: `pm decision add "<question>" --context … --option <recommended> --option … --blocks <tasks>`. If the task itself is blocked, include it in `--blocks`, commit what's done, stop.
 4. Finished: `pm task done <task> "<YYYY-MM-DD, files or commit>"` or `pm task drop <task> "<reason>"`. Run the project's checks. Commit the work in one commit, message `<task> <title>`. Don't push. Stop.
-
-## Development
-
-```sh
-python3 -m unittest discover tests
-```
-
-The tests build throwaway git repositories and use a fake `claude` that works its task through `pm` commands.

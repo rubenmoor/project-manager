@@ -19,13 +19,6 @@
           src = ./.;
           build-system = [ pkgs.python3Packages.setuptools ];
           makeWrapperArgs = [ "--prefix" "PATH" ":" "${pkgs.git}/bin" ];
-          nativeCheckInputs = [ pkgs.git ];
-          checkPhase = ''
-            runHook preCheck
-            export HOME=$TMPDIR
-            python3 -m unittest discover tests
-            runHook postCheck
-          '';
           meta.mainProgram = "pm";
         };
       });

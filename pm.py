@@ -638,7 +638,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="pm", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", help="the project's git repository (default: the one around the current directory)")
     ap.add_argument("--db", default=DB_FILE, help=f"the database, relative to the root (default: {DB_FILE})")
-    ap.add_argument("--claude", default="claude", help=argparse.SUPPRESS)  # tests: a fake worker
+    ap.add_argument("--claude", default="claude", help=argparse.SUPPRESS)  # another claude executable
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name, text in [("status", "open milestones, the queue, pending decisions"), ("queue", "the whole queue"),
                        ("validate", "check the database"), ("sync", "stub masterplans, close milestones"),
