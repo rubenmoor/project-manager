@@ -9,8 +9,8 @@ Standard library only (Python 3.11+).
     pm milestone add|set …   pm masterplan <milestone> …   pm plan add|priority …
     pm task add|done|drop|block|priority …   pm decision add …
 
-Works on the git repository around the current directory. The database is listed in .git/info/exclude and never
-committed; workers commit their code. Nothing is pushed. Worker logs: .git/pm-logs/.
+Works on the git repository around the current directory. pm never commits or pushes; workers commit their work.
+Whether the database is committed or ignored is the project's choice. Worker logs: .git/pm-logs/.
 """
 import argparse, contextlib, datetime, json, re, sqlite3, subprocess, sys, time, zoneinfo
 from pathlib import Path
@@ -111,8 +111,8 @@ priorities (`--priority N`, positive = earlier) only where the default order (pl
 --option "<other>" --blocks <task ids>`. If {qid} itself is blocked, include it in --blocks, commit what \
 is done and stop.
 4. Finished: `pm task done {qid} "<YYYY-MM-DD, files or commit>"` or `pm task drop {qid} "<reason>"`. Run \
-the project's checks for what you changed. Commit your work in one commit, message "{qid} <title>" ({db} is \
-not tracked). Don't push. Stop.
+the project's checks for what you changed. Commit your work in one commit, message "{qid} <title>". Don't push. \
+Stop.
 
 The task, its plan and its milestone (`pm show {qid}` prints this again):
 
@@ -193,8 +193,7 @@ class Project:
     @contextlib.contextmanager
     def connect(self, write=False):
         """A connection with foreign keys on; write: one transaction, rolled back if the block raises.
-        The first connection creates the database and keeps it out of git."""
-        new = not self.db_path.exists()
+        The first connection creates the database."""
         con = sqlite3.connect(self.db_path, isolation_level=None)
         try:
             con.row_factory = sqlite3.Row
@@ -205,8 +204,6 @@ class Project:
                 version = SCHEMA_VERSION
             if version != SCHEMA_VERSION:
                 raise FormatError(f"{self.db}: schema version {version}, this pm knows {SCHEMA_VERSION}")
-            if new:
-                self.exclude()
             if write:
                 con.execute("BEGIN IMMEDIATE")
             yield con
@@ -218,16 +215,6 @@ class Project:
             raise FormatError(f"{self.db}: {e}") from None
         finally:
             con.close()  # an open transaction is rolled back
-
-    def exclude(self):
-        """List the database (and its journal) in .git/info/exclude: it is state, not source."""
-        path = Path(self.git("rev-parse", "--git-path", "info/exclude").strip())
-        path = path if path.is_absolute() else self.root / path
-        line = f"/{self.db}*"
-        text = path.read_text(encoding="utf-8") if path.exists() else ""
-        if line not in text.splitlines():
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text + ("" if not text or text.endswith("\n") else "\n") + line + "\n", encoding="utf-8")
 
     def rows(self, sql, *args):
         with self.connect() as db:
@@ -286,7 +273,8 @@ class Project:
         return subprocess.run(["git", *args], cwd=self.root, capture_output=True, text=True, check=True).stdout
 
     def dirty(self):
-        return bool(self.git("status", "--porcelain").strip())
+        """Uncommitted changes, apart from the database (and its journal), tracked or not."""
+        return bool(self.git("status", "--porcelain", "--", ".", f":(top,exclude,glob){self.db}*").strip())
 
     # --- validate ----------------------------------------------------------------------------
 

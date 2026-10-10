@@ -25,7 +25,7 @@ The first `pm` command in a repository creates the database `tasks.dbsqlite` in 
 
 ## Database
 
-`tasks.dbsqlite` holds the queue's live state, not source code: `pm` lists it in `.git/info/exclude` when it creates it, so it is never committed. The schema is `SCHEMA` in `pm.py`; `PRAGMA user_version` holds its version, and `pm` refuses a database of another version.
+Commit `tasks.dbsqlite` or add it to `.gitignore`, as the project prefers. `pm` doesn't care: it never commits, and its check for uncommitted changes ignores the database either way. The schema is `SCHEMA` in `pm.py`; `PRAGMA user_version` holds its version, and `pm` refuses a database of another version.
 
 | Table | Rows |
 |---|---|
@@ -55,7 +55,7 @@ Computed, never stored (the `queue` view): every task with status `open` in a mi
 | `pm validate` | Checks the database (integrity, foreign keys, schema version); exit 1 on errors |
 | `pm sync` | Writes a masterplan stub for every open milestone without one: plan P001 "write masterplan" with T001 (goal, scope, exit criteria) and T002 (split into plans and tasks, then masterplan status `draft`). Sets `implemented` on an open milestone whose masterplan isn't `stub` and whose tasks are all closed |
 | `pm decide` | Asks about each pending decision in the terminal: a number picks an option, other text is the answer, `s` skips, `x <reason>` marks it irrelevant. An irrelevant decision drops the open tasks it blocks |
-| `pm run` | Loop: validate → sync → decide (only at a terminal, only if decisions are pending) → work the first queued task → sync. Stops when no milestone is open, the queue is empty, the tree is dirty, the database is invalid, or a worker fails. `--once`: one task. `--dry-run`: print the next worker command and change nothing |
+| `pm run` | Loop: validate → sync → decide (only at a terminal, only if decisions are pending) → work the first queued task → sync. Stops when no milestone is open, the queue is empty, the tree has uncommitted changes apart from the database, the database is invalid, or a worker fails. `--once`: one task. `--dry-run`: print the next worker command and change nothing |
 | `pm milestone add <title> [--description <text\|->]` | New open milestone; prints its ID |
 | `pm milestone set <Mnnn> [--title …] [--status …] [--description …]` | Set milestone fields |
 | `pm masterplan <Mnnn> [--status …] [--goal …] [--scope …] [--exit-criteria …]` | Set masterplan fields |
@@ -74,7 +74,7 @@ Working a task: `claude -p "<worker prompt>" --permission-mode acceptEdits --all
 | Result | Condition | `pm run` |
 |---|---|---|
 | limit | the log's last 5 lines name a usage limit and when it resets | waits until 5 min after the reset, then runs the same task again |
-| failed | exit ≠ 0, database invalid, uncommitted changes, or the task still open and not blocked | stops and shows why |
+| failed | exit ≠ 0, database invalid, uncommitted changes (apart from the database), or the task still open and not blocked | stops and shows why |
 | done | the task is `done` or `dropped` | next task |
 | blocked | the task is open and a pending decision blocks it | next task; `pm decide` unblocks it |
 

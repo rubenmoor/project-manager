@@ -86,14 +86,22 @@ class PMTest(unittest.TestCase):
 
     # --- database ---
 
-    def test_database_is_created_with_the_schema_and_kept_out_of_git(self):
+    def test_database_is_created_with_the_schema(self):
         self.assertTrue((self.root / pm.DB_FILE).exists())
-        self.assertIn(f"/{pm.DB_FILE}*", (self.root / ".git" / "info" / "exclude").read_text())
-        self.assertNotIn(pm.DB_FILE, self.git("ls-files"))
-        self.assertFalse(self.pm.dirty())
         self.assertEqual(self.pm.rows("PRAGMA user_version")[0]["user_version"], pm.SCHEMA_VERSION)
         self.assertEqual(self.pm.rows("SELECT description FROM milestone WHERE id = 'M002'")[0]["description"],
                          "goal of M002")
+
+    def test_the_database_never_makes_the_tree_dirty_tracked_or_not(self):
+        self.assertIn(pm.DB_FILE, self.git("ls-files"))  # setUp committed it
+        self.pm.sync()
+        self.assertIn(pm.DB_FILE, self.git("status", "--porcelain"))
+        self.assertFalse(self.pm.dirty())
+        self.git("rm", "-q", "--cached", pm.DB_FILE)
+        self.git("commit", "-qm", "untrack")
+        self.assertFalse(self.pm.dirty())
+        (self.root / "other.txt").write_text("x")
+        self.assertTrue(self.pm.dirty())
 
     def test_newer_schema_is_refused(self):
         self.raw("PRAGMA user_version = 99")
@@ -270,7 +278,7 @@ class PMTest(unittest.TestCase):
         self.assertEqual(other.sync(), ["M001 masterplan stub"])
         self.assertEqual([q for _, q, _ in other.queue()], ["M001-P001-T001", "M001-P001-T002"])
         self.assertEqual(self.ids(), [])  # tasks.dbsqlite is untouched: M002 has no masterplan yet
-        self.assertFalse(self.pm.dirty())
+        self.assertFalse(other.dirty())
 
     def test_cli(self):
         self.pm.sync()
