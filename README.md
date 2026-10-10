@@ -15,7 +15,9 @@ pm run             # work the queue; Ctrl-C stops, `pm run` continues
 
 Every command first makes sure of two things. If `project-manager.toml` is missing, it writes the defaults (database file name, worker command, usage-limit margin, log folder, editor), adds the database to `.gitignore` and commits both. If the database is missing, it creates it with the schema (`SCHEMA` in `pm.py`). Otherwise `pm` never commits. Workers commit their own work; nothing is pushed.
 
-**Queue** (the `queue` view): open tasks of open milestones that no pending decision blocks, by priority (task's, else plan's, else 0; highest first), then task ID (`M001-P002-T003`).
+Milestones, plans, tasks and decisions are rows with integer ids; plans point to their milestone, tasks to their plan, and `task_decision` links tasks and decisions (many to many). Commands take these ids.
+
+**Queue** (the `queue` view): open tasks of open milestones that no pending decision blocks, by priority (task's, else plan's, else 0; highest first), then milestone, plan and task id.
 
 ## Commands
 
@@ -24,16 +26,16 @@ Every command first makes sure of two things. If `project-manager.toml` is missi
 | `status`, `queue`, `show <task>`, `validate` | Inspect |
 | `decide` | Answer pending decisions (number, text, `s` skip, `x <reason>` irrelevant: drops the tasks it blocks) |
 | `run [--once] [--dry-run]` | Work the queue until it is empty, a worker fails, or the tree has uncommitted changes; marks a milestone `implemented` once its masterplan isn't a stub and all its tasks are closed |
-| `milestone add` | Adds the milestone, a masterplan stub and plan P001 with task T001 "write the masterplan" (goal, scope, exit criteria, plans and tasks). In your editor (as `git commit`): first line title, rest description; quit unsaved or save empty to abort |
+| `milestone add` | Adds the milestone, a masterplan stub and a plan with one task, "write the masterplan" (goal, scope, exit criteria, plans and tasks). In your editor (as `git commit`): first line title, rest description; quit unsaved or save empty to abort |
 | `milestone add <title> < description.md` | Non-interactive: the description from stdin |
-| `milestone set <M>` | `--title`, `--status`, `--description` |
-| `masterplan <M>` | `--status`, `--goal`, `--scope`, `--exit-criteria` |
-| `plan add <M> <title>`, `plan priority <M-P> <N\|none>` | `--description`, `--priority` |
-| `task add <M-P> <title> --description …`, `task done\|drop <task> <note>`, `task block <task> <D>`, `task priority <task> <N\|none>` | `--priority`, `--blocked-by` |
+| `milestone set <milestone>` | `--title`, `--status`, `--description` |
+| `masterplan <milestone>` | `--status`, `--goal`, `--scope`, `--exit-criteria` |
+| `plan add <milestone> <title>`, `plan priority <plan> <N\|none>` | `--description`, `--priority` |
+| `task add <plan> <title> --description …`, `task done\|drop <task> <note>`, `task block <task> <decision>`, `task priority <task> <N\|none>` | `--priority`, `--blocked-by` |
 | `decision add <question>` | `--context`, `--option` (recommended first), `--blocks <task>…` |
 
 Global: `--root <repo>`. A text value `-` reads stdin.
 
 ## Workers
 
-Each task runs the configured `worker` command (default: `claude -p` with `Bash Read Edit Write Glob Grep` allowed), its prompt being `WORKER_PROMPT` (in `pm.py`) and `pm show <task>`. **The worker has full shell access in the project.** It closes its task with `pm task done|drop`, or blocks it with `pm decision add --blocks`, and commits. Logs: `.git/pm-logs/<task>.log` (`log_dir`). On a usage limit, `pm` waits for the reset and retries.
+Each task runs the configured `worker` command (default: `claude -p` with `Bash Read Edit Write Glob Grep` allowed), its prompt being `WORKER_PROMPT` (in `pm.py`) and `pm show <task>`. **The worker has full shell access in the project.** It closes its task with `pm task done|drop`, or blocks it with `pm decision add --blocks`, and commits. Logs: `.git/pm-logs/task-<id>.log` (`log_dir`). On a usage limit, `pm` waits for the reset and retries.
