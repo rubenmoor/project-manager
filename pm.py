@@ -5,7 +5,7 @@ the schema is SCHEMA below). The task queue is computed (the `queue` view): open
 pending decision blocks, highest priority first, then by task id. Worked one task at a time by `claude -p`.
 Standard library only (Python 3.11+).
 
-    pm status | queue | show <task> | validate | sync | decide | run [--once] [--dry-run]
+    pm status | queue | show <task> | validate | decide | run [--once] [--dry-run]
     pm milestone add|set …   pm masterplan <milestone> …   pm plan add|priority …
     pm task add|done|drop|block|priority …   pm decision add …
 
@@ -51,7 +51,7 @@ CREATE TABLE milestone (
     description TEXT NOT NULL DEFAULT ''                   -- Markdown: what it achieves, how you know it's done
 ) STRICT;
 
-CREATE TABLE masterplan (                                  -- missing until `pm sync` writes the stub
+CREATE TABLE masterplan (                                  -- a stub until P001-T001 writes it
     milestone     TEXT PRIMARY KEY REFERENCES milestone (id),
     status        TEXT NOT NULL DEFAULT 'stub' CHECK (status IN ('stub', 'draft', 'agreed')),
     goal          TEXT NOT NULL DEFAULT '',
@@ -357,37 +357,12 @@ class Project:
         except FormatError as e:
             return [str(e)]
 
-    # --- sync --------------------------------------------------------------------------------
+    # --- milestones -------------------------------------------------------------------------
 
-    @staticmethod
-    def stub(db, mid, description):
-        """Masterplan stub and plan P001, which writes the masterplan (README.md, sync)."""
-        db.execute("INSERT INTO masterplan (milestone, goal) VALUES (?, ?)", (mid, description))
-        if db.execute("SELECT 1 FROM plan WHERE milestone = ?", (mid,)).fetchone():
-            return
-        db.execute("INSERT INTO plan (milestone, id, title, description) VALUES (?, 'P001', 'write masterplan', ?)",
-                   (mid, f"Turn milestone {mid} into a masterplan with plans and tasks."))
-        db.executemany("INSERT INTO task (milestone, plan, id, title, description) VALUES (?, 'P001', ?, ?, ?)", [
-            (mid, "T001", "write goal, scope and exit criteria of the masterplan",
-             f"Read milestone {mid} (`pm show {mid}-P001-T001` shows it), the plans and decisions it cites and "
-             f"the code it touches. Write the masterplan's goal, scope (in and out) and exit criteria (checkable): "
-             f"`pm masterplan {mid} --goal … --scope … --exit-criteria …`. Every question only a human "
-             "can answer becomes a decision (`pm decision add`)."),
-            (mid, "T002", "split the milestone into plans with tasks",
-             f"Split {mid} into plans P002, P003, … (`pm plan add {mid} <title> --description …`), each with tasks "
-             f"small enough for one worker run (`pm task add {mid}-Pnnn <title> --description …`). Order them with "
-             "priorities where the default (plan, then task id) is wrong. Then "
-             f"`pm masterplan {mid} --status draft`.")])
-
-    def sync(self):
-        """Stub masterplans of open milestones that have none; close finished milestones. Returns the changes."""
+    def close_milestones(self):
+        """Mark open milestones implemented whose masterplan isn't a stub and whose tasks are all closed."""
         changes = []
         with self.connect(write=True) as db:
-            for mid, description in db.execute(
-                    "SELECT id, description FROM milestone WHERE status = 'open' "
-                    "AND id NOT IN (SELECT milestone FROM masterplan) ORDER BY id").fetchall():
-                self.stub(db, mid, description)
-                changes.append(f"{mid} masterplan stub")
             for (mid,) in db.execute(
                     "SELECT m.id FROM milestone m JOIN masterplan mp ON mp.milestone = m.id "
                     "WHERE m.status = 'open' AND mp.status <> 'stub' "
@@ -395,7 +370,7 @@ class Project:
                     "AND NOT EXISTS (SELECT 1 FROM task t WHERE t.milestone = m.id AND t.status = 'open') "
                     "ORDER BY m.id").fetchall():
                 db.execute("UPDATE milestone SET status = 'implemented' WHERE id = ?", (mid,))
-                changes.append(f"{mid} implemented")
+                changes.append(mid)
         return changes
 
     # --- decide ------------------------------------------------------------------------------
@@ -484,6 +459,16 @@ class Project:
             mid = next_id("M", [r[0] for r in db.execute("SELECT id FROM milestone")], 3)
             db.execute("INSERT INTO milestone (id, title, description) VALUES (?, ?, ?)",
                        (mid, title, (description or "").strip()))
+            db.execute("INSERT INTO masterplan (milestone) VALUES (?)", (mid,))
+            db.execute("INSERT INTO plan (milestone, id, title) VALUES (?, 'P001', 'masterplan')", (mid,))
+            db.execute("INSERT INTO task (milestone, plan, id, title, description) VALUES (?, 'P001', 'T001', ?, ?)", (
+                mid, f"write the masterplan for {mid} {title}",
+                f"Read milestone {mid} and the code it touches. Write the masterplan's goal, scope (in and out) and "
+                f"exit criteria (checkable): `pm masterplan {mid} --goal … --scope … --exit-criteria …`. Split the "
+                f"work into plans (`pm plan add {mid} <title> --description …`), each with tasks small enough for "
+                f"one worker run (`pm task add {mid}-Pnnn <title> --description …`); priorities only where the "
+                f"default order (plan, then task id) is wrong. Questions only a human can answer become decisions "
+                f"(`pm decision add`). Then `pm masterplan {mid} --status draft`."))
         return mid
 
     def milestone_set(self, mid, **fields):
@@ -654,15 +639,15 @@ class Project:
             if errors:
                 self.say("the database has errors:\n  " + "\n  ".join(errors))
                 return 1
-            if dry_run:  # changes nothing: no sync
+            if dry_run:
                 q = self.queue()
                 if not q:
-                    self.say("Queue empty (`pm sync` stubs masterplans for open milestones).")
+                    self.say("Queue empty.")
                 else:
                     self.say(" ".join(f"'{a}'" if " " in a else a for a in self.worker_command(q[0][1])))
                 return 0
-            for change in self.sync():
-                self.say(f"sync: {change}")
+            for mid in self.close_milestones():
+                self.say(f"{mid} implemented")
             if interactive and self.pending():
                 self.decide(ask)
             if not self.rows("SELECT 1 FROM milestone WHERE status = 'open'"):
@@ -682,8 +667,8 @@ class Project:
                 self.say(f"\n{qid} failed: {message}")
                 return 1
             self.say(f"\n{qid}: {result} ({message})")
-            for change in self.sync():
-                self.say(f"sync: {change}")
+            for mid in self.close_milestones():
+                self.say(f"{mid} implemented")
             if once:
                 return 0
 
@@ -735,7 +720,7 @@ def main(argv=None):
     ap.add_argument("--root", help="the project's git repository (default: the one around the current directory)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name, text in [("status", "open milestones, the queue, pending decisions"), ("queue", "the whole queue"),
-                       ("validate", "check the database"), ("sync", "stub masterplans, close milestones"),
+                       ("validate", "check the database"),
                        ("decide", "answer pending decisions in the terminal")]:
         sub.add_parser(name, help=text)
     s = sub.add_parser("show", help="a task with its plan, milestone and decisions")
@@ -816,9 +801,6 @@ def main(argv=None):
             pm.print_queue()
         elif args.cmd == "show":
             print(pm.show(args.task), end="")
-        elif args.cmd == "sync":
-            changes = pm.sync()
-            print("sync: " + (", ".join(changes) if changes else "nothing to do"))
         elif args.cmd == "decide":
             pm.decide()
         elif args.cmd == "run":

@@ -10,8 +10,7 @@ In the project's git repository:
 
 ```sh
 pm milestone add   # editor: first line the title, the rest the description (Markdown)
-pm sync      # masterplan stub: tasks that write the masterplan and split it into plans and tasks
-pm run       # work the queue; Ctrl-C stops, `pm run` continues
+pm run             # work the queue; Ctrl-C stops, `pm run` continues
 ```
 
 Every command first makes sure of two things. If `project-manager.toml` is missing, it writes the defaults (database file name, worker command, usage-limit margin, log folder, editor), adds the database to `.gitignore` and commits both. If the database is missing, it creates it with the schema (`SCHEMA` in `pm.py`). Otherwise `pm` never commits. Workers commit their own work; nothing is pushed.
@@ -23,10 +22,9 @@ Every command first makes sure of two things. If `project-manager.toml` is missi
 | | |
 |---|---|
 | `status`, `queue`, `show <task>`, `validate` | Inspect |
-| `sync` | Stub masterplans of new milestones; mark finished milestones `implemented` |
 | `decide` | Answer pending decisions (number, text, `s` skip, `x <reason>` irrelevant: drops the tasks it blocks) |
-| `run [--once] [--dry-run]` | Work the queue until it is empty, a worker fails, or the tree has uncommitted changes |
-| `milestone add` | In your editor (as `git commit`): first line title, rest description; quit unsaved or save empty to abort |
+| `run [--once] [--dry-run]` | Work the queue until it is empty, a worker fails, or the tree has uncommitted changes; marks a milestone `implemented` once its masterplan isn't a stub and all its tasks are closed |
+| `milestone add` | Adds the milestone, a masterplan stub and plan P001 with task T001 "write the masterplan" (goal, scope, exit criteria, plans and tasks). In your editor (as `git commit`): first line title, rest description; quit unsaved or save empty to abort |
 | `milestone add <title> < description.md` | Non-interactive: the description from stdin |
 | `milestone set <M>` | `--title`, `--status`, `--description` |
 | `masterplan <M>` | `--status`, `--goal`, `--scope`, `--exit-criteria` |
