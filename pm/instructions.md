@@ -13,7 +13,7 @@
 
 ## Model
 
-- **Milestone:** title, description (Markdown), status `open` | `implemented`, created date. `pm milestone add` also creates its first plan, the **masterplan** (description "tbd."), and the task "write the masterplan". A milestone becomes `implemented` by itself once it has no open task.
+- **Milestone:** title, description (Markdown), status `open` | `implemented`, created date. `pm milestone add` also creates its first plan, the **masterplan** (description "tbd."), and the task "write the masterplan". Once a milestone has no open task, `pm run` queues the task "post-milestone cleanup" in its first plan (description: `cleanup_prompt` in project-manager.toml); when that is closed too, the milestone becomes `implemented`.
 - **Plan:** belongs to a milestone; title, description (required), priority (optional). Adding a plan, or changing its title or description, queues the task "create tasks for plan N", unless that task is already open.
 - **Task:** belongs to a plan; title, description (required while open), status `open` | `done` | `dropped`, note (done: date and files or commit; dropped: the reason), priority (optional; default: the plan's, else 0).
 - **Decision:** question, context, options (the recommended one first), status `pending` | `answered` | `irrelevant`. A task linked to a pending decision waits. When the human answers, the task becomes workable again and its worker sees the answer in `pm show`. When a decision is marked irrelevant, the open tasks waiting for it are dropped.
@@ -147,6 +147,8 @@ Agents don't start `pm run`: a worker is already one task of a run.
 **Split a plan into tasks** (task "create tasks for plan P"): add one `pm task add P "<title>"` per task, in the order they should run. Use priorities only where that order is wrong. Raise a decision for each question only the human can answer, and link the tasks that wait for it. Then `pm task done <your task> "<date>, tasks …"`.
 
 **Write a part's plan** (a task of the masterplan): `pm plan add <milestone> "<part title>"` with the full description. That queues its "create tasks" task. Then close your task.
+
+**Post-milestone cleanup** (task "post-milestone cleanup"): work through its description for the whole project, not just this milestone. Change other milestones with `pm milestone set`; for a pending decision that seems obsolete, say so in a new decision for the human. Then close your task.
 
 **Your task needs an answer first:** add the decision, `pm task-pending-decision <your task> <decision>`, commit what's done, stop. `pm run` reports the task as blocked and goes on with the next.
 

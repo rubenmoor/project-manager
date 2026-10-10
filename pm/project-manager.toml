@@ -29,3 +29,14 @@ plan_tasks_prompt = '''
 Split plan {plan_id} into tasks and identify all decisions that need to be made. If the plan already has tasks,
 bring them in line with the plan.
 '''
+
+# The task "post-milestone cleanup", queued in a milestone's first plan once all its other tasks are closed; the
+# milestone is implemented when it is closed too.
+cleanup_prompt = '''
+* rewrite top-level .md files to reflect the current state of the project
+* remove files that have become redundant
+* suggest entirely new files, if necessary
+* delete code that isn't actually used
+* check pending decisions if they are still relevant and really pending
+* check other milestones if their contents are up-to-date and update them if necessary
+'''

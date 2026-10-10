@@ -1,7 +1,8 @@
 """pm: a project manager for Claude Code workers (README.md). Milestones -> plans -> tasks, plus decisions for the
 human, in SQLite: the project keeps them as SQL text in tasks.sql, tracked by git, which every command loads into an
 in-memory database (the schema is SCHEMA below). A new milestone comes with a first plan, the masterplan (description
-"tbd."), and a task that writes it; a new or edited plan queues a task that splits it into tasks. The queue (the
+"tbd."), and a task that writes it; a new or edited plan queues a task that splits it into tasks; a milestone whose
+tasks are all closed gets a last one, the post-milestone cleanup, before it is implemented. The queue (the
 `queue` view): open tasks of open milestones that no pending decision blocks, highest priority first, then by
 milestone, plan and task. Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
 
@@ -21,7 +22,8 @@ CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
 EPILOG = "Agents (LLMs): read `pm instructions` first, the full reference with examples for every command."
-PROMPT_KEYS = ("masterplan_prompt", "plan_tasks_prompt")
+PROMPT_KEYS = ("masterplan_prompt", "plan_tasks_prompt", "cleanup_prompt")
+CLEANUP_TITLE = "post-milestone cleanup"
 MILESTONE_STATES = ("open", "implemented")
 
 SCHEMA_VERSION = 5
@@ -347,17 +349,26 @@ class Project:
     # --- milestones --------------------------------------------------------------------------
 
     def close_milestones(self):
-        """Mark open milestones implemented that have no open task."""
-        closed = []
+        """For each open milestone without an open task: queue the cleanup task in its first plan, or, if its last
+        task is that task, mark it implemented. Returns (implemented ids, ids that got the cleanup task)."""
+        closed, cleanup = [], []
         with self.connect(write=True) as db:
             for (mid,) in db.execute(
                     "SELECT m.id FROM milestone m WHERE m.status = 'open' "
                     "AND NOT EXISTS (SELECT 1 FROM task t JOIN plan p ON p.id = t.plan_id "
                     "WHERE p.milestone_id = m.id AND t.status = 'open') "
                     "ORDER BY m.id").fetchall():
-                db.execute("UPDATE milestone SET status = 'implemented' WHERE id = ?", (mid,))
-                closed.append(mid)
-        return closed
+                last = db.execute("SELECT t.title FROM task t JOIN plan p ON p.id = t.plan_id "
+                                  "WHERE p.milestone_id = ? ORDER BY t.id DESC LIMIT 1", (mid,)).fetchone()
+                pid = db.execute("SELECT min(id) FROM plan WHERE milestone_id = ?", (mid,)).fetchone()[0]
+                if pid is not None and (last is None or last[0] != CLEANUP_TITLE):
+                    db.execute("INSERT INTO task (plan_id, title, description) VALUES (?, ?, ?)",
+                               (pid, CLEANUP_TITLE, self.prompt("cleanup_prompt")))
+                    cleanup.append(mid)
+                else:
+                    db.execute("UPDATE milestone SET status = 'implemented' WHERE id = ?", (mid,))
+                    closed.append(mid)
+        return closed, cleanup
 
     # --- decide ------------------------------------------------------------------------------
 
@@ -621,11 +632,13 @@ class Project:
         return "failed", f"exit 0, but task {tid} is still open and not blocked\n{tail}"
 
     def close_and_commit(self):
-        closed = self.close_milestones()
-        for mid in closed:
-            self.say(f"milestone {mid} implemented")
-        if closed:
-            self.commit_db(", ".join(f"milestone {mid} implemented" for mid in closed))
+        closed, cleanup = self.close_milestones()
+        done = [f"milestone {mid}: {CLEANUP_TITLE} queued" for mid in cleanup] + \
+               [f"milestone {mid} implemented" for mid in closed]
+        for line in done:
+            self.say(line)
+        if done:
+            self.commit_db(", ".join(done))
 
     def run(self, once=False, dry_run=False, interactive=None, ask=input):
         interactive = sys.stdin.isatty() if interactive is None else interactive
