@@ -9,11 +9,12 @@ One Python file, standard library only (Python 3.11+), plus `git` and `claude`. 
 In the project's git repository:
 
 ```sh
+pm init            # write project-manager.toml and tasks.sql, commit them
 pm milestone add   # editor: first line the title, the rest the description (Markdown)
 pm run             # work the queue; Ctrl-C stops, `pm run` continues
 ```
 
-Every command first makes sure of two things. If `project-manager.toml` is missing, it writes the defaults (database file name, worker command, usage-limit margin, log folder, editor, the two prompts below) and commits it. If `tasks.sql` is missing, it writes it with the schema (`SCHEMA` in `pm.py`) and commits it. Nothing is pushed.
+`pm init` writes `project-manager.toml` with the defaults (database file name, worker command, usage-limit margin, log folder, editor, the two prompts below) and `tasks.sql` with the schema (`SCHEMA` in `pm.py`), and commits them; run again, it adds only what is missing. Other commands need both files. Nothing is pushed.
 
 **Storage.** `tasks.sql` is the database: the schema, then one `INSERT` per row, sorted by key. Every command loads it into an in-memory SQLite database; a change rewrites it. So `git diff` shows changed rows, branches that change different rows merge cleanly, and two branches that create the same id conflict on that line (fix the file, then `pm validate`). `pm` commits its own changes (`pm: …`); inside `pm run`, workers commit theirs together with their work. Hand edits are fine; `pm validate` checks them.
 
@@ -27,6 +28,7 @@ Every command first makes sure of two things. If `project-manager.toml` is missi
 
 | | |
 |---|---|
+| `init` | Write and commit the config and the database (missing ones only) |
 | `status`, `queue`, `show <task>`, `validate` | Inspect |
 | `decide` | Answer pending decisions (number, text, `s` skip, `x <reason>` irrelevant: drops the tasks it blocks) |
 | `run [--once] [--dry-run]` | Work the queue until it is empty, a worker fails, or the tree has uncommitted changes |

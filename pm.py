@@ -7,12 +7,12 @@ into tasks. The
 queue (the `queue` view): open tasks of open milestones that no pending decision blocks, highest priority first,
 then by milestone, plan and task. Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
 
-    pm status | queue | show <task> | validate | decide | run [--once] [--dry-run]
+    pm init | status | queue | show <task> | validate | decide | run [--once] [--dry-run]
     pm milestone add|set …   pm plan add|edit …   pm task add|done|drop|priority …
     pm decision add …   pm task-pending-decision <task> <decision>
 
-Works on the git repository around the current directory. Settings: project-manager.toml, written with defaults
-and committed by the first command. pm commits its own changes to tasks.sql; workers commit them with their work.
+Works on the git repository around the current directory. `pm init` writes the settings, project-manager.toml, and
+the database, and commits them. pm commits its own changes to tasks.sql; workers commit them with their work.
 Nothing is pushed.
 """
 import argparse, contextlib, datetime, fcntl, json, os, re, sqlite3, subprocess, sys, time, tomllib, zoneinfo
@@ -185,18 +185,33 @@ def today():
 
 
 
-def load_config(root, out=sys.stderr):
-    """project-manager.toml in root; written from CONFIG_TEMPLATE and committed if missing."""
+def init(root, out=sys.stdout):
+    """`pm init`: write what is missing of project-manager.toml (the defaults) and the database (the schema),
+    and commit it in one commit."""
+    created = []
+    if not (Path(root) / CONFIG_FILE).exists():
+        (Path(root) / CONFIG_FILE).write_text(CONFIG_TEMPLATE, encoding="utf-8")
+        created.append(CONFIG_FILE)
+    pm = Project(root, load_config(root), out)
+    if not pm.db_path.exists():
+        with pm.connect(write=True):
+            pass
+        created.append(pm.db)
+    if not created:
+        print(f"pm: already initialized ({CONFIG_FILE}, {pm.db})", file=out)
+        return
+    try:
+        pm.git("add", "--", *created)
+        pm.git("commit", "-q", "-m", "pm: init", "--", *created)
+        print(f"pm: wrote and committed {', '.join(created)}", file=out)
+    except subprocess.CalledProcessError as e:
+        print(f"pm: wrote {', '.join(created)}; committing failed: {e.stderr.strip()}", file=out)
+
+
+def load_config(root):
     path = Path(root) / CONFIG_FILE
     if not path.exists():
-        path.write_text(CONFIG_TEMPLATE, encoding="utf-8")
-        try:
-            subprocess.run(["git", "add", "--", CONFIG_FILE], cwd=root, capture_output=True, check=True)
-            subprocess.run(["git", "commit", "-q", "-m", f"pm: add {CONFIG_FILE}", "--", CONFIG_FILE],
-                           cwd=root, capture_output=True, check=True)
-            print(f"pm: wrote and committed {CONFIG_FILE} with the defaults", file=out)
-        except subprocess.CalledProcessError as e:
-            print(f"pm: wrote {CONFIG_FILE}; committing it failed: {(e.stderr or b'').decode().strip()}", file=out)
+        raise FormatError(f"no {CONFIG_FILE}: run `pm init` first")
     try:
         config = tomllib.loads(path.read_text(encoding="utf-8"))
     except tomllib.TOMLDecodeError as e:
@@ -295,13 +310,6 @@ class Project:
                 raise FormatError(f"{self.db}: {e}") from None
             finally:
                 con.close()
-
-    def init_db(self):
-        """Write the database file with the schema, and commit it, if it doesn't exist."""
-        if not self.db_path.exists():
-            with self.connect(write=True):
-                pass
-            self.commit_db(f"add {self.db}")
 
     def commit_db(self, message):
         """Commit the database file if it changed; not in a worker, which commits it with its work."""
@@ -730,7 +738,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="pm", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", help="the project's git repository (default: the one around the current directory)")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name, text in [("status", "open milestones, the queue, pending decisions"), ("queue", "the whole queue"),
+    for name, text in [("init", f"write {CONFIG_FILE} and the database (missing ones only) and commit them"),
+                       ("status", "open milestones, the queue, pending decisions"), ("queue", "the whole queue"),
                        ("validate", "check the database"),
                        ("decide", "answer pending decisions in the terminal")]:
         sub.add_parser(name, help=text)
@@ -789,8 +798,12 @@ def main(argv=None):
         print("pm: not inside a git repository (or pass --root)")
         return 2
     try:
+        if args.cmd == "init":
+            init(root)
+            return 0
         pm = Project(root, load_config(root))
-        pm.init_db()
+        if not pm.db_path.exists():
+            raise FormatError(f"no {pm.db}: run `pm init` first")
         if args.cmd == "validate":
             errors = pm.validate()
             print("\n".join(errors) if errors else f"{pm.db} is valid")
