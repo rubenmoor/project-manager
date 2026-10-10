@@ -17,4 +17,4 @@ pm = "pm:main"
 packages = ["pm"]
 
 [tool.setuptools.package-data]
-pm = ["project-manager.toml"]
+pm = ["project-manager.toml", "instructions.md"]

@@ -5,7 +5,7 @@ in-memory database (the schema is SCHEMA below). A new milestone comes with a fi
 `queue` view): open tasks of open milestones that no pending decision blocks, highest priority first, then by
 milestone, plan and task. Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
 
-    pm init | status | queue | show <task> | validate | decide | run [--once] [--dry-run]
+    pm init | status | queue | show <task> | validate | decide | run [--once] [--dry-run] | instructions
     pm milestone add|set …   pm plan add|edit …   pm task add|done|drop|priority …
     pm decision add …   pm task-pending-decision <task> <decision>
 
@@ -19,6 +19,8 @@ from pathlib import Path
 
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
+INSTRUCTIONS = Path(__file__).parent / "instructions.md"
+EPILOG = "Agents (LLMs): read `pm instructions` first, the full reference with examples for every command."
 PROMPT_KEYS = ("masterplan_prompt", "plan_tasks_prompt")
 MILESTONE_STATES = ("open", "implemented")
 
@@ -98,6 +100,7 @@ Milestones, plans, tasks and decisions are in {db}; change them only with these 
   pm decision add "<question>" [--context "<text>"] [--option "<recommended>"] [--option …]   prints its id
   pm task-pending-decision <task id> <decision id>     the task waits until the human answers
   pm show <task id>
+Every command with examples, and recipes for the usual tasks: `pm instructions`.
 
 Finish with `pm task done {id} "<YYYY-MM-DD, files or commit>"` or `pm task drop {id} "<reason>"`, then commit your \
 work together with {db} in one commit, message "task {id}: <title>". If task {id} itself needs an answer first, make it pending on the \
@@ -704,13 +707,15 @@ def prio_arg(v):
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(prog="pm", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap = argparse.ArgumentParser(prog="pm", description=__doc__, epilog=EPILOG,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", help="the project's git repository (default: the one around the current directory)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name, text in [("init", f"write {CONFIG_FILE} and the database (missing ones only) and commit them"),
                        ("status", "open milestones, the queue, pending decisions"), ("queue", "the whole queue"),
                        ("validate", "check the database"),
-                       ("decide", "answer pending decisions in the terminal")]:
+                       ("decide", "answer pending decisions in the terminal"),
+                       ("instructions", "the full reference for agents: every command with examples, recipes")]:
         sub.add_parser(name, help=text)
     s = sub.add_parser("show", help="a task with its plan, milestone and decisions")
     s.add_argument("task", type=int)
@@ -762,6 +767,9 @@ def main(argv=None):
     tpd.add_argument("decision", type=int)
 
     args = ap.parse_args(argv)
+    if args.cmd == "instructions":
+        print(INSTRUCTIONS.read_text(encoding="utf-8"), end="")
+        return 0
     root = args.root or git_root()
     if root is None:
         print("pm: not inside a git repository (or pass --root)")
