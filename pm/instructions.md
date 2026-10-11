@@ -163,7 +163,7 @@ Agents don't start `pm run`: a worker is already one task of a run.
 
 **Split a plan into tasks** (task "create tasks for plan P"): add one `pm task add P "<subject>"` per task, in the order they should run. Priorities: see "Priorities". Raise a decision for each question only the human can answer, and link the tasks that wait for it. Then `pm task done <your task> "<date>, tasks …"`.
 
-**Write a part's plan** (a task of the masterplan): `pm plan add <milestone> "<part subject>" --priority N` with the full body, N by "Priorities". That queues its "create tasks" task. Then close your task.
+**Write a part's plan** (a task of the masterplan): `pm plan list` first, then `pm plan add <milestone> "<part subject>" --priority N` with the full body, N by "Priorities". That queues its "create tasks" task. Then close your task.
 
 **Post-milestone cleanup** (task "post-milestone cleanup"): work through its body for the whole project, not just this milestone. Change other milestones with `pm milestone set`; for a pending decision that seems obsolete, say so in a new decision for the human. Then close your task.
 
