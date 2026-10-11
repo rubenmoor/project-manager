@@ -1,6 +1,6 @@
 # pm
 
-Task queue for [Claude Code](https://claude.com/claude-code) workers. A project's work is **milestones → plans → tasks** in SQLite, kept in git as SQL text; `pm run` works the queue one task at a time with `claude -p`, waits out usage limits, and asks you the questions workers raise.
+Task queue for [Claude Code](https://claude.com/claude-code) workers. A project's work is **milestones → plans → tasks** in SQLite, kept in git as SQL text; `pm run` works the queue one task at a time with `claude -p`, waits out usage limits; the questions workers raise wait for `pm decide` while it goes on with other tasks.
 
 Python package `pm/` (code in `__init__.py`, the config template `project-manager.toml`, the agent reference `instructions.md`), standard library only (Python 3.11+), plus `git` and `claude`. Install: `nix run github:<you>/pm`, `pipx install .`, or `python3 -m pm` with this repository on `PYTHONPATH`.
 
@@ -45,7 +45,7 @@ The first line is the subject, the rest the body. The same without the editor, e
 pm milestone add "Users can export their data as CSV" < milestone-csv-export.md
 ```
 
-Questions you can't answer yet don't need to block the milestone: workers turn them into decisions, and `pm run` asks you (`pm decide`).
+Questions you can't answer yet don't need to block the milestone: workers turn them into decisions, `pm run` skips the tasks they block, and you answer with `pm decide`.
 
 `pm init` writes `project-manager.toml` from the template `pm/project-manager.toml` (database file name, worker command, usage-limit margin, log folder, editor, the three prompts below, the priority settings, the sign-offs) and commits it; run again, it does nothing. Adjust the defaults (e.g. the database file name) before the first other command: that one writes `tasks.sql` with the schema (`SCHEMA` in `pm/__init__.py`) if it is missing. Other commands need the config. Nothing is pushed.
 
@@ -69,7 +69,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 - `"masterplans"`: "create tasks for plan N" of a masterplan waits for "Sign off the masterplan of milestone M"
 - `"plans"`: "create tasks for plan N" of every other plan waits for "Sign off plan N"
 - `"task-queue"`: work tasks wait for "Sign off the task queue", one decision for all work tasks without a sign-off; asked when the first of them heads the queue, i.e. after all planning work; work tasks added later need a new one
-- pm creates the decision when such a task heads the queue; interactive `pm run` asks it at once, otherwise the run stops when the queue is empty
+- pm creates the decision when such a task heads the queue; `pm run` never asks, it goes on with the unblocked tasks and stops when the queue is empty
 - the only answer is approve (`pm decide`: `a`); skip it to stop and change plans or tasks first; `pm decide` shows the plan or the waiting tasks as they are then
 - no `x` (irrelevant) for sign-offs
 

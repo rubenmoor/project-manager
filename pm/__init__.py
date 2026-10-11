@@ -967,8 +967,7 @@ class Project:
         if done:
             self.commit_db(", ".join(done))
 
-    def run(self, once=False, dry_run=False, interactive=None, ask=input):
-        interactive = sys.stdin.isatty() if interactive is None else interactive
+    def run(self, once=False, dry_run=False):
         while True:
             errors = self.validate()
             if errors:
@@ -979,14 +978,12 @@ class Project:
                 if not q:
                     self.say("Queue empty.")
                 elif level := self.needs_signoff(q[0][1]):
-                    self.say(f"task {q[0][1]} needs a sign-off ({level}); `pm run` would ask for it")
+                    self.say(f"task {q[0][1]} needs a sign-off ({level}); `pm run` would request it")
                 else:
                     self.say(" ".join(f"'{a}'" if " " in a else a for a in self.worker_command(q[0][1])))
                 return 0
             self.close_stale_run()
             self.close_and_commit()
-            if interactive and self.pending() and self.decide(ask):
-                self.commit_db("decisions answered")
             if not self.rows("SELECT 1 FROM milestone WHERE status = 'open'"):
                 self.say("No open milestone (`pm milestone add` starts one).")
                 return 0
