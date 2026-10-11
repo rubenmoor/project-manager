@@ -47,7 +47,7 @@ pm milestone add "Users can export their data as CSV" < milestone-csv-export.md
 
 Questions you can't answer yet don't need to block the milestone: workers turn them into decisions, and `pm run` asks you (`pm decide`).
 
-`pm init` writes `project-manager.toml` from the template `pm/project-manager.toml` (database file name, worker command, usage-limit margin, log folder, editor, the three prompts below, the priority settings) and commits it; run again, it does nothing. Adjust the defaults (e.g. the database file name) before the first other command: that one writes `tasks.sql` with the schema (`SCHEMA` in `pm/__init__.py`) if it is missing. Other commands need the config. Nothing is pushed.
+`pm init` writes `project-manager.toml` from the template `pm/project-manager.toml` (database file name, worker command, usage-limit margin, log folder, editor, the three prompts below, the priority settings, the sign-offs) and commits it; run again, it does nothing. Adjust the defaults (e.g. the database file name) before the first other command: that one writes `tasks.sql` with the schema (`SCHEMA` in `pm/__init__.py`) if it is missing. Other commands need the config. Nothing is pushed.
 
 **Storage.** `tasks.sql` is the database: the schema, then one `INSERT` per row, sorted by key. Every command loads it into an in-memory SQLite database; a change rewrites it. So `git diff` shows changed rows, branches that change different rows merge cleanly, and two branches that create the same id conflict on that line (fix the file, then `pm validate`). `pm` commits its own changes (`pm: …`); inside `pm run`, a worker stages its work and `pm run` commits it with `tasks.sql` (`task <id>: <subject>`, the task's note as body). Changes the worker left unstaged fail the task and stop the run. Hand edits are fine; `pm validate` checks them. No migrations: a `tasks.sql` of another schema version is refused.
 
@@ -58,11 +58,20 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 - milestone: subject, body, status, `created_at`, `implemented_at`
 - plan: belongs to a milestone; subject, body, priority, `created_at`, `created_by_task`
 - task: belongs to a plan; subject, body, kind (`work`, `plan`: writes a plan; made by pm: `masterplan`, `split` for "create tasks for plan N", `cleanup`), status, priority, note, `created_at`, `retired_at` (done or dropped), `created_by_task`
-- decision: subject, body, options, status, answer or reason, `created_at`, `closed_at`, `created_by_task`; `task_decision` links tasks to the decisions they wait for
+- decision: subject, body, options, status, answer or reason, `created_at`, `closed_at`, `created_by_task`, `signoff` (made by pm, see below); `task_decision` links tasks to the decisions they wait for
 - run: one worker run of `pm run`: task, start, end, result (`done`, `blocked`, `failed`, `limit`), reason, exit code, `base_commit` (HEAD at the start); from claude's JSON output: model, session, turns, tokens (input, output, cache read, cache creation), cost in USD
 - timestamps in UTC; `created_by_task`: the task whose worker created the row (`PM_TASK`), empty for the human or pm
 
 **Queue** (the `queue` view): open tasks of open milestones that no pending decision blocks, by priority (task's, else plan's, else 0; highest first), then milestone, plan and task id.
+
+**Sign-offs.** `signoff` in project-manager.toml, empty by default: then only the decisions workers raise stop the run. Each value makes `pm run` wait for your approval before the next task of a kind runs:
+
+- `"masterplans"`: "create tasks for plan N" of a masterplan waits for "Sign off the masterplan of milestone M"
+- `"plans"`: "create tasks for plan N" of every other plan waits for "Sign off plan N"
+- `"task-queue"`: work tasks wait for "Sign off the task queue", one decision for all work tasks without a sign-off; asked when the first of them heads the queue, i.e. after all planning work; work tasks added later need a new one
+- pm creates the decision when such a task heads the queue; interactive `pm run` asks it at once, otherwise the run stops when the queue is empty
+- the only answer is approve (`pm decide`: `a`); skip it to stop and change plans or tasks first; `pm decide` shows the plan or the waiting tasks as they are then
+- no `x` (irrelevant) for sign-offs
 
 **Priorities.** Set by workers, following rules in project-manager.toml:
 
@@ -79,7 +88,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 | `instructions` | The full reference for agents (`pm/instructions.md`): every command with examples, recipes, errors |
 | `status`, `queue`, `plans list`, `show <task>`, `validate` | Inspect |
 | `runs [task]` | Worker runs: start, duration, result, turns, tokens, cost; totals per task kind |
-| `decide` | Answer pending decisions (number, text, `s` skip, `x <reason>` irrelevant: drops the tasks it blocks) |
+| `decide` | Answer pending decisions (number, text, `s` skip, `x <reason>` irrelevant: drops the tasks it blocks; sign-offs: `a` approve, `s` skip) |
 | `run [--once] [--dry-run]` | Work the queue until it is empty, a worker fails, or the tree has uncommitted changes |
 | `milestone add`, `plan add <milestone>`, `task add <plan>` | In your editor (as `git commit`): first line subject, rest body (Markdown); quit unsaved or save empty to abort |
 | `milestone add <subject>`, `plan add <milestone> <subject>`, `task add <plan> <subject>` | Non-interactive: the body from stdin. `plan add` and `task add` also take `--priority`; `task add` `--kind plan` |

@@ -30,8 +30,11 @@ MILESTONE_STATES = ("open", "implemented")
 # work: the default; plan: writes a plan; masterplan, split ("create tasks for plan N"), cleanup: made by pm only
 TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup")
 PLANNING_KINDS = ("plan", "masterplan", "split")
+# `signoff` in project-manager.toml → decision.signoff; a sign-off's only answer is SIGNOFF_ANSWER
+SIGNOFF_LEVELS = {"masterplans": "masterplan", "plans": "plan", "task-queue": "task-queue"}
+SIGNOFF_ANSWER = "approve"
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -81,6 +84,9 @@ CREATE TABLE decision (
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     closed_at       TEXT,
     created_by_task INTEGER REFERENCES task (id),
+    signoff         TEXT CHECK (signoff IN ('masterplan', 'plan', 'task-queue')),  -- made by pm; NULL: a question
+    CONSTRAINT "a sign-off is only approved"
+    CHECK (signoff IS NULL OR status <> 'irrelevant' AND coalesce(answer, 'approve') = 'approve'),
     CONSTRAINT "pending: no answer, reason or closed_at; answered: answer and closed_at; irrelevant: reason and closed_at"
     CHECK (status = 'pending' AND answer IS NULL AND reason IS NULL AND closed_at IS NULL
            OR status = 'answered' AND answer IS NOT NULL AND closed_at IS NOT NULL
@@ -263,6 +269,9 @@ def load_config(root):
     p = config["planning_priority"]
     if not isinstance(p, int) or isinstance(p, bool):
         errors.append("planning_priority must be an integer")
+    s = config["signoff"]
+    if not isinstance(s, list) or not all(isinstance(x, str) and x in SIGNOFF_LEVELS for x in s):
+        errors.append("signoff must be a list of " + ", ".join(f'"{x}"' for x in SIGNOFF_LEVELS))
     if errors:
         raise FormatError(f"{CONFIG_FILE}: " + "; ".join(errors))
     return config
@@ -444,8 +453,11 @@ class Project:
         """Close a pending decision. Answered: its tasks unblock by themselves. Irrelevant: the open tasks it
         blocks are dropped."""
         with self.connect(write=True) as db:
-            if self.get(db, "decision", did)["status"] != "pending":
+            d = self.get(db, "decision", did)
+            if d["status"] != "pending":
                 raise FormatError(f"decision {did} is not pending")
+            if d["signoff"] and (irrelevant is not None or answer != SIGNOFF_ANSWER):
+                raise FormatError(f"decision {did} is a sign-off: its only answer is {SIGNOFF_ANSWER!r}")
             if irrelevant is None:
                 db.execute("UPDATE decision SET status = 'answered', answer = ?, closed_at = ? WHERE id = ?",
                            (answer, now(), did))
@@ -465,6 +477,12 @@ class Project:
                 "SELECT t.id FROM task_decision td JOIN task t ON t.id = td.task_id "
                 "WHERE td.decision_id = ? AND t.status = 'open' ORDER BY t.id", d["id"])]
             self.say(f"\nDecision {d['id']}: {d['subject']}")
+            if d["signoff"]:
+                self.say("  " + self.signoff_view(d["id"], d["signoff"]).replace("\n", "\n  "))
+                if ask(f"Answer [a = {SIGNOFF_ANSWER}, s = skip]: ").strip().lower() in ("a", SIGNOFF_ANSWER):
+                    self.resolve(d["id"], answer=SIGNOFF_ANSWER)
+                    closed += 1
+                continue
             if blocks:
                 self.say(f"  blocks task(s) {', '.join(blocks)}")
             if d["body"]:
@@ -483,6 +501,72 @@ class Project:
                 self.resolve(d["id"], answer=reply)
             closed += 1
         return closed
+
+    # --- sign-offs ---------------------------------------------------------------------------
+
+    def signoff_level(self, db, t):
+        """The sign-off task t needs under `signoff` in project-manager.toml, or None."""
+        if t["kind"] == "split":
+            master = db.execute("SELECT 1 FROM task WHERE plan_id = ? AND kind = 'masterplan'", (t["plan_id"],))
+            level = "masterplan" if master.fetchone() else "plan"
+        else:
+            level = "task-queue" if t["kind"] == "work" else None
+        return level if level in [SIGNOFF_LEVELS[x] for x in self.config["signoff"]] else None
+
+    @staticmethod
+    def signed_off(db, tid, level):
+        return db.execute("SELECT 1 FROM task_decision td JOIN decision d ON d.id = td.decision_id "
+                          "WHERE td.task_id = ? AND d.signoff = ? AND d.status = 'answered'", (tid, level)).fetchone()
+
+    def needs_signoff(self, tid):
+        """The sign-off task tid needs and doesn't have yet, or None."""
+        with self.connect() as db:
+            level = self.signoff_level(db, self.get(db, "task", tid))
+            return level if level and not self.signed_off(db, tid, level) else None
+
+    def request_signoff(self, tid):
+        """Make task tid wait for its sign-off. Plan or masterplan: a new decision. Task queue: the pending one, else a
+        new one, for every open work task of open milestones without a sign-off. Returns the decision id."""
+        with self.connect(write=True) as db:
+            t = self.get(db, "task", tid)
+            level = self.signoff_level(db, t)
+            did = None
+            if level == "task-queue":
+                did = db.execute("SELECT min(id) FROM decision WHERE signoff = 'task-queue' AND status = 'pending'"
+                                 ).fetchone()[0]
+                tids = [r[0] for r in db.execute(
+                    "SELECT t.id FROM task t JOIN plan p ON p.id = t.plan_id JOIN milestone m ON m.id = p.milestone_id "
+                    "WHERE m.status = 'open' AND t.status = 'open' AND t.kind = 'work' ORDER BY t.id").fetchall()
+                        if not self.signed_off(db, r[0], level)]
+                subject = "Sign off the task queue"
+            else:
+                p = self.get(db, "plan", t["plan_id"])
+                tids = [tid]
+                subject = (f"Sign off the masterplan of milestone {p['milestone_id']}" if level == "masterplan"
+                           else f"Sign off plan {p['id']}: {p['subject']}")
+            if did is None:
+                did = db.execute("INSERT INTO decision (subject, options, signoff) VALUES (?, ?, ?)",
+                                 (subject, json.dumps([SIGNOFF_ANSWER]), level)).lastrowid
+            for x in tids:
+                self.block(db, x, did)
+        return did
+
+    def signoff_view(self, did, level):
+        """What a pending sign-off approves, as it is now: the plan, or the waiting tasks by plan."""
+        ts = self.rows("SELECT t.id, t.subject, p.id AS plan_id, p.subject AS plan_subject, p.body AS plan_body "
+                       "FROM task_decision td JOIN task t ON t.id = td.task_id JOIN plan p ON p.id = t.plan_id "
+                       "WHERE td.decision_id = ? AND t.status = 'open' ORDER BY p.id, t.id", did)
+        if not ts:
+            return "No open task waits for it."
+        if level != "task-queue":
+            return "\n\n".join(f"# Plan {t['plan_id']}: {t['plan_subject']}\n\n{t['plan_body']}" for t in ts)
+        out, plan = [], None
+        for t in ts:
+            if t["plan_id"] != plan:
+                plan = t["plan_id"]
+                out.append(f"Plan {plan}: {t['plan_subject']}")
+            out.append(f"  task {t['id']}: {t['subject']}")
+        return "\n".join(out)
 
     # --- edit commands -----------------------------------------------------------------------
 
@@ -649,7 +733,8 @@ class Project:
         out += [t["body"], ""]
         for d in ds:
             said = d["answer"] or d["reason"] or ""
-            out.append(f"Decision {d['id']} ({d['status']}): {d['subject']}" + (f" → {said}" if said else ""))
+            out.append(f"Decision {d['id']} ({d['status']}{', sign-off' if d['signoff'] else ''}): {d['subject']}"
+                       + (f" → {said}" if said else ""))
         if runs:
             out += ["", "Runs:"] + ["  " + self.run_line(r) for r in runs]
         return "\n".join(out).rstrip() + "\n"
@@ -863,6 +948,8 @@ class Project:
                 q = self.queue()
                 if not q:
                     self.say("Queue empty.")
+                elif level := self.needs_signoff(q[0][1]):
+                    self.say(f"task {q[0][1]} needs a sign-off ({level}); `pm run` would ask for it")
                 else:
                     self.say(" ".join(f"'{a}'" if " " in a else a for a in self.worker_command(q[0][1])))
                 return 0
@@ -877,6 +964,11 @@ class Project:
                 n = len(self.pending())
                 self.say(f"Queue empty; {n} pending decision(s)." + (" Answer them with `pm decide`." if n else ""))
                 return 0
+            if level := self.needs_signoff(q[0][1]):
+                did = self.request_signoff(q[0][1])
+                self.say(f"task {q[0][1]} waits for sign-off: decision {did} ({level})")
+                self.commit_db(f"sign-off requested: decision {did}")
+                continue
             if self.dirty():
                 self.say("The working tree has uncommitted changes; commit or stash them first.")
                 return 1

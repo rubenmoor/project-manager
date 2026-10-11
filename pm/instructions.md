@@ -23,6 +23,7 @@
   - `plan`, `masterplan`, `split`: priority `planning_priority` (1000) unless given
   - checked by `pm run` when done: `plan` and `masterplan` must add or change a plan, `split` must leave its plan with tasks; otherwise the task is committed and the run stops
 - **Decision:** subject (the question), body (context), options (the recommended one first), status `pending` | `answered` | `irrelevant`. A task linked to a pending decision waits. When the human answers, the task becomes workable again and its worker sees the answer in `pm show`. When a decision is marked irrelevant, the open tasks waiting for it are dropped.
+- **Sign-off:** a decision pm makes, per `signoff` in project-manager.toml, before a plan is split into tasks or before work tasks run; its only answer is approve. Shown as `Decision 4 (answered, sign-off): …`. Not for agents to create or answer.
 - **Recorded by pm, not set by you:** `created_at` everywhere, `retired_at` of tasks, `implemented_at`, `closed_at`; `created_by_task` (your task, when you create a plan, task or decision as a worker); one **run** per worker run, with result, time, tokens and cost.
 - **Queue:** open tasks of open milestones that no pending decision blocks; highest priority first, then by milestone, plan and task id. `pm run` takes the first one.
 
@@ -159,7 +160,7 @@ pm init              # once per project: project-manager.toml, committed; the da
 pm run               # work the queue until it is empty, a worker fails or the tree is dirty
 pm run --once        # one task
 pm run --dry-run     # print the next worker command; change nothing
-pm decide            # answer pending decisions: a number, own text, s = skip, x <reason> = irrelevant
+pm decide            # answer pending decisions: a number, own text, s = skip, x <reason> = irrelevant; sign-offs: a = approve
 ```
 
 Agents don't start `pm run`: a worker is already one task of a run.
