@@ -49,7 +49,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 
 `pm init` writes `project-manager.toml` from the template `pm/project-manager.toml` (database file name, worker command, usage-limit margin, log folder, editor, the three prompts below) and `tasks.sql` with the schema (`SCHEMA` in `pm/__init__.py`), and commits them; run again, it adds only what is missing. Other commands need both files. Nothing is pushed.
 
-**Storage.** `tasks.sql` is the database: the schema, then one `INSERT` per row, sorted by key. Every command loads it into an in-memory SQLite database; a change rewrites it. So `git diff` shows changed rows, branches that change different rows merge cleanly, and two branches that create the same id conflict on that line (fix the file, then `pm validate`). `pm` commits its own changes (`pm: …`); inside `pm run`, workers commit theirs together with their work. Hand edits are fine; `pm validate` checks them. A `tasks.sql` from before the rename of title/description to subject/body (schema version 5) is migrated in memory and rewritten by the next change.
+**Storage.** `tasks.sql` is the database: the schema, then one `INSERT` per row, sorted by key. Every command loads it into an in-memory SQLite database; a change rewrites it. So `git diff` shows changed rows, branches that change different rows merge cleanly, and two branches that create the same id conflict on that line (fix the file, then `pm validate`). `pm` commits its own changes (`pm: …`); inside `pm run`, workers commit theirs together with their work. Hand edits are fine; `pm validate` checks them. A `tasks.sql` from before the rename to subject/body (title/description, question/context; schema version 5 or 6) is migrated in memory and rewritten by the next change.
 
 **Flow.** A new milestone comes with a first plan, the masterplan (body "tbd."), and in it the task "write the masterplan" (`masterplan_prompt`): the worker writes the plan with `pm plan edit`, divided into parts, and states that the masterplan's own tasks each write the plan for one part. So splitting the masterplan into tasks yields one plan-writing task per part, and each of those adds a plan. A new plan, or a plan whose subject or body changes, queues "create tasks for plan N" (`plan_tasks_prompt`): the worker splits it into tasks and decisions. Once a milestone has no open task, `pm run` queues "post-milestone cleanup" in its first plan (`cleanup_prompt`: bring top-level docs up to date, remove redundant files and unused code, review pending decisions and other milestones); when that is closed too, the milestone is `implemented`.
 
@@ -71,7 +71,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 | `milestone set <milestone>` | `--subject`, `--status`, `--body` |
 | `plan edit <plan>` | `--subject`, `--body`, `--priority <N\|none>` |
 | `task done\|drop <task> <note>`, `task priority <task> <N\|none>` | Close a task, set its priority |
-| `decision add <question>` | `--context`, `--option` (recommended first) |
+| `decision add <subject>` | `--body`, `--option` (recommended first) |
 | `task-pending-decision <task> <decision>` | The task waits until the decision is answered |
 
 Global: `--root <repo>`. A text value `-` reads stdin.

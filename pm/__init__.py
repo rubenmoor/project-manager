@@ -26,7 +26,7 @@ PROMPT_KEYS = ("masterplan_prompt", "plan_tasks_prompt", "cleanup_prompt")
 CLEANUP_SUBJECT = "post-milestone cleanup"
 MILESTONE_STATES = ("open", "implemented")
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 SCHEMA = """
 CREATE TABLE milestone (
     id           INTEGER PRIMARY KEY,
@@ -57,10 +57,10 @@ CREATE TABLE task (
 
 CREATE TABLE decision (
     id       INTEGER PRIMARY KEY,
-    question TEXT NOT NULL CHECK (trim(question) <> ''),
+    subject  TEXT NOT NULL CHECK (trim(subject) <> ''),
     status   TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'answered', 'irrelevant')),
     options  TEXT NOT NULL DEFAULT '[]' CHECK (json_type(options) = 'array'),  -- recommended first
-    context  TEXT NOT NULL DEFAULT '',
+    body     TEXT NOT NULL DEFAULT '',
     answer   TEXT,
     reason   TEXT,
     closed   TEXT,
@@ -99,7 +99,7 @@ Milestones, plans, tasks and decisions are in {db}; change them only with these 
   pm plan add <milestone id> "<subject>" < body.md     a task to split it into tasks is queued
   pm plan edit <plan id> [--subject …] [--body …] [--priority N]
   pm task add <plan id> "<subject>" [--priority N] < body.md     positive priority: earlier
-  pm decision add "<question>" [--context "<text>"] [--option "<recommended>"] [--option …]   prints its id
+  pm decision add "<subject>" [--body "<text>"] [--option "<recommended>"] [--option …]   prints its id
   pm task-pending-decision <task id> <decision id>     the task waits until the human answers
   pm show <task id>
 Every command with examples, and recipes for the usual tasks: `pm instructions`.
@@ -228,15 +228,16 @@ def dump(con):
     return "\n".join(out).rstrip() + "\n"
 
 
-def migrate_v5(old):
-    """A version-5 database (title, description) copied into the current schema (subject, body); closes `old`."""
+def migrate(old):
+    """A version-5 or -6 database (title, description; question, context) copied into the current schema (subject,
+    body); closes `old`."""
     con = sqlite3.connect(":memory:", isolation_level=None)
     con.row_factory = sqlite3.Row
     con.executescript(f"BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION};")
-    rename = {"title": "subject", "description": "body"}
+    rename = {"title": "subject", "description": "body", "question": "subject", "context": "body"}
     for t in ("milestone", "plan", "task", "decision", "task_decision"):
         for r in old.execute(f"SELECT * FROM {t}").fetchall():
-            cols = [rename.get(c, c) if t in ("milestone", "plan", "task") else c for c in r.keys()]
+            cols = [rename.get(c, c) for c in r.keys()]
             con.execute(f"INSERT INTO {t} ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", tuple(r))
     con.execute("COMMIT")
     old.close()
@@ -278,8 +279,8 @@ class Project:
                 except sqlite3.Error as e:
                     raise FormatError(f"{self.db}: {e}") from None
                 version = con.execute("PRAGMA user_version").fetchone()[0]
-                if version == 5:
-                    con, version = migrate_v5(con), SCHEMA_VERSION
+                if version in (5, 6):
+                    con, version = migrate(con), SCHEMA_VERSION
                 if version != SCHEMA_VERSION:
                     raise FormatError(f"{self.db}: schema version {version}, this pm knows {SCHEMA_VERSION}")
                 con.execute("PRAGMA foreign_keys = ON")
@@ -413,11 +414,11 @@ class Project:
             blocks = [str(r["id"]) for r in self.rows(
                 "SELECT t.id FROM task_decision td JOIN task t ON t.id = td.task_id "
                 "WHERE td.decision_id = ? AND t.status = 'open' ORDER BY t.id", d["id"])]
-            self.say(f"\nDecision {d['id']}: {d['question']}")
+            self.say(f"\nDecision {d['id']}: {d['subject']}")
             if blocks:
                 self.say(f"  blocks task(s) {', '.join(blocks)}")
-            if d["context"]:
-                self.say("  " + d["context"].replace("\n", "\n  "))
+            if d["body"]:
+                self.say("  " + d["body"].replace("\n", "\n  "))
             for n, o in enumerate(opts, 1):
                 self.say(f"  {n}) {o}{'  (recommended)' if n == 1 else ''}")
             hint = f"1-{len(opts)}, " if opts else ""
@@ -547,10 +548,10 @@ class Project:
         with self.connect(write=True) as db:
             self.block(db, tid, did)
 
-    def decision_add(self, question, context=None, options=()):
+    def decision_add(self, subject, body=None, options=()):
         with self.connect(write=True) as db:
-            return db.execute("INSERT INTO decision (question, options, context) VALUES (?, ?, ?)",
-                              (question, json.dumps(list(options), ensure_ascii=False), (context or "").strip())).lastrowid
+            return db.execute("INSERT INTO decision (subject, options, body) VALUES (?, ?, ?)",
+                              (subject, json.dumps(list(options), ensure_ascii=False), (body or "").strip())).lastrowid
 
     # --- show --------------------------------------------------------------------------------
 
@@ -576,7 +577,7 @@ class Project:
         out += [t["body"], ""]
         for d in ds:
             said = d["answer"] or d["reason"] or ""
-            out.append(f"Decision {d['id']} ({d['status']}): {d['question']}" + (f" → {said}" if said else ""))
+            out.append(f"Decision {d['id']} ({d['status']}): {d['subject']}" + (f" → {said}" if said else ""))
         return "\n".join(out).rstrip() + "\n"
 
     # --- run ---------------------------------------------------------------------------------
@@ -711,7 +712,7 @@ class Project:
         pending = self.pending()
         self.say(f"\nPending decisions ({len(pending)}):")
         for d in pending:
-            self.say(f"  {d['id']}: {d['question']}")
+            self.say(f"  {d['id']}: {d['subject']}")
 
     def print_queue(self, limit=None):
         q = self.queue()
@@ -789,8 +790,8 @@ def main(argv=None):
 
     d = sub.add_parser("decision", help="ask the human").add_subparsers(dest="action", required=True)
     da = d.add_parser("add", help="new pending decision; prints its id")
-    da.add_argument("question")
-    da.add_argument("--context", type=text_arg)
+    da.add_argument("subject", help="the question")
+    da.add_argument("--body", type=text_arg, help="context for the human")
     da.add_argument("--option", action="append", default=[], help="repeat; the recommended one first")
     tpd = sub.add_parser("task-pending-decision", help="the task waits until the decision is answered")
     tpd.add_argument("task", type=int)
@@ -868,9 +869,9 @@ def main(argv=None):
                 pm.task_set(args.task, priority=args.priority)
                 msg = f"task {args.task} priority"
         elif args.cmd == "decision":
-            did = pm.decision_add(args.question, args.context, args.option)
+            did = pm.decision_add(args.subject, args.body, args.option)
             print(did)
-            msg = f"decision {did} added: {args.question}"
+            msg = f"decision {did} added: {args.subject}"
         elif args.cmd == "task-pending-decision":
             pm.task_pending_decision(args.task, args.decision)
             msg = f"task {args.task} waits for decision {args.decision}"

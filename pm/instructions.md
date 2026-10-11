@@ -16,7 +16,7 @@
 - **Milestone:** subject, body (Markdown), status `open` | `implemented`, created date. `pm milestone add` also creates its first plan, the **masterplan** (body "tbd."), and the task "write the masterplan". Once a milestone has no open task, `pm run` queues the task "post-milestone cleanup" in its first plan (body: `cleanup_prompt` in project-manager.toml); when that is closed too, the milestone becomes `implemented`.
 - **Plan:** belongs to a milestone; subject, body (required), priority (optional). Adding a plan, or changing its subject or body, queues the task "create tasks for plan N", unless that task is already open.
 - **Task:** belongs to a plan; subject, body (required while open), status `open` | `done` | `dropped`, note (done: date and files or commit; dropped: the reason), priority (optional; default: the plan's, else 0).
-- **Decision:** question, context, options (the recommended one first), status `pending` | `answered` | `irrelevant`. A task linked to a pending decision waits. When the human answers, the task becomes workable again and its worker sees the answer in `pm show`. When a decision is marked irrelevant, the open tasks waiting for it are dropped.
+- **Decision:** subject (the question), body (context), options (the recommended one first), status `pending` | `answered` | `irrelevant`. A task linked to a pending decision waits. When the human answers, the task becomes workable again and its worker sees the answer in `pm show`. When a decision is marked irrelevant, the open tasks waiting for it are dropped.
 - **Queue:** open tasks of open milestones that no pending decision blocks; highest priority first, then by milestone, plan and task id. `pm run` takes the first one.
 
 ## Inspect
@@ -119,12 +119,12 @@ A task should fit one worker run: one change you can describe, check and commit.
 
 ```sh
 did=$(pm decision add "Which CSV delimiter?" \
-        --context "German Excel opens ';' files directly, ',' needs an import step." \
+        --body "German Excel opens ';' files directly, ',' needs an import step." \
         --option "semicolon" --option "comma")
 pm task-pending-decision 5 "$did"       # task 5 waits until the human answers
 ```
 
-`--option` is repeatable; put the recommended option first. `--context` takes `-` to read stdin. `decision add` doesn't link tasks: run `pm task-pending-decision <task> <decision>` for every task that waits for the answer, including your own task if it can't go on.
+`--option` is repeatable; put the recommended option first. `--body` takes `-` to read stdin. `decision add` doesn't link tasks: run `pm task-pending-decision <task> <decision>` for every task that waits for the answer, including your own task if it can't go on.
 
 The human answers with `pm decide`, or at the start of `pm run`. Don't run `pm decide` yourself: it asks the human in the terminal.
 
