@@ -2,7 +2,7 @@
 
 Rules for writes while a worker runs: the running task can't be changed; everything else can, and is committed with
 the running task (pm commits tasks.sql with it), not on its own."""
-import json, sqlite3, subprocess
+import json, sqlite3, subprocess, time
 
 import pm
 
@@ -94,8 +94,11 @@ def edit(project, op):
         raise EditError(f"bad request: {e}") from None
     except pm.FormatError as e:
         raise EditError(str(e)) from None
-    if running_task(project) is None:
+    for _ in range(10):                    # git may be busy with a commit of pm run (index.lock)
+        if running_task(project) is not None or not project.git("status", "--porcelain", "--", project.db).strip():
+            break
         project.commit_db(msg + " (dashboard)")
+        time.sleep(0.3)
     return {"ok": True, "id": rid, "message": msg}
 
 
