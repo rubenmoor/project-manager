@@ -37,7 +37,7 @@ Queue (3):
     +700  task 4: stream one table as CSV
 ```
 
-`pm plans list` (or `pm plan list`): plans of open milestones, one per line, highest priority first:
+`pm plans list` (or `pm plan list`): plans with open tasks in open milestones, one per line, highest priority first:
 
 ```
   1000  plan 1: masterplan

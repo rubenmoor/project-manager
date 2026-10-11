@@ -100,7 +100,7 @@ CLAUDE.md or similar), then do task {id} and nothing else.
 Milestones, plans, tasks and decisions are in {db}; change them only with these commands (a text value - reads stdin):
   pm plan add <milestone id> "<subject>" < body.md     a task to split it into tasks is queued
   pm plan edit <plan id> [--subject …] [--body …] [--priority N]
-  pm plans list     plans of open milestones, highest priority first
+  pm plans list     plans with open tasks, highest priority first
   pm task add <plan id> "<subject>" [--priority N] < body.md     positive priority: earlier
   pm decision add "<subject>" [--body "<text>"] [--option "<recommended>"] [--option …]   prints its id
   pm task-pending-decision <task id> <decision id>     the task waits until the human answers
@@ -593,10 +593,11 @@ class Project:
     # --- run ---------------------------------------------------------------------------------
 
     def plans(self):
-        """[(priority, plan id, subject)] of open milestones, highest priority first."""
+        """[(priority, plan id, subject)] of plans with an open task in an open milestone, highest priority first."""
         return [tuple(r.values()) for r in self.rows(
             "SELECT coalesce(p.priority, 0) AS priority, p.id, p.subject FROM plan p "
             "JOIN milestone m ON m.id = p.milestone_id WHERE m.status = 'open' "
+            "AND EXISTS (SELECT 1 FROM task t WHERE t.plan_id = p.id AND t.status = 'open') "
             "ORDER BY priority DESC, m.id, p.id")]
 
     def priority_prompts(self, tid):
@@ -808,7 +809,8 @@ def main(argv=None):
     pe.add_argument("--subject")
     pe.add_argument("--body", type=text_arg)
     pe.add_argument("--priority", type=lambda v: v if v == "none" else int(v), help="integer, or none for 0")
-    p.add_parser("list", help="plans of open milestones, one per line: priority, id, subject; highest priority first")
+    p.add_parser("list", help="plans with open tasks in open milestones, one per line: priority, id, subject; highest "
+                  "priority first")
 
     t = sub.add_parser("task", help="add or change tasks").add_subparsers(dest="action", required=True)
     a = t.add_parser("add", help="new task; prints its id")
