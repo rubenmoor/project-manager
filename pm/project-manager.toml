@@ -27,7 +27,7 @@ plan for one part.
 # The task `pm plan add` and `pm plan edit` queue. {plan_id} and {plan_subject} are replaced.
 plan_tasks_prompt = '''
 Split plan {plan_id} into tasks and identify all decisions that need to be made. If the plan already has tasks,
-bring them in line with the plan.
+bring them in line with the plan. A task that writes a plan gets `--kind plan`.
 '''
 
 # The task "post-milestone cleanup", queued in a milestone's first plan once all its other tasks are closed; the

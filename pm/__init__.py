@@ -27,8 +27,11 @@ PRIORITY_KEYS = ("plan_priority_prompt", "task_priority_prompt")
 CLEANUP_SUBJECT = "post-milestone cleanup"
 PLAN_TASKS_SUBJECT = "create tasks for plan {}"
 MILESTONE_STATES = ("open", "implemented")
+# work: the default; plan: writes a plan; masterplan, split ("create tasks for plan N"), cleanup: made by pm only
+TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup")
+PLANNING_KINDS = ("plan", "masterplan", "split")
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 SCHEMA = """
 CREATE TABLE milestone (
     id           INTEGER PRIMARY KEY,
@@ -50,6 +53,7 @@ CREATE TABLE task (
     id           INTEGER PRIMARY KEY,
     plan_id      INTEGER NOT NULL REFERENCES plan (id),
     subject      TEXT NOT NULL CHECK (trim(subject) <> ''),
+    kind         TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'plan', 'masterplan', 'split', 'cleanup')),
     status       TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done', 'dropped')),
     priority     INTEGER,                                  -- NULL: the plan's
     note         TEXT,                                     -- done: date, files or commit; dropped: reason
@@ -83,7 +87,7 @@ CREATE INDEX task_plan ON task (plan_id);
 CREATE INDEX task_decision_decision ON task_decision (decision_id);
 
 CREATE VIEW queue AS
-SELECT coalesce(t.priority, p.priority, 0) AS priority, t.id AS task_id, t.subject
+SELECT coalesce(t.priority, p.priority, 0) AS priority, t.id AS task_id, t.subject, t.kind
 FROM task t
 JOIN plan p ON p.id = t.plan_id
 JOIN milestone m ON m.id = p.milestone_id
@@ -101,7 +105,7 @@ Milestones, plans, tasks and decisions are in {db}; change them only with these 
   pm plan add <milestone id> "<subject>" < body.md     a task to split it into tasks is queued
   pm plan edit <plan id> [--subject …] [--body …] [--priority N]
   pm plans list     plans with open tasks, highest priority first
-  pm task add <plan id> "<subject>" [--priority N] < body.md     positive priority: earlier
+  pm task add <plan id> "<subject>" [--kind plan] [--priority N] < body.md     --kind plan: the task writes a plan
   pm decision add "<subject>" [--body "<text>"] [--option "<recommended>"] [--option …]   prints its id
   pm task-pending-decision <task id> <decision id>     the task waits until the human answers
   pm show <task id>
@@ -233,8 +237,8 @@ def dump(con):
 
 
 def migrate(old):
-    """A version-5 or -6 database (title, description; question, context) copied into the current schema (subject,
-    body); closes `old`."""
+    """A version-5 to -7 database copied into the current schema: title, description and question, context become
+    subject, body (5, 6); task kinds are derived from the subjects pm gives its own tasks (5 to 7). Closes `old`."""
     con = sqlite3.connect(":memory:", isolation_level=None)
     con.row_factory = sqlite3.Row
     con.executescript(f"BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION};")
@@ -243,6 +247,9 @@ def migrate(old):
         for r in old.execute(f"SELECT * FROM {t}").fetchall():
             cols = [rename.get(c, c) for c in r.keys()]
             con.execute(f"INSERT INTO {t} ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", tuple(r))
+    con.execute("UPDATE task SET kind = 'masterplan' WHERE subject = 'write the masterplan'")
+    con.execute("UPDATE task SET kind = 'split' WHERE subject = 'create tasks for plan ' || plan_id")
+    con.execute("UPDATE task SET kind = 'cleanup' WHERE subject = ?", (CLEANUP_SUBJECT,))
     con.execute("COMMIT")
     old.close()
     return con
@@ -283,7 +290,7 @@ class Project:
                 except sqlite3.Error as e:
                     raise FormatError(f"{self.db}: {e}") from None
                 version = con.execute("PRAGMA user_version").fetchone()[0]
-                if version in (5, 6):
+                if version in (5, 6, 7):
                     con, version = migrate(con), SCHEMA_VERSION
                 if version != SCHEMA_VERSION:
                     raise FormatError(f"{self.db}: schema version {version}, this pm knows {SCHEMA_VERSION}")
@@ -348,7 +355,7 @@ class Project:
         return ds
 
     def queue(self):
-        """[(priority, task id, subject)]: the `queue` view."""
+        """[(priority, task id, subject, kind)]: the `queue` view."""
         return [tuple(r.values()) for r in self.rows("SELECT * FROM queue")]
 
     # --- git ---------------------------------------------------------------------------------
@@ -377,8 +384,8 @@ class Project:
     # --- milestones --------------------------------------------------------------------------
 
     def close_milestones(self):
-        """For each open milestone without an open task: queue the cleanup task in its first plan, or, if its last
-        task is that task, mark it implemented. Returns (implemented ids, ids that got the cleanup task)."""
+        """For each open milestone without an open task: queue the cleanup task in its first plan, or, if it had one
+        already, mark it implemented. Returns (implemented ids, ids that got the cleanup task)."""
         closed, cleanup = [], []
         with self.connect(write=True) as db:
             for (mid,) in db.execute(
@@ -386,11 +393,11 @@ class Project:
                     "AND NOT EXISTS (SELECT 1 FROM task t JOIN plan p ON p.id = t.plan_id "
                     "WHERE p.milestone_id = m.id AND t.status = 'open') "
                     "ORDER BY m.id").fetchall():
-                last = db.execute("SELECT t.subject FROM task t JOIN plan p ON p.id = t.plan_id "
-                                  "WHERE p.milestone_id = ? ORDER BY t.id DESC LIMIT 1", (mid,)).fetchone()
+                done = db.execute("SELECT 1 FROM task t JOIN plan p ON p.id = t.plan_id "
+                                  "WHERE p.milestone_id = ? AND t.kind = 'cleanup'", (mid,)).fetchone()
                 pid = db.execute("SELECT min(id) FROM plan WHERE milestone_id = ?", (mid,)).fetchone()[0]
-                if pid is not None and (last is None or last[0] != CLEANUP_SUBJECT):
-                    db.execute("INSERT INTO task (plan_id, subject, body) VALUES (?, ?, ?)",
+                if pid is not None and not done:
+                    db.execute("INSERT INTO task (plan_id, subject, kind, body) VALUES (?, ?, 'cleanup', ?)",
                                (pid, CLEANUP_SUBJECT, self.prompt("cleanup_prompt")))
                     cleanup.append(mid)
                 else:
@@ -499,7 +506,7 @@ class Project:
                              (subject, (body or "").strip())).lastrowid
             pid = db.execute("INSERT INTO plan (milestone_id, subject, priority, body) "
                              "VALUES (?, 'masterplan', ?, 'tbd.')", (mid, self.config["planning_priority"])).lastrowid
-            db.execute("INSERT INTO task (plan_id, subject, body) VALUES (?, 'write the masterplan', ?)",
+            db.execute("INSERT INTO task (plan_id, subject, kind, body) VALUES (?, 'write the masterplan', 'masterplan', ?)",
                        (pid, self.prompt("masterplan_prompt", milestone_id=mid, milestone_subject=subject, plan_id=pid)))
         return mid
 
@@ -514,11 +521,10 @@ class Project:
     def queue_plan_tasks(self, db, pid):
         """Queue the task that splits plan pid into tasks, unless one is still open."""
         p = self.get(db, "plan", pid)
-        subject = PLAN_TASKS_SUBJECT.format(pid)
-        if not db.execute("SELECT 1 FROM task WHERE plan_id = ? AND subject = ? AND status = 'open'",
-                          (pid, subject)).fetchone():
-            db.execute("INSERT INTO task (plan_id, subject, priority, body) VALUES (?, ?, ?, ?)",
-                       (pid, subject, self.config["planning_priority"],
+        if not db.execute("SELECT 1 FROM task WHERE plan_id = ? AND kind = 'split' AND status = 'open'",
+                          (pid,)).fetchone():
+            db.execute("INSERT INTO task (plan_id, subject, kind, priority, body) VALUES (?, ?, 'split', ?, ?)",
+                       (pid, PLAN_TASKS_SUBJECT.format(pid), self.config["planning_priority"],
                         self.prompt("plan_tasks_prompt", plan_id=pid, plan_subject=p["subject"])))
 
     def plan_add(self, mid, subject, body, prio=None):
@@ -542,11 +548,14 @@ class Project:
             if subject is not None or body is not None:
                 self.queue_plan_tasks(db, pid)
 
-    def task_add(self, pid, subject, body, prio=None):
+    def task_add(self, pid, subject, body, prio=None, kind="work"):
+        """A new task; a plan-writing one gets planning_priority unless prio is given."""
+        if prio is None and kind in PLANNING_KINDS:
+            prio = self.config["planning_priority"]
         with self.connect(write=True) as db:
             self.get(db, "plan", pid)
-            return db.execute("INSERT INTO task (plan_id, subject, priority, body) VALUES (?, ?, ?, ?)",
-                              (pid, subject, prio, body.strip())).lastrowid
+            return db.execute("INSERT INTO task (plan_id, subject, kind, priority, body) VALUES (?, ?, ?, ?, ?)",
+                              (pid, subject, kind, prio, body.strip())).lastrowid
 
     def task_set(self, tid, **fields):
         """Set fields of a task (status, note, priority); a value None clears it."""
@@ -573,16 +582,17 @@ class Project:
             p = self.get(db, "plan", t["plan_id"])
             m = self.get(db, "milestone", p["milestone_id"])
             plans = db.execute("SELECT id, subject FROM plan WHERE milestone_id = ? ORDER BY id", (m["id"],)).fetchall()
-            siblings = db.execute("SELECT id, status, subject FROM task WHERE plan_id = ? ORDER BY id", (p["id"],)).fetchall()
+            siblings = db.execute("SELECT id, status, kind, subject FROM task WHERE plan_id = ? ORDER BY id",
+                                  (p["id"],)).fetchall()
             ds = db.execute("SELECT d.* FROM task_decision td JOIN decision d ON d.id = td.decision_id "
                             "WHERE td.task_id = ? ORDER BY d.id", (tid,)).fetchall()
         prio = t["priority"] if t["priority"] is not None else p["priority"] or 0
         out = [f"# Milestone {m['id']}: {m['subject']} ({m['status']}, created {m['created_date']})", "", m["body"],
                "", "Plans: " + ", ".join(f"{x['id']} {x['subject']}" for x in plans), "",
                f"# Plan {p['id']}: {p['subject']} (priority {p['priority'] or 0})", "", p["body"], ""]
-        out += [f"- task {x['id']} [{x['status']}] {x['subject']}" + (" ← this task" if x["id"] == tid else "")
-                for x in siblings] + [""]
-        out += [f"# Task {tid}: {t['subject']} ({t['status']}, priority {prio})", ""]
+        out += [f"- task {x['id']} [{x['status']}{'' if x['kind'] == 'work' else ', ' + x['kind']}] {x['subject']}"
+                + (" ← this task" if x["id"] == tid else "") for x in siblings] + [""]
+        out += [f"# Task {tid}: {t['subject']} ({t['status']}, kind {t['kind']}, priority {prio})", ""]
         if t["note"]:
             out.append(f"note: {t['note']}")
         out += [t["body"], ""]
@@ -640,6 +650,7 @@ class Project:
     def work(self, tid):
         """Run the worker for a task until no usage limit stops it. Returns ("done" | "blocked" | "failed", message)."""
         cmd, log = self.worker_command(tid), self.logs / f"task-{tid}.log"
+        before = self.planning_snapshot()
         while True:
             self.say(f"\n== task {tid} (log: {log})")
             code = self.run_worker(cmd, log)
@@ -676,7 +687,22 @@ class Project:
             return "failed", f"git commit failed:\n{(e.stdout or '') + (e.stderr or '')}".rstrip()
         if left := self.git("status", "--porcelain").rstrip():
             return "failed", f"committed task {tid}; the worker left changes that are not staged:\n{left}"
+        if t["status"] == "done" and (missing := self.planning_missing(t, before)):
+            return "failed", f"committed task {tid}, done, but it {missing}"
         return result
+
+    def planning_snapshot(self):
+        """The plans: to tell whether a plan-writing task changed them."""
+        return self.rows("SELECT * FROM plan ORDER BY id")
+
+    def planning_missing(self, t, before):
+        """What a done task of a planning kind failed to do, or None."""
+        if t["kind"] in ("plan", "masterplan") and self.planning_snapshot() == before:
+            return "added or changed no plan"
+        if t["kind"] == "split" and not self.rows("SELECT 1 FROM task WHERE plan_id = ? AND kind IN ('work', 'plan')",
+                                                  t["plan_id"]):
+            return "left its plan without tasks"
+        return None
 
     def commit_task(self, tid, subject, body):
         """Commit what the worker staged, with the database, as "task <id>: <subject>"."""
@@ -758,7 +784,8 @@ class Project:
     def print_queue(self, limit=None):
         q = self.queue()
         self.say(f"\nQueue ({len(q)}):")
-        for prio, tid, subject in q[:limit]:
+        for prio, tid, subject, kind in q[:limit]:
+            subject += "" if kind == "work" else f" ({kind})"
             self.say(f"  {prio:+6d}  task {tid}: {subject}" if prio else f"          task {tid}: {subject}")
         if limit and len(q) > limit:
             self.say(f"  … {len(q) - limit} more (`pm queue`)")
@@ -823,7 +850,8 @@ def main(argv=None):
     a = t.add_parser("add", help="new task; prints its id")
     a.add_argument("plan", type=int)
     a.add_argument("subject", nargs="?", help="then the body (Markdown) is read from stdin; without: editor")
-    a.add_argument("--priority", type=int)
+    a.add_argument("--priority", type=int, help="default: the plan's; for --kind plan: planning_priority")
+    a.add_argument("--kind", choices=("work", "plan"), default="work", help="plan: the task writes a plan")
     for verb, text in [("done", "note: date, files or commit"), ("drop", "reason")]:
         x = t.add_parser(verb)
         x.add_argument("task", type=int)
@@ -913,7 +941,7 @@ def main(argv=None):
                 if not (entry := pm.subject_and_body("task", args.subject)):
                     print("pm: aborted, no task added")
                     return 1
-                tid = pm.task_add(args.plan, *entry, args.priority)
+                tid = pm.task_add(args.plan, *entry, args.priority, args.kind)
                 print(tid)
                 msg = f"task {tid} added: {entry[0]}"
             elif args.action in ("done", "drop"):

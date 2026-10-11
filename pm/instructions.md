@@ -15,7 +15,13 @@
 
 - **Milestone:** subject, body (Markdown), status `open` | `implemented`, created date. `pm milestone add` also creates its first plan, the **masterplan** (body "tbd."), and the task "write the masterplan". Once a milestone has no open task, `pm run` queues the task "post-milestone cleanup" in its first plan (body: `cleanup_prompt` in project-manager.toml); when that is closed too, the milestone becomes `implemented`.
 - **Plan:** belongs to a milestone; subject, body (required), priority (optional; the masterplan: `planning_priority`, 1000). Adding a plan, or changing its subject or body, queues the task "create tasks for plan N" (priority `planning_priority`, 1000), unless that task is already open.
-- **Task:** belongs to a plan; subject, body (required while open), status `open` | `done` | `dropped`, note (done: date and files or commit; dropped: the reason), priority (optional; default: the plan's, else 0).
+- **Task:** belongs to a plan; subject, body (required while open), kind, status `open` | `done` | `dropped`, note (done: date and files or commit; dropped: the reason), priority (optional; default: the plan's, else 0).
+- **Task kind:**
+  - `work` (default): anything else
+  - `plan`: writes a plan (`pm task add … --kind plan`)
+  - made by pm only: `masterplan` ("write the masterplan"), `split` ("create tasks for plan N"), `cleanup` ("post-milestone cleanup")
+  - `plan`, `masterplan`, `split`: priority `planning_priority` (1000) unless given
+  - checked by `pm run` when done: `plan` and `masterplan` must add or change a plan, `split` must leave its plan with tasks; otherwise the task is committed and the run stops
 - **Decision:** subject (the question), body (context), options (the recommended one first), status `pending` | `answered` | `irrelevant`. A task linked to a pending decision waits. When the human answers, the task becomes workable again and its worker sees the answer in `pm show`. When a decision is marked irrelevant, the open tasks waiting for it are dropped.
 - **Queue:** open tasks of open milestones that no pending decision blocks; highest priority first, then by milestone, plan and task id. `pm run` takes the first one.
 
@@ -114,6 +120,11 @@ Done when: a test exports a table with 3 rows and an empty table.
 EOF
 # prints the task id, e.g. 5
 
+pm task add 1 "write plan: Export endpoint" --kind plan <<'EOF'
+Write the plan for part 1 of the masterplan.
+EOF
+# a plan-writing task: priority 1000 (planning_priority)
+
 pm task add 2 "Docs for the export endpoint" --priority 690 <<'EOF'
 …
 EOF
@@ -153,7 +164,7 @@ Agents don't start `pm run`: a worker is already one task of a run.
 
 ## Priorities
 
-- Higher runs first; a task without its own priority gets its plan's.
+- Higher runs first; a task without its own priority gets its plan's; planning tasks (`plan`, `masterplan`, `split`) get 1000.
 - Rules for choosing them: `plan_priority_prompt` and `task_priority_prompt` in project-manager.toml, printed at the end of `pm instructions`.
 - `pm run` appends both to every worker prompt.
 
@@ -161,7 +172,7 @@ Agents don't start `pm run`: a worker is already one task of a run.
 
 **Write the masterplan** (task "write the masterplan" of plan P): read the milestone (`pm show <task>`) and the code. Write the plan with `pm plan edit P --body -`, divided into parts, and state there that the masterplan's own tasks are not implementation work: each writes the plan for one part. That edit queues "create tasks for plan P". Finish with `pm task done`.
 
-**Split a plan into tasks** (task "create tasks for plan P"): add one `pm task add P "<subject>"` per task, in the order they should run. Priorities: see "Priorities". Raise a decision for each question only the human can answer, and link the tasks that wait for it. Then `pm task done <your task> "<date>, tasks …"`.
+**Split a plan into tasks** (task "create tasks for plan P"): add one `pm task add P "<subject>"` per task, in the order they should run; for the masterplan, its tasks write plans: `--kind plan`. Priorities: see "Priorities". Raise a decision for each question only the human can answer, and link the tasks that wait for it. Then `pm task done <your task> "<date>, tasks …"`.
 
 **Write a part's plan** (a task of the masterplan): `pm plan list` first, then `pm plan add <milestone> "<part subject>" --priority N` with the full body, N by "Priorities". That queues its "create tasks" task. Then close your task.
 
