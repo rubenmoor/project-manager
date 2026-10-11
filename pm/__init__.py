@@ -107,9 +107,10 @@ Milestones, plans, tasks and decisions are in {db}; change them only with these 
   pm show <task id>
 Every command with examples, and recipes for the usual tasks: `pm instructions`.
 
-Finish with `pm task done {id} "<YYYY-MM-DD, files or commit>"` or `pm task drop {id} "<reason>"`, then commit your \
-work together with {db} in one commit, message "task {id}: <subject>". If task {id} itself needs an answer first, make it pending on the \
-decision, commit what is done and stop. Don't push."""
+Finish with `pm task done {id} "<YYYY-MM-DD, files>"` or `pm task drop {id} "<reason>"`. Stage (`git add`) the \
+changes meant to stay in the project and delete temporary files you created. Don't commit or push: pm commits what \
+is staged, together with {db}, as "task {id}: <subject>". If task {id} itself needs an answer first, make it pending \
+on the decision, stage what is done and stop."""
 
 
 # --- Claude's usage limit: the message and when it resets ---------------------------------------
@@ -666,18 +667,30 @@ class Project:
         errors = self.validate()
         if errors:
             return "failed", "the database is no longer valid:\n  " + "\n  ".join(errors)
-        if self.dirty():
-            return "failed", "the worker left uncommitted changes (git status)"
         with self.connect() as db:
             t = self.get(db, "task", tid)
             blocked = [str(r[0]) for r in db.execute(
                 "SELECT d.id FROM task_decision td JOIN decision d ON d.id = td.decision_id "
                 "WHERE td.task_id = ? AND d.status = 'pending' ORDER BY d.id", (tid,))]
         if t["status"] != "open":
-            return "done", t["status"] + (f": {t['note']}" if t["note"] else "")
-        if blocked:
-            return "blocked", "waits for decision(s) " + ", ".join(blocked)
-        return "failed", f"exit 0, but task {tid} is still open and not blocked\n{tail}"
+            result = "done", t["status"] + (f": {t['note']}" if t["note"] else "")
+        elif blocked:
+            result = "blocked", "waits for decision(s) " + ", ".join(blocked)
+        else:
+            return "failed", f"exit 0, but task {tid} is still open and not blocked\n{tail}"
+        try:
+            self.commit_task(tid, t["subject"], result[1])
+        except subprocess.CalledProcessError as e:
+            return "failed", f"git commit failed:\n{(e.stdout or '') + (e.stderr or '')}".rstrip()
+        if left := self.git("status", "--porcelain").rstrip():
+            return "failed", f"committed task {tid}; the worker left changes that are not staged:\n{left}"
+        return result
+
+    def commit_task(self, tid, subject, body):
+        """Commit what the worker staged, with the database, as "task <id>: <subject>"."""
+        self.git("add", "--", self.db)
+        if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=self.root).returncode:
+            self.git("commit", "-q", "-m", f"task {tid}: {subject}", "-m", body)
 
     def close_and_commit(self):
         closed, cleanup = self.close_milestones()

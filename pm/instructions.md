@@ -8,7 +8,7 @@
 2. **Commands that create something print the new integer id on stdout**, and nothing else. Capture it: `tid=$(pm task add 4 "…" <<'EOF' … EOF)`.
 3. **IDs are plain integers**, unique per kind: `pm show 12` is task 12, `pm plan edit 3` is plan 3.
 4. **Never edit `tasks.sql` by hand** unless the human asks. If you do, run `pm validate` before committing.
-5. **Commits:** outside `pm run`, each `pm` command commits `tasks.sql` itself (`pm: …`). As a worker inside `pm run` (environment `PM_WORKER=1`), `pm` doesn't commit: commit `tasks.sql` together with your work, in one commit. Never push.
+5. **Commits:** outside `pm run`, each `pm` command commits `tasks.sql` itself (`pm: …`). As a worker inside `pm run` (environment `PM_WORKER=1`): stage (`git add`) the changes meant to stay, delete temporary files, don't commit; `pm run` commits what is staged with `tasks.sql` as `task <id>: <subject>`. Never push.
 6. **Bodies are Markdown**, written for an engineer who knows the code but not the intentions: what, why, which files, how to tell it's done.
 
 ## Model
@@ -167,9 +167,9 @@ Agents don't start `pm run`: a worker is already one task of a run.
 
 **Post-milestone cleanup** (task "post-milestone cleanup"): work through its body for the whole project, not just this milestone. Change other milestones with `pm milestone set`; for a pending decision that seems obsolete, say so in a new decision for the human. Then close your task.
 
-**Your task needs an answer first:** add the decision, `pm task-pending-decision <your task> <decision>`, commit what's done, stop. `pm run` reports the task as blocked and goes on with the next.
+**Your task needs an answer first:** add the decision, `pm task-pending-decision <your task> <decision>`, stage what's done, stop. `pm run` reports the task as blocked and goes on with the next.
 
-**Finish a task:** `pm task done <task> "<YYYY-MM-DD, files or commit>"` or `pm task drop <task> "<reason>"`. Run the project's checks, then commit your work and `tasks.sql` in one commit: `task <id>: <subject>`. Don't push.
+**Finish a task:** `pm task done <task> "<YYYY-MM-DD, files>"` or `pm task drop <task> "<reason>"`. Run the project's checks, stage the changes meant to stay, delete temporary files. Don't commit or push: `pm run` commits.
 
 ## Errors
 
