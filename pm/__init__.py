@@ -744,9 +744,11 @@ class Project:
         for d in pending:
             self.say(f"  {d['id']}: {d['subject']}")
 
-    def print_plans(self):
-        for prio, pid, subject in self.plans():
-            self.say(f"{prio:6d}  plan {pid}: {subject}")
+    def print_plans(self, new=None, file=None):
+        """`pm plan list`: id, priority, subject; `new` marked."""
+        lines = ["  id   prio  subject"] + [f"{pid:4d}  {prio:5d}  {subject}" + ("   ← new" if pid == new else "")
+                                          for prio, pid, subject in self.plans()]
+        print("\n".join(lines), file=file or self.out, flush=True)
 
     def print_queue(self, limit=None):
         q = self.queue()
@@ -894,6 +896,9 @@ def main(argv=None):
                     return 1
                 pid = pm.plan_add(args.milestone, *entry, args.priority)
                 print(pid)
+                pm.print_plans(new=pid, file=sys.stderr)
+                print(f"Compare plan {pid} with these plans. If it must clearly run before or after one of them, "
+                      f"change its priority: pm plan edit {pid} --priority N", file=sys.stderr)
                 msg = f"plan {pid} added: {entry[0]}"
             else:
                 pm.plan_edit(args.plan, args.subject, args.body, args.priority)

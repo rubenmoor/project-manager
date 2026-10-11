@@ -40,10 +40,13 @@ Queue (3):
 `pm plans list` (or `pm plan list`): plans with open tasks in open milestones, one per line, highest priority first:
 
 ```
-  1000  plan 1: masterplan
-   900  plan 3: Database schema
-   700  plan 2: Export endpoint
+  id   prio  subject
+   1   1000  masterplan
+   3    900  Database schema
+   2    700  Export endpoint
 ```
+
+`pm plan add` prints the new id on stdout, then this list on stderr with the new plan marked: compare it with the others and fix its priority with `pm plan edit`.
 
 `pm show` is what a worker gets in its prompt: Markdown headings for the milestone, plan and task, then the decisions, for example `Decision 1 (answered): Which delimiter? → semicolon`.
 
