@@ -41,32 +41,32 @@ cleanup_prompt = '''
 * check other milestones if their contents are up-to-date and update them if necessary
 '''
 
-# Priority of the masterplan `pm milestone add` creates: above every other plan, so all plans exist and are
-# prioritized against each other before their tasks run.
-masterplan_priority = 10000
+# Priority of the planning work: the masterplan `pm milestone add` creates (its tasks write the plans) and every task
+# "create tasks for plan N". Above every other plan, so all plans and their tasks exist before implementation starts.
+planning_priority = 1000
 
 # Appended to the prompt of the tasks that write plans (the tasks of a milestone's masterplan) and to
 # `pm instructions`. Empty: nothing.
 plan_priority_prompt = '''
 Plan priority (higher runs first). Give every new plan (not the masterplan) the priority of what it mostly affects:
 
-  1000  database schema or equivalent
-   900  public-facing API
-   800  backend code or equivalent
-   700  core mechanics, core functionality
-   600  client-side code
-   500  user interface
-   400  visual design
-   300  media and assets
+   900  database schema or equivalent
+   800  public-facing API
+   700  backend code or equivalent
+   600  core mechanics, core functionality
+   500  client-side code
+   400  user interface
+   300  visual design
+   200  media and assets
 
 Then run `pm plans list`. If the new plan must clearly run before or after another plan, pick a priority that puts
-it there instead, e.g. one above that plan's. Set it with `pm plan add … --priority N` or `pm plan edit <plan> --priority N`.
+it there instead, e.g. one above that plan's; stay below 1000, the priority of planning work. Set it with `pm plan add … --priority N` or `pm plan edit <plan> --priority N`.
 '''
 
 # Appended to the prompt of the tasks "create tasks for plan N" and to `pm instructions`. Empty: nothing.
 task_priority_prompt = '''
 Task priority: leave it out, so the task gets its plan's priority, unless there is a good reason for it to run
 earlier or later than the order you add the tasks in. Then use the plan's priority (`pm show`) plus or minus a
-multiple of 10, e.g. `--priority 810` or `--priority 790` in a plan with priority 800, so priorities can be fine-tuned
+multiple of 10, e.g. `--priority 710` or `--priority 690` in a plan with priority 700, so priorities can be fine-tuned
 later.
 '''

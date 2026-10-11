@@ -208,9 +208,9 @@ def load_config(root):
     errors += [f"{k} must be a non-empty string" for k in PROMPT_KEYS
                if not isinstance(config[k], str) or not config[k].strip()]
     errors += [f"{k} must be a string" for k in PRIORITY_KEYS if not isinstance(config[k], str)]
-    p = config["masterplan_priority"]
+    p = config["planning_priority"]
     if not isinstance(p, int) or isinstance(p, bool):
-        errors.append("masterplan_priority must be an integer")
+        errors.append("planning_priority must be an integer")
     if errors:
         raise FormatError(f"{CONFIG_FILE}: " + "; ".join(errors))
     return config
@@ -495,7 +495,7 @@ class Project:
             mid = db.execute("INSERT INTO milestone (subject, body) VALUES (?, ?)",
                              (subject, (body or "").strip())).lastrowid
             pid = db.execute("INSERT INTO plan (milestone_id, subject, priority, body) "
-                             "VALUES (?, 'masterplan', ?, 'tbd.')", (mid, self.config["masterplan_priority"])).lastrowid
+                             "VALUES (?, 'masterplan', ?, 'tbd.')", (mid, self.config["planning_priority"])).lastrowid
             db.execute("INSERT INTO task (plan_id, subject, body) VALUES (?, 'write the masterplan', ?)",
                        (pid, self.prompt("masterplan_prompt", milestone_id=mid, milestone_subject=subject, plan_id=pid)))
         return mid
@@ -514,8 +514,9 @@ class Project:
         subject = PLAN_TASKS_SUBJECT.format(pid)
         if not db.execute("SELECT 1 FROM task WHERE plan_id = ? AND subject = ? AND status = 'open'",
                           (pid, subject)).fetchone():
-            db.execute("INSERT INTO task (plan_id, subject, body) VALUES (?, ?, ?)",
-                       (pid, subject, self.prompt("plan_tasks_prompt", plan_id=pid, plan_subject=p["subject"])))
+            db.execute("INSERT INTO task (plan_id, subject, priority, body) VALUES (?, ?, ?, ?)",
+                       (pid, subject, self.config["planning_priority"],
+                        self.prompt("plan_tasks_prompt", plan_id=pid, plan_subject=p["subject"])))
 
     def plan_add(self, mid, subject, body, prio=None):
         with self.connect(write=True) as db:
