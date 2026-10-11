@@ -34,7 +34,7 @@ PLANNING_KINDS = ("plan", "masterplan", "split")
 SIGNOFF_LEVELS = {"masterplans": "masterplan", "plans": "plan", "task-queue": "task-queue"}
 SIGNOFF_ANSWER = "approve"
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -97,8 +97,8 @@ CREATE TABLE run (                                         -- one worker run of 
     id                    INTEGER PRIMARY KEY,
     task_id               INTEGER NOT NULL REFERENCES task (id),
     started_at            TEXT NOT NULL,
-    ended_at              TEXT NOT NULL,
-    result                TEXT NOT NULL CHECK (result IN ('done', 'blocked', 'failed', 'limit')),
+    ended_at              TEXT,                            -- NULL: running
+    result                TEXT NOT NULL CHECK (result IN ('running', 'done', 'blocked', 'failed', 'limit')),
     reason                TEXT,                            -- failed: why; limit: the message
     exit_code             INTEGER,
     base_commit           TEXT,                            -- HEAD when the run started
@@ -109,7 +109,9 @@ CREATE TABLE run (                                         -- one worker run of 
     output_tokens         INTEGER,
     cache_read_tokens     INTEGER,
     cache_creation_tokens INTEGER,
-    cost_usd              REAL
+    cost_usd              REAL,
+    pid                   INTEGER,                         -- the `pm run` process
+    CONSTRAINT "ended_at is set exactly when not running" CHECK ((result = 'running') = (ended_at IS NULL))
 ) STRICT;
 
 CREATE TABLE task_decision (                               -- the task waits while the decision is pending
@@ -122,6 +124,7 @@ CREATE INDEX plan_milestone ON plan (milestone_id);
 CREATE INDEX task_plan ON task (plan_id);
 CREATE INDEX task_decision_decision ON task_decision (decision_id);
 CREATE INDEX run_task ON run (task_id);
+CREATE UNIQUE INDEX run_running ON run (result) WHERE result = 'running';  -- at most one
 
 CREATE VIEW queue AS
 SELECT coalesce(t.priority, p.priority, 0) AS priority, t.id AS task_id, t.subject, t.kind
@@ -214,7 +217,7 @@ def stamp(ts):
 
 
 def seconds(start, end):
-    return int((datetime.datetime.fromisoformat(end) - datetime.datetime.fromisoformat(start)).total_seconds())
+    return int((datetime.datetime.fromisoformat(end or now()) - datetime.datetime.fromisoformat(start)).total_seconds())
 
 
 def duration(secs):
@@ -843,13 +846,34 @@ class Project:
         except subprocess.CalledProcessError:
             return None
 
-    def record_run(self, tid, started, base, code, info, result, reason=None):
+    def start_run(self, tid):
+        """The run row of the task now running (result 'running'); returns its id."""
+        with self.connect(write=True) as db:
+            return db.execute("INSERT INTO run (task_id, started_at, result, base_commit, pid) "
+                              "VALUES (?, ?, 'running', ?, ?)", (tid, now(), self.head(), os.getpid())).lastrowid
+
+    def record_run(self, rid, code, info, result, reason=None):
         cols = ("model", "session_id", "turns", "input_tokens", "output_tokens", "cache_read_tokens",
                 "cache_creation_tokens", "cost_usd")
         with self.connect(write=True) as db:
-            db.execute(f"INSERT INTO run (task_id, started_at, ended_at, result, reason, exit_code, base_commit, "
-                       f"{', '.join(cols)}) VALUES ({', '.join('?' * (7 + len(cols)))})",
-                       (tid, started, now(), result, reason, code, base, *(info.get(c) for c in cols)))
+            db.execute(f"UPDATE run SET ended_at = ?, result = ?, reason = ?, exit_code = ?, "
+                       f"{', '.join(c + ' = ?' for c in cols)} WHERE id = ?",
+                       (now(), result, reason, code, *(info.get(c) for c in cols), rid))
+
+    def close_stale_run(self):
+        """A 'running' run whose `pm run` is gone becomes failed and is committed; one whose process lives is an
+        error: one `pm run` per repository."""
+        r = (self.rows("SELECT * FROM run WHERE result = 'running'") or [None])[0]
+        if r is None:
+            return
+        with contextlib.suppress(ProcessLookupError, TypeError):
+            if r["pid"] != os.getpid():
+                os.kill(r["pid"], 0)
+                raise FormatError(f"`pm run` (pid {r['pid']}) is working task {r['task_id']}, run {r['id']}")
+        with self.connect(write=True) as db:
+            db.execute("UPDATE run SET ended_at = ?, result = 'failed', reason = 'interrupted' WHERE id = ?",
+                       (now(), r["id"]))
+        self.commit_db(f"run {r['id']} (task {r['task_id']}) interrupted")
 
     def work(self, tid):
         """Run the worker for a task until no usage limit stops it; record each run and commit the task.
@@ -858,12 +882,17 @@ class Project:
         before = self.planning_snapshot()
         while True:
             self.say(f"\n== task {tid} (log: {log})")
-            started, base = now(), self.head()
-            code, info = self.run_worker(cmd, log, tid)
+            rid = self.start_run(tid)
+            try:
+                code, info = self.run_worker(cmd, log, tid)
+            except KeyboardInterrupt:
+                self.record_run(rid, None, {}, "failed", "interrupted")
+                self.failed(tid, "interrupted")
+                raise
             limit = self.limit_line(log, info)
             if not limit:
                 break
-            self.record_run(tid, started, base, code, info, "limit", limit.strip())
+            self.record_run(rid, code, info, "limit", limit.strip())
             reset = limit_reset(limit)
             if reset is None:
                 return self.failed(tid, f"usage limit without a readable reset time: {limit}")
@@ -875,7 +904,7 @@ class Project:
         if errors := self.validate():
             return "failed", "the database is no longer valid, the run is not recorded:\n  " + "\n  ".join(errors)
         if code != 0:
-            self.record_run(tid, started, base, code, info, "failed", f"exit {code}")
+            self.record_run(rid, code, info, "failed", f"exit {code}")
             return self.failed(tid, f"exit {code}\n{tail}")
         with self.connect() as db:
             t = self.get(db, "task", tid)
@@ -887,14 +916,14 @@ class Project:
         elif blocked:
             result = "blocked", "waits for decision(s) " + ", ".join(blocked)
         else:
-            self.record_run(tid, started, base, code, info, "failed", "still open and not blocked")
+            self.record_run(rid, code, info, "failed", "still open and not blocked")
             return self.failed(tid, f"exit 0, but task {tid} is still open and not blocked\n{tail}")
         problem = None
         if left := [l for l in self.git("status", "--porcelain").splitlines() if l[1] != " " and l[3:] != self.db]:
             problem = "the worker left changes that are not staged:\n" + "\n".join(left)
         elif t["status"] == "done" and (missing := self.planning_missing(t, before)):
             problem = f"task {tid} is done, but it {missing}"
-        self.record_run(tid, started, base, code, info, "failed" if problem else result[0], problem)
+        self.record_run(rid, code, info, "failed" if problem else result[0], problem)
         try:
             self.commit_task(tid, t["subject"], result[1])
         except subprocess.CalledProcessError as e:
@@ -953,6 +982,7 @@ class Project:
                 else:
                     self.say(" ".join(f"'{a}'" if " " in a else a for a in self.worker_command(q[0][1])))
                 return 0
+            self.close_stale_run()
             self.close_and_commit()
             if interactive and self.pending() and self.decide(ask):
                 self.commit_db("decisions answered")
@@ -985,6 +1015,9 @@ class Project:
     # --- status ------------------------------------------------------------------------------
 
     def status(self):
+        for r in self.rows("SELECT * FROM run WHERE result = 'running'"):
+            self.say(f"Running: task {r['task_id']} (run {r['id']}, pid {r['pid']}) since {stamp(r['started_at'])}, "
+                     f"{duration(seconds(r['started_at'], None))}")
         for m in self.rows(
                 "SELECT m.id, m.subject, m.created_at, "
                 "(SELECT count(*) FROM plan p WHERE p.milestone_id = m.id) AS plans, "
