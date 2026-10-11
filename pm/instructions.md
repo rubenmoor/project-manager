@@ -14,7 +14,7 @@
 ## Model
 
 - **Milestone:** subject, body (Markdown), status `open` | `implemented`, created date. `pm milestone add` also creates its first plan, the **masterplan** (body "tbd."), and the task "write the masterplan". Once a milestone has no open task, `pm run` queues the task "post-milestone cleanup" in its first plan (body: `cleanup_prompt` in project-manager.toml); when that is closed too, the milestone becomes `implemented`.
-- **Plan:** belongs to a milestone; subject, body (required), priority (optional). Adding a plan, or changing its subject or body, queues the task "create tasks for plan N", unless that task is already open.
+- **Plan:** belongs to a milestone; subject, body (required), priority (optional; the masterplan: `masterplan_priority`, 10000). Adding a plan, or changing its subject or body, queues the task "create tasks for plan N", unless that task is already open.
 - **Task:** belongs to a plan; subject, body (required while open), status `open` | `done` | `dropped`, note (done: date and files or commit; dropped: the reason), priority (optional; default: the plan's, else 0).
 - **Decision:** subject (the question), body (context), options (the recommended one first), status `pending` | `answered` | `irrelevant`. A task linked to a pending decision waits. When the human answers, the task becomes workable again and its worker sees the answer in `pm show`. When a decision is marked irrelevant, the open tasks waiting for it are dropped.
 - **Queue:** open tasks of open milestones that no pending decision blocks; highest priority first, then by milestone, plan and task id. `pm run` takes the first one.
@@ -32,9 +32,17 @@ pm validate      # check tasks.sql; exit 1 with the problems
 
 ```
 Queue (3):
-    +2  task 3: export endpoint
-        task 1: write the masterplan
-    -1  task 2: create tasks for plan 1
+  +10000  task 1: write the masterplan
+    +800  task 3: create tasks for plan 2
+            task 4: tidy up
+```
+
+`pm plans list` (or `pm plan list`): plans of open milestones, one per line, highest priority first:
+
+```
+ 10000  plan 1: masterplan
+  1000  plan 3: Database schema
+   800  plan 2: Export endpoint
 ```
 
 `pm show` is what a worker gets in its prompt: Markdown headings for the milestone, plan and task, then the decisions, for example `Decision 1 (answered): Which delimiter? → semicolon`.
@@ -76,7 +84,7 @@ pm plan add 1 "Backend endpoint" <<'EOF'
 EOF
 # prints the plan id, e.g. 2, and queues "create tasks for plan 2"
 
-pm plan add 1 "UI button" --priority 1 <<'EOF'
+pm plan add 1 "UI button" --priority 500 <<'EOF'
 …
 EOF
 
@@ -87,7 +95,7 @@ The masterplan, divided into parts:
 2. UI button
 EOF
 pm plan edit 2 --subject "Export endpoint"
-pm plan edit 2 --priority 3      # its tasks without their own priority move up
+pm plan edit 2 --priority 1010   # its tasks without their own priority move up
 pm plan edit 2 --priority none   # back to 0
 ```
 
@@ -103,13 +111,13 @@ Done when: a test exports a table with 3 rows and an empty table.
 EOF
 # prints the task id, e.g. 5
 
-pm task add 2 "Docs for the export endpoint" --priority -1 <<'EOF'
+pm task add 2 "Docs for the export endpoint" --priority 790 <<'EOF'
 …
 EOF
 
 pm task done 5 "2026-10-10, app/api/export.py, tests/test_export.py"
 pm task drop 6 "covered by task 5"
-pm task priority 6 2        # earlier; negative: later
+pm task priority 6 810      # earlier than the plan's other tasks (plan priority 800)
 pm task priority 6 none     # back to the plan's priority
 ```
 
@@ -140,13 +148,19 @@ pm decide            # answer pending decisions: a number, own text, s = skip, x
 
 Agents don't start `pm run`: a worker is already one task of a run.
 
+## Priorities
+
+- Higher runs first; a task without its own priority gets its plan's.
+- Rules for choosing them: `plan_priority_prompt` and `task_priority_prompt` in project-manager.toml, printed at the end of `pm instructions`.
+- `pm run` appends them to the worker prompt: the plan rules for tasks of a masterplan (they write plans), the task rules for "create tasks for plan N".
+
 ## Recipes
 
 **Write the masterplan** (task "write the masterplan" of plan P): read the milestone (`pm show <task>`) and the code. Write the plan with `pm plan edit P --body -`, divided into parts, and state there that the masterplan's own tasks are not implementation work: each writes the plan for one part. That edit queues "create tasks for plan P". Finish with `pm task done`.
 
-**Split a plan into tasks** (task "create tasks for plan P"): add one `pm task add P "<subject>"` per task, in the order they should run. Use priorities only where that order is wrong. Raise a decision for each question only the human can answer, and link the tasks that wait for it. Then `pm task done <your task> "<date>, tasks …"`.
+**Split a plan into tasks** (task "create tasks for plan P"): add one `pm task add P "<subject>"` per task, in the order they should run. Priorities: see "Priorities". Raise a decision for each question only the human can answer, and link the tasks that wait for it. Then `pm task done <your task> "<date>, tasks …"`.
 
-**Write a part's plan** (a task of the masterplan): `pm plan add <milestone> "<part subject>"` with the full body. That queues its "create tasks" task. Then close your task.
+**Write a part's plan** (a task of the masterplan): `pm plan add <milestone> "<part subject>" --priority N` with the full body, N by "Priorities". That queues its "create tasks" task. Then close your task.
 
 **Post-milestone cleanup** (task "post-milestone cleanup"): work through its body for the whole project, not just this milestone. Change other milestones with `pm milestone set`; for a pending decision that seems obsolete, say so in a new decision for the human. Then close your task.
 

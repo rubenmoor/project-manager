@@ -47,7 +47,7 @@ pm milestone add "Users can export their data as CSV" < milestone-csv-export.md
 
 Questions you can't answer yet don't need to block the milestone: workers turn them into decisions, and `pm run` asks you (`pm decide`).
 
-`pm init` writes `project-manager.toml` from the template `pm/project-manager.toml` (database file name, worker command, usage-limit margin, log folder, editor, the three prompts below) and `tasks.sql` with the schema (`SCHEMA` in `pm/__init__.py`), and commits them; run again, it adds only what is missing. Other commands need both files. Nothing is pushed.
+`pm init` writes `project-manager.toml` from the template `pm/project-manager.toml` (database file name, worker command, usage-limit margin, log folder, editor, the three prompts below, the priority settings) and `tasks.sql` with the schema (`SCHEMA` in `pm/__init__.py`), and commits them; run again, it adds only what is missing. Other commands need both files. Nothing is pushed.
 
 **Storage.** `tasks.sql` is the database: the schema, then one `INSERT` per row, sorted by key. Every command loads it into an in-memory SQLite database; a change rewrites it. So `git diff` shows changed rows, branches that change different rows merge cleanly, and two branches that create the same id conflict on that line (fix the file, then `pm validate`). `pm` commits its own changes (`pm: …`); inside `pm run`, workers commit theirs together with their work. Hand edits are fine; `pm validate` checks them. A `tasks.sql` from before the rename to subject/body (title/description, question/context; schema version 5 or 6) is migrated in memory and rewritten by the next change.
 
@@ -57,13 +57,20 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 
 **Queue** (the `queue` view): open tasks of open milestones that no pending decision blocks, by priority (task's, else plan's, else 0; highest first), then milestone, plan and task id.
 
+**Priorities.** Set by workers, following rules in project-manager.toml:
+
+- `masterplan_priority` (10000): the masterplan's tasks run first, so all plans exist before their tasks run.
+- `plan_priority_prompt`: a new plan's priority by what it affects (database schema 1000 … media and assets 300), adjusted after `pm plans list` when it must run before or after another plan. Appended to the prompt of the masterplan's tasks.
+- `task_priority_prompt`: a task gets its own priority only for a good reason, the plan's ± a multiple of 10. Appended to the prompt of "create tasks for plan N".
+- Both are also printed at the end of `pm instructions`; empty turns one off.
+
 ## Commands
 
 | | |
 |---|---|
 | `init` | Write and commit the config and the database (missing ones only) |
 | `instructions` | The full reference for agents (`pm/instructions.md`): every command with examples, recipes, errors |
-| `status`, `queue`, `show <task>`, `validate` | Inspect |
+| `status`, `queue`, `plans list`, `show <task>`, `validate` | Inspect |
 | `decide` | Answer pending decisions (number, text, `s` skip, `x <reason>` irrelevant: drops the tasks it blocks) |
 | `run [--once] [--dry-run]` | Work the queue until it is empty, a worker fails, or the tree has uncommitted changes |
 | `milestone add`, `plan add <milestone>`, `task add <plan>` | In your editor (as `git commit`): first line subject, rest body (Markdown); quit unsaved or save empty to abort |

@@ -40,3 +40,33 @@ cleanup_prompt = '''
 * check pending decisions if they are still relevant and really pending
 * check other milestones if their contents are up-to-date and update them if necessary
 '''
+
+# Priority of the masterplan `pm milestone add` creates: above every other plan, so all plans exist and are
+# prioritized against each other before their tasks run.
+masterplan_priority = 10000
+
+# Appended to the prompt of the tasks that write plans (the tasks of a milestone's masterplan) and to
+# `pm instructions`. Empty: nothing.
+plan_priority_prompt = '''
+Plan priority (higher runs first). Give every new plan (not the masterplan) the priority of what it mostly affects:
+
+  1000  database schema or equivalent
+   900  public-facing API
+   800  backend code or equivalent
+   700  core mechanics, core functionality
+   600  client-side code
+   500  user interface
+   400  visual design
+   300  media and assets
+
+Then run `pm plans list`. If the new plan must clearly run before or after another plan, pick a priority that puts
+it there instead, e.g. one above that plan's. Set it with `pm plan add … --priority N` or `pm plan edit <plan> --priority N`.
+'''
+
+# Appended to the prompt of the tasks "create tasks for plan N" and to `pm instructions`. Empty: nothing.
+task_priority_prompt = '''
+Task priority: leave it out, so the task gets its plan's priority, unless there is a good reason for it to run
+earlier or later than the order you add the tasks in. Then use the plan's priority (`pm show`) plus or minus a
+multiple of 10, e.g. `--priority 810` or `--priority 790` in a plan with priority 800, so priorities can be fine-tuned
+later.
+'''

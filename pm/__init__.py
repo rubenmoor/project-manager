@@ -7,7 +7,7 @@ tasks are all closed gets a last one, the post-milestone cleanup, before it is i
 milestone, plan and task. Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
 
     pm init | status | queue | show <task> | validate | decide | run [--once] [--dry-run] | instructions
-    pm milestone add|set …   pm plan add|edit …   pm task add|done|drop|priority …
+    pm milestone add|set …   pm plan add|edit|list …   pm task add|done|drop|priority …
     pm decision add …   pm task-pending-decision <task> <decision>
 
 Works on the git repository around the current directory. `pm init` writes the settings, project-manager.toml (the
@@ -23,7 +23,9 @@ CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
 EPILOG = "Agents (LLMs): read `pm instructions` first, the full reference with examples for every command."
 PROMPT_KEYS = ("masterplan_prompt", "plan_tasks_prompt", "cleanup_prompt")
+PRIORITY_KEYS = ("plan_priority_prompt", "task_priority_prompt")
 CLEANUP_SUBJECT = "post-milestone cleanup"
+PLAN_TASKS_SUBJECT = "create tasks for plan {}"
 MILESTONE_STATES = ("open", "implemented")
 
 SCHEMA_VERSION = 7
@@ -98,6 +100,7 @@ CLAUDE.md or similar), then do task {id} and nothing else.
 Milestones, plans, tasks and decisions are in {db}; change them only with these commands (a text value - reads stdin):
   pm plan add <milestone id> "<subject>" < body.md     a task to split it into tasks is queued
   pm plan edit <plan id> [--subject …] [--body …] [--priority N]
+  pm plans list     plans of open milestones, highest priority first
   pm task add <plan id> "<subject>" [--priority N] < body.md     positive priority: earlier
   pm decision add "<subject>" [--body "<text>"] [--option "<recommended>"] [--option …]   prints its id
   pm task-pending-decision <task id> <decision id>     the task waits until the human answers
@@ -204,6 +207,10 @@ def load_config(root):
     errors += [f"{k} must be a string" for k in ("log_dir", "editor") if not isinstance(config[k], str)]
     errors += [f"{k} must be a non-empty string" for k in PROMPT_KEYS
                if not isinstance(config[k], str) or not config[k].strip()]
+    errors += [f"{k} must be a string" for k in PRIORITY_KEYS if not isinstance(config[k], str)]
+    p = config["masterplan_priority"]
+    if not isinstance(p, int) or isinstance(p, bool):
+        errors.append("masterplan_priority must be an integer")
     if errors:
         raise FormatError(f"{CONFIG_FILE}: " + "; ".join(errors))
     return config
@@ -487,8 +494,8 @@ class Project:
         with self.connect(write=True) as db:
             mid = db.execute("INSERT INTO milestone (subject, body) VALUES (?, ?)",
                              (subject, (body or "").strip())).lastrowid
-            pid = db.execute("INSERT INTO plan (milestone_id, subject, body) VALUES (?, 'masterplan', 'tbd.')",
-                             (mid,)).lastrowid
+            pid = db.execute("INSERT INTO plan (milestone_id, subject, priority, body) "
+                             "VALUES (?, 'masterplan', ?, 'tbd.')", (mid, self.config["masterplan_priority"])).lastrowid
             db.execute("INSERT INTO task (plan_id, subject, body) VALUES (?, 'write the masterplan', ?)",
                        (pid, self.prompt("masterplan_prompt", milestone_id=mid, milestone_subject=subject, plan_id=pid)))
         return mid
@@ -504,7 +511,7 @@ class Project:
     def queue_plan_tasks(self, db, pid):
         """Queue the task that splits plan pid into tasks, unless one is still open."""
         p = self.get(db, "plan", pid)
-        subject = f"create tasks for plan {pid}"
+        subject = PLAN_TASKS_SUBJECT.format(pid)
         if not db.execute("SELECT 1 FROM task WHERE plan_id = ? AND subject = ? AND status = 'open'",
                           (pid, subject)).fetchone():
             db.execute("INSERT INTO task (plan_id, subject, body) VALUES (?, ?, ?)",
@@ -582,8 +589,27 @@ class Project:
 
     # --- run ---------------------------------------------------------------------------------
 
+    def plans(self):
+        """[(priority, plan id, subject)] of open milestones, highest priority first."""
+        return [tuple(r.values()) for r in self.rows(
+            "SELECT coalesce(p.priority, 0) AS priority, p.id, p.subject FROM plan p "
+            "JOIN milestone m ON m.id = p.milestone_id WHERE m.status = 'open' "
+            "ORDER BY priority DESC, m.id, p.id")]
+
+    def priority_prompts(self, tid):
+        """The priority instructions for task tid: for plans in a masterplan's tasks (they write plans), for tasks
+        in "create tasks for plan N"."""
+        with self.connect() as db:
+            t = self.get(db, "task", tid)
+            first = db.execute("SELECT min(q.id) FROM plan p JOIN plan q ON q.milestone_id = p.milestone_id "
+                               "WHERE p.id = ?", (t["plan_id"],)).fetchone()[0]
+        keys = (["plan_priority_prompt"] if t["plan_id"] == first else []) + \
+               (["task_priority_prompt"] if t["subject"] == PLAN_TASKS_SUBJECT.format(t["plan_id"]) else [])
+        return [text for k in keys if (text := self.prompt(k))]
+
     def worker_command(self, tid):
-        prompt = WORKER_PROMPT.format(id=tid, db=self.db, show=self.show(tid))
+        show = "\n".join([self.show(tid), *self.priority_prompts(tid)]).rstrip() + "\n"
+        prompt = WORKER_PROMPT.format(id=tid, db=self.db, show=show)
         return [a.replace("{prompt}", prompt) for a in self.config["worker"]]
 
     @property
@@ -714,11 +740,15 @@ class Project:
         for d in pending:
             self.say(f"  {d['id']}: {d['subject']}")
 
+    def print_plans(self):
+        for prio, pid, subject in self.plans():
+            self.say(f"{prio:6d}  plan {pid}: {subject}")
+
     def print_queue(self, limit=None):
         q = self.queue()
         self.say(f"\nQueue ({len(q)}):")
         for prio, tid, subject in q[:limit]:
-            self.say(f"  {prio:+4d}  task {tid}: {subject}" if prio else f"        task {tid}: {subject}")
+            self.say(f"  {prio:+6d}  task {tid}: {subject}" if prio else f"          task {tid}: {subject}")
         if limit and len(q) > limit:
             self.say(f"  … {len(q) - limit} more (`pm queue`)")
 
@@ -764,7 +794,8 @@ def main(argv=None):
     mset.add_argument("--status", choices=MILESTONE_STATES)
     mset.add_argument("--body", type=text_arg)
 
-    p = sub.add_parser("plan", help="add or change plans").add_subparsers(dest="action", required=True)
+    p = sub.add_parser("plan", aliases=["plans"], help="add, change or list plans").add_subparsers(
+        dest="action", required=True)
     pa = p.add_parser("add", help="new plan; prints its id and queues the task that splits it into tasks")
     pa.add_argument("milestone", type=int)
     pa.add_argument("subject", nargs="?", help="then the body (Markdown) is read from stdin; without: editor")
@@ -774,6 +805,7 @@ def main(argv=None):
     pe.add_argument("--subject")
     pe.add_argument("--body", type=text_arg)
     pe.add_argument("--priority", type=lambda v: v if v == "none" else int(v), help="integer, or none for 0")
+    p.add_parser("list", help="plans of open milestones, one per line: priority, id, subject; highest priority first")
 
     t = sub.add_parser("task", help="add or change tasks").add_subparsers(dest="action", required=True)
     a = t.add_parser("add", help="new task; prints its id")
@@ -800,6 +832,14 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if args.cmd == "instructions":
         print(INSTRUCTIONS.read_text(encoding="utf-8"), end="")
+        root = args.root or git_root()
+        try:
+            pm = Project(root, load_config(root)) if root else Project(".")
+        except FormatError:
+            pm = Project(".")
+        texts = [t for k in PRIORITY_KEYS if (t := pm.prompt(k))]
+        if texts:
+            print("\n## Priorities (project-manager.toml)\n\n" + "\n\n".join(texts))
         return 0
     root = args.root or git_root()
     if root is None:
@@ -841,8 +881,10 @@ def main(argv=None):
             else:
                 pm.milestone_set(args.milestone, subject=args.subject, status=args.status, body=args.body)
                 msg = f"milestone {args.milestone} changed"
-        elif args.cmd == "plan":
-            if args.action == "add":
+        elif args.cmd in ("plan", "plans"):
+            if args.action == "list":
+                pm.print_plans()
+            elif args.action == "add":
                 pm.require("milestone", args.milestone)
                 if not (entry := pm.subject_and_body("plan", args.subject)):
                     print("pm: aborted, no plan added")
