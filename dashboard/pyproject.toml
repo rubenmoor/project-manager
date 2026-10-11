@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+# Needs the `pm` package of this repository, which is not on PyPI under that name, so it is not listed here:
+# install both (`pipx install .` then `pipx inject pm ./dashboard --include-apps`), or use `nix run .#dashboard`.
+[project]
+name = "pm-dashboard"
+version = "0.1.0"
+description = "A local, read-only web view of a pm project's tasks.sql"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+pm-dashboard = "pm_dashboard:main"
+
+[tool.setuptools]
+packages = ["pm_dashboard"]
+
+[tool.setuptools.package-data]
+pm_dashboard = ["static/*", "static/vendor/*"]

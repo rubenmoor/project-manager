@@ -100,6 +100,10 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 
 Global: `--root <repo>`. A text value `-` reads stdin.
 
+## Dashboard
+
+`dashboard/` holds `pm-dashboard`, an optional local web view of `tasks.sql`: queue, milestones, decisions, runs and cost, the running worker's log, live. A separate package, not installed with `pm`: `nix run .#dashboard` (details: `dashboard/README.md`).
+
 ## Workers
 
 Each task runs the configured `worker` command (default: `claude -p` with `Bash Read Edit Write Glob Grep` allowed). The prompt (`WORKER_PROMPT` in `pm/__init__.py`) holds the task with its plan and milestone, and the `pm` commands the worker may use: `plan add`, `plan edit`, `task add`, `decision add`, `task-pending-decision`, `task done|drop`. It points the worker to `pm instructions` for examples of every command. Agents outside `pm run`, e.g. a Claude session asked to plan work, should run `pm instructions` too: say so in the project's `AGENTS.md` or `CLAUDE.md`. **The worker has full shell access in the project.** The default command has claude print JSON (`--output-format stream-json --verbose`): `pm` shows the text and tool calls in the terminal and records model, turns, tokens and cost in the run. Other commands' plain output is shown as it is. Logs, raw: `.git/pm-logs/task-<id>.log` (`log_dir`). On a usage limit, `pm` waits for the reset and retries.

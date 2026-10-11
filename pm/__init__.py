@@ -788,6 +788,7 @@ class Project:
                                   stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1) as proc:
                 for line in proc.stdout:
                     f.write(line)
+                    f.flush()                   # read live by pm-dashboard
                     shown = self.read_event(line, info)
                     if shown is not None:
                         self.out.write(shown)
