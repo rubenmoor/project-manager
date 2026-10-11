@@ -45,8 +45,7 @@ cleanup_prompt = '''
 # "create tasks for plan N". Above every other plan, so all plans and their tasks exist before implementation starts.
 planning_priority = 1000
 
-# Appended to the prompt of the tasks that write plans (the tasks of a milestone's masterplan) and to
-# `pm instructions`. Empty: nothing.
+# Appended to every worker's prompt and to `pm instructions`. Empty: nothing.
 plan_priority_prompt = '''
 Before writing a plan, run `pm plan list`: the existing plans with open tasks, their ids and priorities. Don't
 duplicate one of them; refer to it where the new plan depends on it.
@@ -63,7 +62,7 @@ Plan priority (higher runs first). Give every new plan (not the masterplan) the 
    200  media and assets
 
 If the new plan must clearly run before or after one of the listed plans, pick a priority that puts it there
-instead, e.g. one above that plan's; stay below 1000, the priority of planning work. Set it with
+instead, e.g. 100 above or below that plan's; stay below 1000, the priority of planning work. Set it with
 `pm plan add … --priority N` or `pm plan edit <plan> --priority N`.
 '''
 

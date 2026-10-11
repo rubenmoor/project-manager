@@ -155,7 +155,7 @@ Agents don't start `pm run`: a worker is already one task of a run.
 
 - Higher runs first; a task without its own priority gets its plan's.
 - Rules for choosing them: `plan_priority_prompt` and `task_priority_prompt` in project-manager.toml, printed at the end of `pm instructions`.
-- `pm run` appends them to the worker prompt: the plan rules for tasks of a masterplan (they write plans), the task rules for "create tasks for plan N".
+- `pm run` appends them to the worker prompt: the plan rules for every task, the task rules for "create tasks for plan N".
 
 ## Recipes
 

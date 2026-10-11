@@ -60,7 +60,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 **Priorities.** Set by workers, following rules in project-manager.toml:
 
 - `planning_priority` (1000): the masterplan's tasks and every "create tasks for plan N" run first, so all plans and tasks exist before implementation starts.
-- `plan_priority_prompt`: a new plan's priority by what it affects (database schema 900 … media and assets 200), adjusted after `pm plans list` when it must run before or after another plan. Appended to the prompt of the masterplan's tasks.
+- `plan_priority_prompt`: a new plan's priority by what it affects (database schema 900 … media and assets 200), adjusted after `pm plans list` when it must run before or after another plan. Appended to every worker's prompt.
 - `task_priority_prompt`: a task gets its own priority only for a good reason, the plan's ± a multiple of 10. Appended to the prompt of "create tasks for plan N".
 - Both are also printed at the end of `pm instructions`; empty turns one off.
 

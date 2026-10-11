@@ -602,13 +602,10 @@ class Project:
             "ORDER BY priority DESC, m.id, p.id")]
 
     def priority_prompts(self, tid):
-        """The priority instructions for task tid: for plans in a masterplan's tasks (they write plans), for tasks
-        in "create tasks for plan N"."""
+        """The priority instructions for task tid: for plans in every task, for tasks in "create tasks for plan N"."""
         with self.connect() as db:
             t = self.get(db, "task", tid)
-            first = db.execute("SELECT min(q.id) FROM plan p JOIN plan q ON q.milestone_id = p.milestone_id "
-                               "WHERE p.id = ?", (t["plan_id"],)).fetchone()[0]
-        keys = (["plan_priority_prompt"] if t["plan_id"] == first else []) + \
+        keys = ["plan_priority_prompt"] + \
                (["task_priority_prompt"] if t["subject"] == PLAN_TASKS_SUBJECT.format(t["plan_id"]) else [])
         return [text for k in keys if (text := self.prompt(k))]
 
