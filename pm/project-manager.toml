@@ -66,7 +66,7 @@ instead, e.g. 100 above or below that plan's; stay below 1000, the priority of p
 `pm plan add … --priority N` or `pm plan edit <plan> --priority N`.
 '''
 
-# Appended to the prompt of the tasks "create tasks for plan N" and to `pm instructions`. Empty: nothing.
+# Appended to every worker's prompt and to `pm instructions`. Empty: nothing.
 task_priority_prompt = '''
 Task priority: leave it out, so the task gets its plan's priority, unless there is a good reason for it to run
 earlier or later than the order you add the tasks in. Then use the plan's priority (`pm show`) plus or minus a

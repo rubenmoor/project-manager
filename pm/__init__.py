@@ -601,16 +601,11 @@ class Project:
             "AND EXISTS (SELECT 1 FROM task t WHERE t.plan_id = p.id AND t.status = 'open') "
             "ORDER BY priority DESC, m.id, p.id")]
 
-    def priority_prompts(self, tid):
-        """The priority instructions for task tid: for plans in every task, for tasks in "create tasks for plan N"."""
-        with self.connect() as db:
-            t = self.get(db, "task", tid)
-        keys = ["plan_priority_prompt"] + \
-               (["task_priority_prompt"] if t["subject"] == PLAN_TASKS_SUBJECT.format(t["plan_id"]) else [])
-        return [text for k in keys if (text := self.prompt(k))]
+    def priority_prompts(self):
+        return [text for k in PRIORITY_KEYS if (text := self.prompt(k))]
 
     def worker_command(self, tid):
-        show = "\n".join([self.show(tid), *self.priority_prompts(tid)]).rstrip() + "\n"
+        show = "\n".join([self.show(tid), *self.priority_prompts()]).rstrip() + "\n"
         prompt = WORKER_PROMPT.format(id=tid, db=self.db, show=show)
         return [a.replace("{prompt}", prompt) for a in self.config["worker"]]
 
@@ -854,8 +849,7 @@ def main(argv=None):
             pm = Project(root, load_config(root)) if root else Project(".")
         except FormatError:
             pm = Project(".")
-        texts = [t for k in PRIORITY_KEYS if (t := pm.prompt(k))]
-        if texts:
+        if texts := pm.priority_prompts():
             print("\n## Priorities (project-manager.toml)\n\n" + "\n\n".join(texts))
         return 0
     root = args.root or git_root()
