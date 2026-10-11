@@ -2,11 +2,14 @@ import { html, render, useState, useEffect, useMemo, useRef } from "/vendor/prea
 import { index } from "/data.js";
 import { Pill, Elapsed, Time } from "/ui.js";
 import { Overview, Queue, Milestones, Milestone, Plan, Task, Decisions, Decision, Runs } from "/views.js";
+import { Live } from "/live.js";
+import { Since, useSince, sinceCount } from "/since.js";
+import { useNotifications, NotifyButton } from "/notify.js";
 
 function route() {
   const [path, query] = location.hash.replace(/^#/, "").split("?");
   const parts = path.split("/").filter(Boolean);
-  return { page: parts[0] || "overview", id: parts[1] ? Number(parts[1]) : null, query: query || null };
+  return { page: parts[0] || "home", id: parts[1] ? Number(parts[1]) : null, query: query || null };
 }
 
 // /api/state, refetched whenever the server's event stream says something changed.
@@ -39,8 +42,8 @@ function useState2() {
   return { state, log, online };
 }
 
-const NAV = [["overview", "Overview", "o"], ["queue", "Queue", "q"], ["milestones", "Milestones", "m"],
-  ["decisions", "Decisions", "d"], ["runs", "Runs", "r"]];
+const NAV = [["live", "Live", "l"], ["overview", "Overview", "o"], ["queue", "Queue", "q"], ["milestones", "Milestones", "m"],
+  ["decisions", "Decisions", "d"], ["since", "Since you looked", "s"], ["runs", "Runs", "r"]];
 const SECTION = { milestone: "milestones", plan: "milestones", task: "milestones", decision: "decisions" };
 
 function Search({ d }) {
@@ -91,7 +94,8 @@ function Theme() {
 
 function App() {
   const { state, log, online } = useState2();
-  const [r, setR] = useState(route());
+  const [r0, setR] = useState(route());
+  let r = r0;
   useEffect(() => {
     const f = () => { setR(route()); scrollTo(0, 0); };
     addEventListener("hashchange", f);
@@ -100,7 +104,7 @@ function App() {
       if (/INPUT|TEXTAREA/.test(document.activeElement.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key === "g") { g = true; setTimeout(() => (g = false), 800); return; }
       const n = g && NAV.find((x) => x[2] === e.key);
-      if (n) location.hash = `#/${n[0] === "overview" ? "" : n[0]}`;
+      if (n) location.hash = `#/${n[0]}`;
       g = false;
     };
     addEventListener("keydown", k);
@@ -108,9 +112,21 @@ function App() {
   }, []);
   const shown = state && (state.tables ? state : state.last_good);
   const d = useMemo(() => (shown ? index({ ...shown, __log: log }) : null), [shown, log]);
+  const since = useSince(shown);
+  useNotifications(d);
+  // The home page: the run view while pm runs (or ran in the last 5 minutes), else the overview; chosen on arrival.
+  const [home, setHome] = useState(null);
+  useEffect(() => {
+    if (r0.page !== "home") { setHome(null); return; }
+    if (!d || home) return;
+    const recent = d.runs.some((x) => x.ended_at && Date.now() - new Date(x.ended_at) < 300e3);
+    setHome(d.milestones.length && (d.running || recent) ? "live" : "overview");
+  }, [r0.page, !!d]);
+  if (r.page === "home") r = { ...r, page: home || "overview" };
   const page = SECTION[r.page] || r.page;
   const pending = d ? d.decisions.filter((x) => x.status === "pending").length : 0;
-  const View = { overview: Overview, queue: Queue, milestones: Milestones, milestone: Milestone, plan: Plan, task: Task,
+  const nSince = sinceCount(since.since);
+  const View = { live: Live, since: (p) => html`<${Since} since=${since.since} mark=${since.mark} state=${p.d.state} />`, overview: Overview, queue: Queue, milestones: Milestones, milestone: Milestone, plan: Plan, task: Task,
     decisions: Decisions, decision: Decision, runs: Runs }[r.page];
   const root = state ? state.root.split("/").pop() : "";
   return html`<div class="app">
@@ -123,12 +139,15 @@ function App() {
         <span class="muted"> · <${Time} ts=${state.head.date} /></span>` : null}
         ${state && state.dirty.length ? html` <span class="tag" title=${state.dirty.join("\n")}>${state.dirty.length} uncommitted</span>` : null}</span>
       <${Search} d=${d} />
+      <${NotifyButton} />
       <${Theme} />
     </header>
-    <nav class="nav">${NAV.map(([k, label]) => html`<a href=${`#/${k === "overview" ? "" : k}`} class=${page === k ? "on" : ""}>
-      <span>${label}</span>${k === "decisions" && pending ? html`<span class="tag">${pending}</span>` : null}</a>`)}
-      <div class="keys">g o, g q, g m, g d, g r: go to; / search</div></nav>
-    <main class="main">
+    <nav class="nav">${NAV.map(([k, label]) => html`<a href=${`#/${k}`} class=${page === k ? "on" : ""}>
+      <span>${label}</span>${k === "decisions" && pending ? html`<span class="tag">${pending}</span>` : null}
+      ${k === "since" && nSince ? html`<span class="tag new">${nSince}</span>` : null}
+      ${k === "live" && d && d.running ? html`<span class="livedot" title="a worker is running"></span>` : null}</a>`)}
+      <div class="keys">g + l o q m d s r: go to<br />/ search · i edit · Esc save</div></nav>
+    <main class=${"main" + (page === "live" ? " full" : "")}>
       ${state && state.error ? html`<div class="banner error"><b>Can't read the database.</b> <pre>${state.error}</pre>
         ${state.last_good ? html`<div class="muted">Showing the last state that could be read.</div>` : null}</div>` : null}
       ${!state ? html`<div class="empty">Loading…</div>` : d && View ? html`<${View} d=${d} id=${r.id} query=${r.query} />`

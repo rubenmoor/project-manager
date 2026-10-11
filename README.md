@@ -102,7 +102,7 @@ Global: `--root <repo>`. A text value `-` reads stdin.
 
 ## Dashboard
 
-`dashboard/` holds `pm-dashboard`, an optional local web view of `tasks.sql`: queue, milestones, decisions, runs and cost, the running worker's log, live. A separate package, not installed with `pm`: `nix run .#dashboard` (details: `dashboard/README.md`).
+`dashboard/` holds `pm-dashboard`, an optional local web view and editor of `tasks.sql`: the running worker and its output, queue, milestones, decisions, what changed since you last looked, runs and cost, live; subjects, bodies and priorities edited in place. A separate package, not installed with `pm`: `nix run .#dashboard` (details: `dashboard/README.md`).
 
 ## Workers
 

@@ -1,6 +1,6 @@
 # pm-dashboard
 
-An optional, local, read-only web view of a pm project: milestones, plans, tasks, the queue, decisions and worker runs, live while `pm run` works. It lives in the pm repository but is a separate package, never installed with `pm`. It imports `pm` to read `tasks.sql`, so both always agree on the schema.
+An optional, local web view and editor for a pm project: milestones, plans, tasks, the queue, decisions and worker runs, live while `pm run` works. It lives in the pm repository but is a separate package, never installed with `pm`. It imports `pm` to read and change `tasks.sql`, so both always agree on the schema and the rules.
 
 ## Run
 
@@ -13,25 +13,42 @@ In the project's git repository (the one with `project-manager.toml`):
 
 ## Views
 
-- **Overview**: the running task, decisions waiting on you, cost, open milestones with progress, queue head
-- **Queue**: as `pm run` sees it; below, open tasks it leaves out and why (pending decision, milestone implemented)
-- **Milestones**: plans by priority with their tasks; filters by status and kind
-- **Task**: body, note, priority and where it comes from, decisions, rows it created, runs, worker log (live while it runs)
-- **Decisions**: pending sign-offs, pending questions, closed; a sign-off shows what it approves
+- **Live** (home while pm runs): left, one timeline: queue above (next nearest), the running task, done and dropped tasks below (newest first); right, the running task's output
+- **Overview**: running task, decisions waiting on you, cost, open milestones with progress, queue head; without milestones a welcome screen with one button
+- **Queue**: as `pm run` sees it; open tasks it leaves out and why
+- **Milestones**, **plans**: plans by priority with their tasks; filters by status and kind
+- **Task**: body, note, priority, decisions, rows it created, runs, the diff of its commit (syntax highlighted), worker log
+- **Decisions**: pending sign-offs and questions by milestone, the ones holding up the most important work first; closed ones
+- **Since you looked**: rows changed since the commit you marked as seen (uncommitted ones included): decisions answered, plan bodies as diffs, new and closed tasks, runs
 - **Runs**: cost per day, per task kind, per milestone; every run
-- Keys: `g o`, `g q`, `g m`, `g d`, `g r`; `/` searches subjects (and bodies), a number finds that id
+- Notifications (`notify` in the top bar): a new pending decision, a failed run, `pm run` stopped or done
+- Keys: `g` then `l o q m d s r` to go; `/` search (a number finds that id); `i` edit; Esc save
+
+## Editing
+
+Text is edited in place, through pm's own methods; each change is a commit (`pm: … (dashboard)`).
+
+- Subjects and bodies of milestones, plans and tasks: rendered; `i`, Enter or a click shows the source (CodeMirror, Markdown); Esc or leaving it saves
+- Priorities: click the number; empty clears it
+- Tasks: done or drop with a note; add milestones, plans (pm queues their split task) and tasks
+- A changed plan subject or body queues "create tasks for plan N" again, as `pm plan edit` does
+- While a worker runs: the running task can't be changed; other changes are allowed and committed with the running task, not on their own
+- pm's checks apply: e.g. an open task needs a body
 
 ## How it works
 
-- Reads the working copy of `tasks.sql` (a running worker's changes included) through `pm.Project.connect()`, never writes
-- Polls `tasks.sql`, `.git/HEAD`, `.git/index`, `.git/logs/HEAD` every 0.5 s; pushes changes over server-sent events
+- Reads the working copy of `tasks.sql` (a running worker's changes included) through `pm.Project.connect()`
+- Polls `tasks.sql`, `.git/HEAD`, `.git/index`, `.git/logs/HEAD` every 0.5 s; pushes changes over server-sent events; the browser refetches the snapshot
 - The running task: the `run` row with result `running` that `pm run` keeps while a worker works
-- Worker log: `.git/pm-logs/task-<id>.log`, shown as `pm run` shows it (`pm.Project.read_event`)
-- Unreadable `tasks.sql` (mid-merge, hand edit, other schema version): the error, plus the last state that could be read
-- Client: Preact + htm and marked, vendored in `pm_dashboard/static/vendor/`, no build step
-- Security: binds 127.0.0.1, checks the Host header, CSP without inline scripts; HTML in Markdown bodies is shown as text
+- Worker log: `.git/pm-logs/task-<id>.log`, shown as `pm run` shows it (`pm.Project.read_event`); `pm run` flushes it per line
+- A task's commit: the one `pm run` made, `task <id>: <subject>`
+- Unreadable `tasks.sql` (mid-merge, hand edit): the error, plus the last state that could be read
+- Security: binds 127.0.0.1; checks Host (and Origin for writes); writes need a JSON body; CSP without inline scripts; HTML in Markdown is shown as text
 
 ## Code
 
-- `pm_dashboard/__init__.py`: server, watcher, JSON API (`/api/state`, `/api/log/<task>?from=N`, `/api/events`)
-- `pm_dashboard/static/`: `app.js` (shell, routing, live state), `views.js` (pages), `ui.js` (components, charts), `data.js` (indexes, what pm derives)
+- `pm_dashboard/__init__.py`: server, watcher, JSON API (`/api/state`, `/api/log/<task>?from=N`, `/api/events`, `/api/since?commit=C`, `/api/task/<id>/commit`, `POST /api/edit`)
+- `pm_dashboard/edit.py`: writes and the run rules; history from git
+- `pm_dashboard/static/`: `app.js` (shell, routing, live state), `views.js` (pages), `live.js` (run view), `editor.js` (in-place editing), `add.js` (forms, welcome), `since.js`, `diff.js`, `notify.js`, `ui.js` (components, charts), `data.js` (indexes, what pm derives)
+- `pm_dashboard/static/vendor/`: Preact + htm 3.1.1, marked 12.0.2, diff2html 3.4.48 (slim, with highlight.js), CodeMirror 6 bundled from `vendor-src/codemirror.js`:
+  `npm i esbuild codemirror@6.0.1 @codemirror/lang-markdown@6.2.5 && npx esbuild vendor-src/codemirror.js --bundle --format=esm --minify --outfile=…/vendor/codemirror.js`

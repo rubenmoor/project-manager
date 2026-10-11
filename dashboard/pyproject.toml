@@ -7,7 +7,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pm-dashboard"
 version = "0.1.0"
-description = "A local, read-only web view of a pm project's tasks.sql"
+description = "A local web view and editor for a pm project's tasks.sql"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []

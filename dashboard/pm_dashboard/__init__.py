@@ -1,4 +1,4 @@
-"""pm-dashboard: a local, read-only web view of a pm project's tasks.sql (README.md). Optional: not part of the `pm`
+"""pm-dashboard: a local web view of a pm project's tasks.sql, and an editor for it (README.md). Optional: not part of the `pm`
 package, but it imports it, so both read the database the same way. Standard library only (Python 3.11+).
 
     pm-dashboard [--root <repo>] [--port 8642]
@@ -7,6 +7,9 @@ Serves the browser client (static/) and a JSON API on 127.0.0.1:
     /api/state           every table, the queue, git HEAD and changed files; or {"error": …}
     /api/log/<task>      the task's worker log as readable lines, from byte ?from=N on
     /api/events          server-sent events: "state" when tasks.sql or git changes, "log" when the running log grows
+    /api/since?commit=C  rows changed between commit C and the working copy
+    /api/task/<id>/commit  the commit pm made for the task, with its patch
+    POST /api/edit       {"op": …}: add or change milestones, plans, tasks through pm (edit.py)
 """
 import argparse, json, mimetypes, os, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -17,11 +20,12 @@ try:
     import pm
 except ImportError:
     sys.exit("pm-dashboard: the `pm` package is not importable; put the pm repository on PYTHONPATH or install it")
+from pm_dashboard import edit
 
 STATIC = Path(__file__).parent / "static"
 TABLES = ("milestone", "plan", "task", "decision", "task_decision", "run")
 POLL = 0.5
-CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; "
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "
        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 
 
@@ -85,8 +89,8 @@ def read_state(project, last_good=None):
     dirty = [l[3:] for l in project.git("status", "--porcelain").splitlines()]
     base = {"root": str(project.root), "db": project.db, "head": head, "dirty": dirty, "read_at": pm.now(),
             "schema_version": pm.SCHEMA_VERSION, "planning_priority": project.config.get("planning_priority")}
-    if not project.db_path.exists():
-        return base | {"error": f"no {project.db} yet: it is written by the first pm command that uses it"}
+    if not project.db_path.exists():               # written by the first pm command, e.g. adding a milestone
+        return base | {"tables": {t: [] for t in TABLES}, "queue": [], "head_signoff": None, "errors": []}
     try:
         with project.connect() as db:
             tables = {t: [dict(r) for r in db.execute(f"SELECT * FROM {t} ORDER BY rowid")] for t in TABLES}
@@ -133,6 +137,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "pm-dashboard"
     watcher: Watcher = None
     allowed_hosts = ()
+    write_lock = threading.Lock()
 
     def log_message(self, fmt, *args):
         pass
@@ -149,6 +154,28 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def do_POST(self):
+        host = self.headers.get("Host")
+        if host not in self.allowed_hosts or self.headers.get("Origin") != f"http://{host}":
+            return self.send(403, {"error": "unknown host or origin"})
+        if self.path != "/api/edit" or not (self.headers.get("Content-Type") or "").startswith("application/json"):
+            return self.send(404, {"error": "not found"})
+        n = int(self.headers.get("Content-Length") or 0)
+        if n > 1_000_000:
+            return self.send(413, {"error": "too large"})
+        try:
+            op = json.loads(self.rfile.read(n))
+            if not isinstance(op, dict):
+                raise ValueError("not an object")
+        except ValueError as e:
+            return self.send(400, {"error": f"bad JSON: {e}"})
+        with self.write_lock:
+            try:
+                result = edit.edit(self.watcher.project, op)
+            except edit.EditError as e:
+                return self.send(400, {"error": str(e)})
+        self.send(200, result)
+
     def do_GET(self):
         if self.headers.get("Host") not in self.allowed_hosts:  # DNS rebinding
             return self.send(403, {"error": "unknown host"})
@@ -157,6 +184,17 @@ class Handler(BaseHTTPRequestHandler):
         w = self.watcher
         if path == "/api/state":
             return self.send(200, w.state)
+        if path == "/api/since":
+            commit = query.get("commit", [""])[0]
+            if not commit.isalnum():
+                return self.send(400, {"error": "bad commit"})
+            return self.send(200, edit.since(w.project, commit))
+        if path.startswith("/api/task/") and path.endswith("/commit"):
+            try:
+                tid = int(path.split("/")[3])
+            except ValueError:
+                return self.send(400, {"error": "bad task id"})
+            return self.send(200, edit.task_commit(w.project, tid))
         if path.startswith("/api/log/"):
             try:
                 tid, start = int(path.rsplit("/", 1)[1]), int(query.get("from", ["0"])[0])
