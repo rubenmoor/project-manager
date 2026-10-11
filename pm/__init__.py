@@ -11,8 +11,8 @@ milestone, plan and task. Worked one task at a time by `claude -p`. Standard lib
     pm decision add …   pm task-pending-decision <task> <decision>
 
 Works on the git repository around the current directory. `pm init` writes the settings, project-manager.toml (the
-template is the file of that name next to this one), and the database, and commits them. pm commits its own
-changes to tasks.sql; workers commit them with their work. Nothing is pushed.
+template is the file of that name next to this one), and commits it; the first command that uses the database
+writes it. pm commits its own changes to tasks.sql; workers commit them with their work. Nothing is pushed.
 """
 import argparse, contextlib, datetime, fcntl, json, os, re, sqlite3, subprocess, sys, time, tomllib, zoneinfo
 from pathlib import Path
@@ -163,26 +163,22 @@ def today():
 
 
 def init(root, out=sys.stdout):
-    """`pm init`: write what is missing of project-manager.toml (the defaults) and the database (the schema),
-    and commit it in one commit."""
-    created = []
-    if not (Path(root) / CONFIG_FILE).exists():
-        (Path(root) / CONFIG_FILE).write_text(CONFIG_TEMPLATE, encoding="utf-8")
-        created.append(CONFIG_FILE)
-    pm = Project(root, load_config(root), out)
-    if not pm.db_path.exists():
-        with pm.connect(write=True):
-            pass
-        created.append(pm.db)
-    if not created:
-        print(f"pm: already initialized ({CONFIG_FILE}, {pm.db})", file=out)
+    """`pm init`: write project-manager.toml (the defaults) if missing and commit it. The database is created by
+    the first command that uses it."""
+    path = Path(root) / CONFIG_FILE
+    if path.exists():
+        print(f"pm: already initialized ({CONFIG_FILE})", file=out)
         return
+    path.write_text(CONFIG_TEMPLATE, encoding="utf-8")
+    pm = Project(root, out=out)
     try:
-        pm.git("add", "--", *created)
-        pm.git("commit", "-q", "-m", "pm: init", "--", *created)
-        print(f"pm: wrote and committed {', '.join(created)}", file=out)
+        pm.git("add", "--", CONFIG_FILE)
+        pm.git("commit", "-q", "-m", "pm: init", "--", CONFIG_FILE)
+        print(f"pm: wrote and committed {CONFIG_FILE}", file=out)
     except subprocess.CalledProcessError as e:
-        print(f"pm: wrote {', '.join(created)}; committing failed: {e.stderr.strip()}", file=out)
+        print(f"pm: wrote {CONFIG_FILE}; committing failed: {e.stderr.strip()}", file=out)
+    print(f"pm: check and adjust the defaults in {CONFIG_FILE} (e.g. the database file name, the worker command)",
+          file=out)
 
 
 def load_config(root):
@@ -274,7 +270,7 @@ class Project:
     @contextlib.contextmanager
     def connect(self, write=False):
         """The database file loaded into memory, foreign keys on. write: one transaction under the lock, written
-        back to the file if it changed; nothing is written if the block raises. No file yet: the schema."""
+        back to the file if it changed; nothing is written if the block raises. No file yet: written with the schema."""
         with self.lock() if write else contextlib.nullcontext():
             con = sqlite3.connect(":memory:", isolation_level=None)
             try:
@@ -291,6 +287,9 @@ class Project:
                 if version != SCHEMA_VERSION:
                     raise FormatError(f"{self.db}: schema version {version}, this pm knows {SCHEMA_VERSION}")
                 con.execute("PRAGMA foreign_keys = ON")
+                if text is None:
+                    text = dump(con)
+                    self.save(text)
                 if not write:
                     yield con
                     return
@@ -300,15 +299,18 @@ class Project:
                     con.execute("COMMIT")
                 new = dump(con)
                 if new != text:
-                    tmp = self.db_path.with_name(self.db_path.name + ".tmp")
-                    tmp.write_text(new, encoding="utf-8")
-                    os.replace(tmp, self.db_path)
+                    self.save(new)
             except sqlite3.IntegrityError as e:
                 raise FormatError(f"the change breaks the schema, nothing written: {e}") from None
             except sqlite3.DatabaseError as e:
                 raise FormatError(f"{self.db}: {e}") from None
             finally:
                 con.close()
+
+    def save(self, text):
+        tmp = self.db_path.with_name(self.db_path.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, self.db_path)
 
     def commit_db(self, message):
         """Commit the database file if it changed; not in a worker, which commits it with its work."""
@@ -851,8 +853,6 @@ def main(argv=None):
             init(root)
             return 0
         pm = Project(root, load_config(root))
-        if not pm.db_path.exists():
-            raise FormatError(f"no {pm.db}: run `pm init` first")
         if args.cmd == "validate":
             errors = pm.validate()
             print("\n".join(errors) if errors else f"{pm.db} is valid")

@@ -139,7 +139,7 @@ The human answers with `pm decide`, or at the start of `pm run`. Don't run `pm d
 ## Run (for the human)
 
 ```sh
-pm init              # once per project: project-manager.toml and tasks.sql, committed
+pm init              # once per project: project-manager.toml, committed; the database is written on first use
 pm run               # work the queue until it is empty, a worker fails or the tree is dirty
 pm run --once        # one task
 pm run --dry-run     # print the next worker command; change nothing

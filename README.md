@@ -9,7 +9,7 @@ Python package `pm/` (code in `__init__.py`, the config template `project-manage
 In the project's git repository:
 
 ```sh
-pm init            # write project-manager.toml and tasks.sql, commit them
+pm init            # write project-manager.toml, commit it; check and adjust its defaults
 pm milestone add   # editor: first line the subject, the rest the body (Markdown)
 pm run             # work the queue; Ctrl-C stops, `pm run` continues
 ```
@@ -47,7 +47,7 @@ pm milestone add "Users can export their data as CSV" < milestone-csv-export.md
 
 Questions you can't answer yet don't need to block the milestone: workers turn them into decisions, and `pm run` asks you (`pm decide`).
 
-`pm init` writes `project-manager.toml` from the template `pm/project-manager.toml` (database file name, worker command, usage-limit margin, log folder, editor, the three prompts below, the priority settings) and `tasks.sql` with the schema (`SCHEMA` in `pm/__init__.py`), and commits them; run again, it adds only what is missing. Other commands need both files. Nothing is pushed.
+`pm init` writes `project-manager.toml` from the template `pm/project-manager.toml` (database file name, worker command, usage-limit margin, log folder, editor, the three prompts below, the priority settings) and commits it; run again, it does nothing. Adjust the defaults (e.g. the database file name) before the first other command: that one writes `tasks.sql` with the schema (`SCHEMA` in `pm/__init__.py`) if it is missing. Other commands need the config. Nothing is pushed.
 
 **Storage.** `tasks.sql` is the database: the schema, then one `INSERT` per row, sorted by key. Every command loads it into an in-memory SQLite database; a change rewrites it. So `git diff` shows changed rows, branches that change different rows merge cleanly, and two branches that create the same id conflict on that line (fix the file, then `pm validate`). `pm` commits its own changes (`pm: …`); inside `pm run`, workers commit theirs together with their work. Hand edits are fine; `pm validate` checks them. A `tasks.sql` from before the rename to subject/body (title/description, question/context; schema version 5 or 6) is migrated in memory and rewritten by the next change.
 
@@ -68,7 +68,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 
 | | |
 |---|---|
-| `init` | Write and commit the config and the database (missing ones only) |
+| `init` | Write and commit the config (if missing) |
 | `instructions` | The full reference for agents (`pm/instructions.md`): every command with examples, recipes, errors |
 | `status`, `queue`, `plans list`, `show <task>`, `validate` | Inspect |
 | `decide` | Answer pending decisions (number, text, `s` skip, `x <reason>` irrelevant: drops the tasks it blocks) |
