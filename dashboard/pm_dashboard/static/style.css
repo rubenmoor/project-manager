@@ -337,3 +337,12 @@ ins { color: var(--good-text); text-decoration: none; }
 .diffbox tbody tr:hover { background: none; }
 .diffbox .d2h-code-line-ctn { white-space: pre-wrap; overflow-wrap: anywhere; }
 .livedot { width: 8px; height: 8px; border-radius: 50%; background: var(--good); animation: pulse 1.4s ease-in-out infinite; }
+.cm-wrap { position: relative; }
+.md-badge { position: absolute; top: 6px; right: 8px; z-index: 2; font-size: 11px; color: var(--muted); background: var(--surface-2);
+  border-radius: 4px; padding: 0 6px; pointer-events: none; }
+.welcome-inner.added { max-width: 520px; }
+.card.next { text-align: left; margin-top: 8px; }
+.card.next.running-now { border-color: var(--good); }
+.cmd { display: flex; align-items: center; gap: 10px; margin: 10px 0 8px; padding: 10px 14px; border-radius: 8px;
+  background: var(--code); }
+.cmd code { font-size: 15px; flex: 1; }

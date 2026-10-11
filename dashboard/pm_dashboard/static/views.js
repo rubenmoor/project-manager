@@ -29,7 +29,7 @@ function Banners({ d }) {
 
 function RunningCard({ d }) {
   const r = d.running;
-  if (!r) return html`<div class="card"><div class="sub">No worker is running.</div>
+  if (!r) return html`<div class="card"><div class="sub">No worker is running${d.queue.length ? html`: start them with <code>pm run</code> in the project's terminal` : ""}.</div>
     ${d.queue.length ? html`<div class="muted" style="margin-top:4px">Next: <a href=${`#/task/${d.queue[0]}`}>task ${d.queue[0]}</a> ${d.task.get(d.queue[0]).subject}</div>` : null}</div>`;
   const t = d.task.get(r.task_id);
   return html`<div class="card">
@@ -177,7 +177,7 @@ export function Milestone({ d, id }) {
         <div class="tasks">${ts.length ? html`<${TaskRows} d=${d} tasks=${ts} />` : html`<div class="empty" style="padding:10px 12px">No tasks match.</div>`}</div>
       </details>`;
     })}
-    <div style="margin-top:12px"><${AddButton} kind="plan" parent=${m.id} /></div>`;
+`;
 }
 
 export function Plan({ d, id }) {

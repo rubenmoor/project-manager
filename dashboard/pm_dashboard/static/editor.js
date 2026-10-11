@@ -68,7 +68,7 @@ export function CodeEditor({ value, onDone, onChange, autofocus = true, ph = "" 
     if (autofocus) { view.focus(); view.dispatch({ selection: { anchor: view.state.doc.length } }); }
     return () => view.destroy();
   }, []);
-  return html`<div class="cm-box" ref=${box}></div>`;
+  return html`<div class="cm-wrap"><span class="md-badge">Markdown</span><div class="cm-box" ref=${box}></div></div>`;
 }
 
 // Starts editing on `i` / Enter / click (not on a link), or on the "pm-edit" event (the global `i` key).
@@ -110,7 +110,7 @@ export function EditableBody({ text, save, disabled = false, empty = "No body.",
   const t = useEditTrigger(() => s.setEditing(true), disabled || !save);
   if (s.editing) return html`<div class="editing">
     <${CodeEditor} value=${s.shown} onDone=${s.finish} ph=${ph} />
-    <div class="edit-hint">${s.error ? html`<span class="err">${s.error}</span>` : "Esc or click outside: save · Ctrl-Z: undo"}</div></div>`;
+    <div class="edit-hint">${s.error ? html`<span class="err">${s.error}</span>` : "Markdown supported · Esc or click outside: save · Ctrl-Z: undo"}</div></div>`;
   return html`<div class=${"card editable" + (disabled ? " locked" : "")} tabindex="0" ref=${t.ref} onKeyDown=${t.onKeyDown}
     onClick=${t.onClick} title=${disabled ? lockTitle : save ? "i: edit" : ""}><${Markdown} text=${s.shown} empty=${empty} /></div>`;
 }

@@ -3,6 +3,7 @@ import { index } from "/data.js";
 import { Pill, Elapsed, Time } from "/ui.js";
 import { Overview, Queue, Milestones, Milestone, Plan, Task, Decisions, Decision, Runs } from "/views.js";
 import { Live } from "/live.js";
+import { MilestoneAdded } from "/add.js";
 import { Since, useSince, sinceCount } from "/since.js";
 import { useNotifications, NotifyButton } from "/notify.js";
 
@@ -44,7 +45,7 @@ function useState2() {
 
 const NAV = [["live", "Live", "l"], ["overview", "Overview", "o"], ["queue", "Queue", "q"], ["milestones", "Milestones", "m"],
   ["decisions", "Decisions", "d"], ["since", "Since you looked", "s"], ["runs", "Runs", "r"]];
-const SECTION = { milestone: "milestones", plan: "milestones", task: "milestones", decision: "decisions" };
+const SECTION = { added: "milestones", milestone: "milestones", plan: "milestones", task: "milestones", decision: "decisions" };
 
 function Search({ d }) {
   const [q, setQ] = useState("");
@@ -126,7 +127,7 @@ function App() {
   const page = SECTION[r.page] || r.page;
   const pending = d ? d.decisions.filter((x) => x.status === "pending").length : 0;
   const nSince = sinceCount(since.since);
-  const View = { live: Live, since: (p) => html`<${Since} since=${since.since} mark=${since.mark} state=${p.d.state} />`, overview: Overview, queue: Queue, milestones: Milestones, milestone: Milestone, plan: Plan, task: Task,
+  const View = { added: MilestoneAdded, live: Live, since: (p) => html`<${Since} since=${since.since} mark=${since.mark} state=${p.d.state} />`, overview: Overview, queue: Queue, milestones: Milestones, milestone: Milestone, plan: Plan, task: Task,
     decisions: Decisions, decision: Decision, runs: Runs }[r.page];
   const root = state ? state.root.split("/").pop() : "";
   return html`<div class="app">

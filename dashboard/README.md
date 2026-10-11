@@ -28,9 +28,10 @@ In the project's git repository (the one with `project-manager.toml`):
 
 Text is edited in place, through pm's own methods; each change is a commit (`pm: … (dashboard)`).
 
-- Subjects and bodies of milestones, plans and tasks: rendered; `i`, Enter or a click shows the source (CodeMirror, Markdown); Esc or leaving it saves
+- Subjects and bodies of milestones, plans and tasks: rendered; `i`, Enter or a click shows the Markdown source (CodeMirror, marked "Markdown"); Esc or leaving it saves
 - Priorities: click the number; empty clears it
-- Tasks: done or drop with a note; add milestones, plans (pm queues their split task) and tasks
+- Tasks: done or drop with a note; add milestones and tasks (plans come from workers)
+- After adding a milestone: add another, or start `pm run` in the terminal (the page says whether it runs)
 - A changed plan subject or body queues "create tasks for plan N" again, as `pm plan edit` does
 - While a worker runs: the running task can't be changed; other changes are allowed and committed with the running task, not on their own
 - pm's checks apply: e.g. an open task needs a body

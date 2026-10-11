@@ -19,7 +19,6 @@ const MILESTONE_TEMPLATE = `What should be true afterwards, and why.
 const WHAT = {
   milestone: { title: "New milestone", ph: "Users can export their data as CSV", body: MILESTONE_TEMPLATE,
     hint: "The milestone is the only text a worker gets from you: what should be true afterwards, why, what is fixed, what is out of scope, how to tell it's done. pm adds the masterplan and the task that writes it." },
-  plan: { title: "New plan", ph: "Export API endpoint", body: "", hint: "pm queues a task that splits the plan into tasks." },
   task: { title: "New task", ph: "Add the export endpoint", body: "", hint: "" },
 };
 
@@ -34,7 +33,6 @@ export function AddForm({ kind, parent, onClose }) {
   const submit = async () => {
     if (busy) return;
     const op = { op: `${kind}_add`, subject, body: body.current };
-    if (kind === "plan") op.milestone = parent;
     if (kind === "task") { op.plan = parent; op.kind = taskKind; }
     if (kind !== "milestone" && prio.trim() !== "") {
       if (!/^-?\d+$/.test(prio.trim())) { setError("the priority is a whole number, or empty"); return; }
@@ -44,7 +42,7 @@ export function AddForm({ kind, parent, onClose }) {
     try {
       const r = await post(op);
       onClose && onClose();
-      location.hash = `#/${kind}/${r.id}`;
+      location.hash = kind === "milestone" ? `#/added/${r.id}` : `#/${kind}/${r.id}`;
     } catch (e) { setError(e.message); setBusy(false); }
   };
   const keys = (e) => {
@@ -65,8 +63,30 @@ export function AddForm({ kind, parent, onClose }) {
       ${error ? html`<span class="err">${error}</span>` : null}
       <button class="btn primary" onClick=${submit} disabled=${busy}>Add ${kind}</button>
     </div>
-    <div class="edit-hint">Ctrl-Enter: add</div>
+    <div class="edit-hint">Markdown supported · Ctrl-Enter: add</div>
   </div>`;
+}
+
+// After a milestone is added: add another one, or start the workers.
+export function MilestoneAdded({ d, id }) {
+  const [more, setMore] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const m = d.milestone.get(id);
+  if (more) return html`<div class="welcome"><div class="welcome-form"><${AddForm} kind="milestone" onClose=${() => setMore(false)} /></div></div>`;
+  const copy = () => navigator.clipboard.writeText("pm run").then(() => { setCopied(true); setTimeout(() => setCopied(false), 1500); }, () => {});
+  return html`<div class="welcome"><div class="welcome-inner added">
+    <div class="welcome-mark">✓</div>
+    <h1>Milestone added</h1>
+    <p class="sub">${m ? html`<a href=${`#/milestone/${m.id}`}>${m.subject}</a>` : `milestone ${id}`}. pm queued the task that writes its masterplan;
+      workers take it from there: plans, tasks, the work.</p>
+    ${d.running ? html`<div class="card next running-now"><b>pm run is working.</b>
+        <div class="sub">It picks up the new milestone's tasks by priority. Follow it on the <a href="#/live">live view</a>.</div></div>`
+      : html`<div class="card next"><b>Next: start the workers in the project's terminal</b>
+        <div class="cmd"><code>pm run</code><button class="iconbtn" onClick=${copy}>${copied ? "copied" : "copy"}</button></div>
+        <div class="sub"><code>pm run</code> isn't running. Nothing happens until you start it; the dashboard follows it live.</div></div>`}
+    <div class="row" style="justify-content:center;margin-top:20px">
+      <button class="btn primary" onClick=${() => setMore(true)}>Add another milestone</button></div>
+  </div></div>`;
 }
 
 export function AddButton({ kind, parent, label }) {

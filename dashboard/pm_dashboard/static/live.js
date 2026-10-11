@@ -58,7 +58,7 @@ export function Live({ d }) {
         ${current ? html`<div class="row"><${Pill} status="running" /><span class="sub">task ${current.id} · <${Elapsed} start=${r.started_at} /></span></div>
           <div class="tl-current-subject"><a href=${`#/task/${current.id}`}>${current.subject}</a> <${Kind} kind=${current.kind} /></div>
           <div class="muted">${d.plan.get(current.plan_id).subject} · ${d.milestoneOfTask(current).subject}</div>`
-          : html`<div class="sub">No worker is running.</div>
+          : html`<div class="sub">No worker is running${d.queue.length ? html`: start them with <code>pm run</code> in the project's terminal` : ""}.</div>
             <div class="muted">${d.queue.length ? html`Next: <a href=${`#/task/${d.queue[0]}`}>${d.task.get(d.queue[0]).subject}</a>` : "The queue is empty."}</div>`}
       </div>
       <div ref=${bottom}>${retired.length ? html`<div class="tl-label">done and dropped, newest first</div>` : null}
