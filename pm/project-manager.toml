@@ -3,9 +3,10 @@
 # Milestones, plans, tasks and decisions as SQL text, tracked by git; relative to the project root.
 database = "tasks.sql"
 
-# Command that works one task. "{prompt}" is replaced by the worker prompt.
+# Command that works one task. "{prompt}" is replaced by the worker prompt. With claude's JSON output
+# (--output-format stream-json --verbose), pm shows it readably and records model, turns, tokens and cost per run.
 worker = ["claude", "-p", "{prompt}", "--permission-mode", "acceptEdits",
-          "--allowedTools", "Bash Read Edit Write Glob Grep"]
+          "--allowedTools", "Bash Read Edit Write Glob Grep", "--output-format", "stream-json", "--verbose"]
 
 # Minutes to wait after a usage limit resets before retrying the task.
 limit_margin_minutes = 5

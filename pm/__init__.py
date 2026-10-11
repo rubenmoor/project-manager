@@ -31,49 +31,79 @@ MILESTONE_STATES = ("open", "implemented")
 TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup")
 PLANNING_KINDS = ("plan", "masterplan", "split")
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
+# Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
-    id           INTEGER PRIMARY KEY,
-    subject      TEXT NOT NULL CHECK (trim(subject) <> ''),
-    status       TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'implemented')),
-    body         TEXT NOT NULL DEFAULT '',                 -- Markdown
-    created_date TEXT NOT NULL DEFAULT (date('now'))
+    id             INTEGER PRIMARY KEY,
+    subject        TEXT NOT NULL CHECK (trim(subject) <> ''),
+    status         TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'implemented')),
+    body           TEXT NOT NULL DEFAULT '',               -- Markdown
+    created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    implemented_at TEXT,
+    CONSTRAINT "implemented_at is set exactly when implemented" CHECK ((status = 'implemented') = (implemented_at IS NOT NULL))
 ) STRICT;
 
 CREATE TABLE plan (
-    id           INTEGER PRIMARY KEY,
-    milestone_id INTEGER NOT NULL REFERENCES milestone (id),
-    subject      TEXT NOT NULL CHECK (trim(subject) <> ''),
-    priority     INTEGER,                                  -- NULL: 0
-    body         TEXT NOT NULL CONSTRAINT "a plan needs a body" CHECK (trim(body) <> '')
+    id              INTEGER PRIMARY KEY,
+    milestone_id    INTEGER NOT NULL REFERENCES milestone (id),
+    subject         TEXT NOT NULL CHECK (trim(subject) <> ''),
+    priority        INTEGER,                               -- NULL: 0
+    body            TEXT NOT NULL CONSTRAINT "a plan needs a body" CHECK (trim(body) <> ''),
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    created_by_task INTEGER REFERENCES task (id)
 ) STRICT;
 
 CREATE TABLE task (
-    id           INTEGER PRIMARY KEY,
-    plan_id      INTEGER NOT NULL REFERENCES plan (id),
-    subject      TEXT NOT NULL CHECK (trim(subject) <> ''),
-    kind         TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'plan', 'masterplan', 'split', 'cleanup')),
-    status       TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done', 'dropped')),
-    priority     INTEGER,                                  -- NULL: the plan's
-    note         TEXT,                                     -- done: date, files or commit; dropped: reason
-    body         TEXT NOT NULL DEFAULT '',                 -- Markdown
-    CONSTRAINT "an open task needs a body" CHECK (status <> 'open' OR trim(body) <> '')
+    id              INTEGER PRIMARY KEY,
+    plan_id         INTEGER NOT NULL REFERENCES plan (id),
+    subject         TEXT NOT NULL CHECK (trim(subject) <> ''),
+    kind            TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'plan', 'masterplan', 'split', 'cleanup')),
+    status          TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done', 'dropped')),
+    priority        INTEGER,                               -- NULL: the plan's
+    note            TEXT,                                  -- done: date, files; dropped: reason
+    body            TEXT NOT NULL DEFAULT '',              -- Markdown
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    retired_at      TEXT,                                  -- done or dropped
+    created_by_task INTEGER REFERENCES task (id),
+    CONSTRAINT "an open task needs a body" CHECK (status <> 'open' OR trim(body) <> ''),
+    CONSTRAINT "retired_at is set exactly when done or dropped" CHECK ((status = 'open') = (retired_at IS NULL))
 ) STRICT;
 
 CREATE TABLE decision (
-    id       INTEGER PRIMARY KEY,
-    subject  TEXT NOT NULL CHECK (trim(subject) <> ''),
-    status   TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'answered', 'irrelevant')),
-    options  TEXT NOT NULL DEFAULT '[]' CHECK (json_type(options) = 'array'),  -- recommended first
-    body     TEXT NOT NULL DEFAULT '',
-    answer   TEXT,
-    reason   TEXT,
-    closed   TEXT,
-    CONSTRAINT "pending: no answer, reason or closed; answered: answer and closed; irrelevant: reason and closed"
-    CHECK (status = 'pending' AND answer IS NULL AND reason IS NULL AND closed IS NULL
-           OR status = 'answered' AND answer IS NOT NULL AND closed IS NOT NULL
-           OR status = 'irrelevant' AND reason IS NOT NULL AND closed IS NOT NULL)
+    id              INTEGER PRIMARY KEY,
+    subject         TEXT NOT NULL CHECK (trim(subject) <> ''),
+    status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'answered', 'irrelevant')),
+    options         TEXT NOT NULL DEFAULT '[]' CHECK (json_type(options) = 'array'),  -- recommended first
+    body            TEXT NOT NULL DEFAULT '',
+    answer          TEXT,
+    reason          TEXT,
+    created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    closed_at       TEXT,
+    created_by_task INTEGER REFERENCES task (id),
+    CONSTRAINT "pending: no answer, reason or closed_at; answered: answer and closed_at; irrelevant: reason and closed_at"
+    CHECK (status = 'pending' AND answer IS NULL AND reason IS NULL AND closed_at IS NULL
+           OR status = 'answered' AND answer IS NOT NULL AND closed_at IS NOT NULL
+           OR status = 'irrelevant' AND reason IS NOT NULL AND closed_at IS NOT NULL)
+) STRICT;
+
+CREATE TABLE run (                                         -- one worker run of `pm run`
+    id                    INTEGER PRIMARY KEY,
+    task_id               INTEGER NOT NULL REFERENCES task (id),
+    started_at            TEXT NOT NULL,
+    ended_at              TEXT NOT NULL,
+    result                TEXT NOT NULL CHECK (result IN ('done', 'blocked', 'failed', 'limit')),
+    reason                TEXT,                            -- failed: why; limit: the message
+    exit_code             INTEGER,
+    base_commit           TEXT,                            -- HEAD when the run started
+    model                 TEXT,                            -- from here on: the worker's JSON output, if any
+    session_id            TEXT,
+    turns                 INTEGER,
+    input_tokens          INTEGER,
+    output_tokens         INTEGER,
+    cache_read_tokens     INTEGER,
+    cache_creation_tokens INTEGER,
+    cost_usd              REAL
 ) STRICT;
 
 CREATE TABLE task_decision (                               -- the task waits while the decision is pending
@@ -85,6 +115,7 @@ CREATE TABLE task_decision (                               -- the task waits whi
 CREATE INDEX plan_milestone ON plan (milestone_id);
 CREATE INDEX task_plan ON task (plan_id);
 CREATE INDEX task_decision_decision ON task_decision (decision_id);
+CREATE INDEX run_task ON run (task_id);
 
 CREATE VIEW queue AS
 SELECT coalesce(t.priority, p.priority, 0) AS priority, t.id AS task_id, t.subject, t.kind
@@ -162,8 +193,28 @@ class FormatError(Exception):
     """The database breaks the schema, or a command names something that doesn't exist."""
 
 
-def today():
-    return datetime.date.today().isoformat()
+def now():
+    return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def creator():
+    """The task whose worker runs this command (PM_TASK, set by `pm run`), or None."""
+    return int(os.environ["PM_TASK"]) if os.environ.get("PM_TASK", "").isdigit() else None
+
+
+def stamp(ts):
+    """"2026-10-11 16:30" (UTC) from a timestamp."""
+    return ts[:16].replace("T", " ") if ts else ""
+
+
+def seconds(start, end):
+    return int((datetime.datetime.fromisoformat(end) - datetime.datetime.fromisoformat(start)).total_seconds())
+
+
+def duration(secs):
+    """"4m12s", "2h05m"."""
+    secs = int(secs)
+    return f"{secs // 3600}h{secs // 60 % 60:02d}m" if secs >= 3600 else f"{secs // 60}m{secs % 60:02d}s"
 
 
 
@@ -236,24 +287,6 @@ def dump(con):
     return "\n".join(out).rstrip() + "\n"
 
 
-def migrate(old):
-    """A version-5 to -7 database copied into the current schema: title, description and question, context become
-    subject, body (5, 6); task kinds are derived from the subjects pm gives its own tasks (5 to 7). Closes `old`."""
-    con = sqlite3.connect(":memory:", isolation_level=None)
-    con.row_factory = sqlite3.Row
-    con.executescript(f"BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION};")
-    rename = {"title": "subject", "description": "body", "question": "subject", "context": "body"}
-    for t in ("milestone", "plan", "task", "decision", "task_decision"):
-        for r in old.execute(f"SELECT * FROM {t}").fetchall():
-            cols = [rename.get(c, c) for c in r.keys()]
-            con.execute(f"INSERT INTO {t} ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", tuple(r))
-    con.execute("UPDATE task SET kind = 'masterplan' WHERE subject = 'write the masterplan'")
-    con.execute("UPDATE task SET kind = 'split' WHERE subject = 'create tasks for plan ' || plan_id")
-    con.execute("UPDATE task SET kind = 'cleanup' WHERE subject = ?", (CLEANUP_SUBJECT,))
-    con.execute("COMMIT")
-    old.close()
-    return con
-
 
 class Project:
     def __init__(self, root, config=None, out=sys.stdout):
@@ -290,8 +323,6 @@ class Project:
                 except sqlite3.Error as e:
                     raise FormatError(f"{self.db}: {e}") from None
                 version = con.execute("PRAGMA user_version").fetchone()[0]
-                if version in (5, 6, 7):
-                    con, version = migrate(con), SCHEMA_VERSION
                 if version != SCHEMA_VERSION:
                     raise FormatError(f"{self.db}: schema version {version}, this pm knows {SCHEMA_VERSION}")
                 con.execute("PRAGMA foreign_keys = ON")
@@ -397,11 +428,13 @@ class Project:
                                   "WHERE p.milestone_id = ? AND t.kind = 'cleanup'", (mid,)).fetchone()
                 pid = db.execute("SELECT min(id) FROM plan WHERE milestone_id = ?", (mid,)).fetchone()[0]
                 if pid is not None and not done:
-                    db.execute("INSERT INTO task (plan_id, subject, kind, body) VALUES (?, ?, 'cleanup', ?)",
-                               (pid, CLEANUP_SUBJECT, self.prompt("cleanup_prompt")))
+                    db.execute("INSERT INTO task (plan_id, subject, kind, body, created_by_task) "
+                               "VALUES (?, ?, 'cleanup', ?, ?)", (pid, CLEANUP_SUBJECT, self.prompt("cleanup_prompt"),
+                                                                 creator()))
                     cleanup.append(mid)
                 else:
-                    db.execute("UPDATE milestone SET status = 'implemented' WHERE id = ?", (mid,))
+                    db.execute("UPDATE milestone SET status = 'implemented', implemented_at = ? WHERE id = ?",
+                               (now(), mid))
                     closed.append(mid)
         return closed, cleanup
 
@@ -414,14 +447,14 @@ class Project:
             if self.get(db, "decision", did)["status"] != "pending":
                 raise FormatError(f"decision {did} is not pending")
             if irrelevant is None:
-                db.execute("UPDATE decision SET status = 'answered', answer = ?, closed = ? WHERE id = ?",
-                           (answer, today(), did))
+                db.execute("UPDATE decision SET status = 'answered', answer = ?, closed_at = ? WHERE id = ?",
+                           (answer, now(), did))
                 return
-            db.execute("UPDATE decision SET status = 'irrelevant', reason = ?, closed = ? WHERE id = ?",
-                       (irrelevant, today(), did))
-            db.execute("UPDATE task SET status = 'dropped', note = ? WHERE status = 'open' "
+            db.execute("UPDATE decision SET status = 'irrelevant', reason = ?, closed_at = ? WHERE id = ?",
+                       (irrelevant, now(), did))
+            db.execute("UPDATE task SET status = 'dropped', note = ?, retired_at = ? WHERE status = 'open' "
                        "AND id IN (SELECT task_id FROM task_decision WHERE decision_id = ?)",
-                       (f"decision {did} irrelevant", did))
+                       (f"decision {did} irrelevant", now(), did))
 
     def decide(self, ask=input):
         """Ask about every pending decision; returns how many were closed."""
@@ -504,10 +537,13 @@ class Project:
         with self.connect(write=True) as db:
             mid = db.execute("INSERT INTO milestone (subject, body) VALUES (?, ?)",
                              (subject, (body or "").strip())).lastrowid
-            pid = db.execute("INSERT INTO plan (milestone_id, subject, priority, body) "
-                             "VALUES (?, 'masterplan', ?, 'tbd.')", (mid, self.config["planning_priority"])).lastrowid
-            db.execute("INSERT INTO task (plan_id, subject, kind, body) VALUES (?, 'write the masterplan', 'masterplan', ?)",
-                       (pid, self.prompt("masterplan_prompt", milestone_id=mid, milestone_subject=subject, plan_id=pid)))
+            pid = db.execute("INSERT INTO plan (milestone_id, subject, priority, body, created_by_task) "
+                             "VALUES (?, 'masterplan', ?, 'tbd.', ?)",
+                             (mid, self.config["planning_priority"], creator())).lastrowid
+            db.execute("INSERT INTO task (plan_id, subject, kind, body, created_by_task) "
+                       "VALUES (?, 'write the masterplan', 'masterplan', ?, ?)",
+                       (pid, self.prompt("masterplan_prompt", milestone_id=mid, milestone_subject=subject, plan_id=pid),
+                        creator()))
         return mid
 
     def milestone_set(self, mid, **fields):
@@ -515,7 +551,10 @@ class Project:
         with self.connect(write=True) as db:
             self.get(db, "milestone", mid)
             for k, v in fields.items():
-                if v is not None:
+                if k == "status" and v is not None:
+                    db.execute("UPDATE milestone SET status = ?, implemented_at = CASE WHEN ? = 'implemented' "
+                               "THEN coalesce(implemented_at, ?) END WHERE id = ?", (v, v, now(), mid))
+                elif v is not None:
                     db.execute(f"UPDATE milestone SET {k} = ? WHERE id = ?", (v.strip(), mid))
 
     def queue_plan_tasks(self, db, pid):
@@ -523,15 +562,16 @@ class Project:
         p = self.get(db, "plan", pid)
         if not db.execute("SELECT 1 FROM task WHERE plan_id = ? AND kind = 'split' AND status = 'open'",
                           (pid,)).fetchone():
-            db.execute("INSERT INTO task (plan_id, subject, kind, priority, body) VALUES (?, ?, 'split', ?, ?)",
+            db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task) "
+                       "VALUES (?, ?, 'split', ?, ?, ?)",
                        (pid, PLAN_TASKS_SUBJECT.format(pid), self.config["planning_priority"],
-                        self.prompt("plan_tasks_prompt", plan_id=pid, plan_subject=p["subject"])))
+                        self.prompt("plan_tasks_prompt", plan_id=pid, plan_subject=p["subject"]), creator()))
 
     def plan_add(self, mid, subject, body, prio=None):
         with self.connect(write=True) as db:
             self.get(db, "milestone", mid)
-            pid = db.execute("INSERT INTO plan (milestone_id, subject, priority, body) VALUES (?, ?, ?, ?)",
-                             (mid, subject, prio, body.strip())).lastrowid
+            pid = db.execute("INSERT INTO plan (milestone_id, subject, priority, body, created_by_task) "
+                             "VALUES (?, ?, ?, ?, ?)", (mid, subject, prio, body.strip(), creator())).lastrowid
             self.queue_plan_tasks(db, pid)
         return pid
 
@@ -554,15 +594,19 @@ class Project:
             prio = self.config["planning_priority"]
         with self.connect(write=True) as db:
             self.get(db, "plan", pid)
-            return db.execute("INSERT INTO task (plan_id, subject, kind, priority, body) VALUES (?, ?, ?, ?, ?)",
-                              (pid, subject, kind, prio, body.strip())).lastrowid
+            return db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task) "
+                              "VALUES (?, ?, ?, ?, ?, ?)", (pid, subject, kind, prio, body.strip(), creator())).lastrowid
 
     def task_set(self, tid, **fields):
         """Set fields of a task (status, note, priority); a value None clears it."""
         with self.connect(write=True) as db:
             self.get(db, "task", tid)
             for k, v in fields.items():
-                db.execute(f"UPDATE task SET {k} = ? WHERE id = ?", (v, tid))
+                if k == "status":
+                    db.execute("UPDATE task SET status = ?, retired_at = CASE WHEN ? <> 'open' THEN ? END WHERE id = ?",
+                               (v, v, now(), tid))
+                else:
+                    db.execute(f"UPDATE task SET {k} = ? WHERE id = ?", (v, tid))
 
     def task_pending_decision(self, tid, did):
         with self.connect(write=True) as db:
@@ -570,8 +614,9 @@ class Project:
 
     def decision_add(self, subject, body=None, options=()):
         with self.connect(write=True) as db:
-            return db.execute("INSERT INTO decision (subject, options, body) VALUES (?, ?, ?)",
-                              (subject, json.dumps(list(options), ensure_ascii=False), (body or "").strip())).lastrowid
+            return db.execute("INSERT INTO decision (subject, options, body, created_by_task) VALUES (?, ?, ?, ?)",
+                              (subject, json.dumps(list(options), ensure_ascii=False), (body or "").strip(),
+                               creator())).lastrowid
 
     # --- show --------------------------------------------------------------------------------
 
@@ -586,20 +631,41 @@ class Project:
                                   (p["id"],)).fetchall()
             ds = db.execute("SELECT d.* FROM task_decision td JOIN decision d ON d.id = td.decision_id "
                             "WHERE td.task_id = ? ORDER BY d.id", (tid,)).fetchall()
+            runs = db.execute("SELECT * FROM run WHERE task_id = ? ORDER BY id", (tid,)).fetchall()
         prio = t["priority"] if t["priority"] is not None else p["priority"] or 0
-        out = [f"# Milestone {m['id']}: {m['subject']} ({m['status']}, created {m['created_date']})", "", m["body"],
-               "", "Plans: " + ", ".join(f"{x['id']} {x['subject']}" for x in plans), "",
-               f"# Plan {p['id']}: {p['subject']} (priority {p['priority'] or 0})", "", p["body"], ""]
+        by = lambda r: f", by task {r['created_by_task']}" if r["created_by_task"] else ""
+        implemented = f", implemented {stamp(m['implemented_at'])}" if m["implemented_at"] else ""
+        out = [f"# Milestone {m['id']}: {m['subject']} ({m['status']}, created {stamp(m['created_at'])}{implemented})",
+               "", m["body"], "", "Plans: " + ", ".join(f"{x['id']} {x['subject']}" for x in plans), "",
+               f"# Plan {p['id']}: {p['subject']} (priority {p['priority'] or 0}, created {stamp(p['created_at'])}{by(p)})",
+               "", p["body"], ""]
         out += [f"- task {x['id']} [{x['status']}{'' if x['kind'] == 'work' else ', ' + x['kind']}] {x['subject']}"
                 + (" ← this task" if x["id"] == tid else "") for x in siblings] + [""]
-        out += [f"# Task {tid}: {t['subject']} ({t['status']}, kind {t['kind']}, priority {prio})", ""]
+        retired = f", retired {stamp(t['retired_at'])}" if t["retired_at"] else ""
+        out += [f"# Task {tid}: {t['subject']} ({t['status']}, kind {t['kind']}, priority {prio}, "
+                f"created {stamp(t['created_at'])}{retired}{by(t)})", ""]
         if t["note"]:
             out.append(f"note: {t['note']}")
         out += [t["body"], ""]
         for d in ds:
             said = d["answer"] or d["reason"] or ""
             out.append(f"Decision {d['id']} ({d['status']}): {d['subject']}" + (f" → {said}" if said else ""))
+        if runs:
+            out += ["", "Runs:"] + ["  " + self.run_line(r) for r in runs]
         return "\n".join(out).rstrip() + "\n"
+
+    @staticmethod
+    def run_line(r):
+        tokens = sum(r[k] or 0 for k in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"))
+        parts = [f"run {r['id']}", stamp(r["started_at"]), duration(seconds(r["started_at"], r["ended_at"])),
+                 r["result"]]
+        if r["turns"] is not None:
+            parts.append(f"{r['turns']} turns")
+        if tokens:
+            parts.append(f"{tokens / 1e6:.2f}M tokens" if tokens >= 1e5 else f"{tokens / 1e3:.0f}k tokens")
+        if r["cost_usd"] is not None:
+            parts.append(f"${r['cost_usd']:.2f}")
+        return ", ".join(parts) + (f": {r['reason'].splitlines()[0][:120]}" if r["reason"] else "")
 
     # --- run ---------------------------------------------------------------------------------
 
@@ -624,52 +690,108 @@ class Project:
         """log_dir; relative: inside the git dir, so never tracked."""
         return Path(self.git("rev-parse", "--absolute-git-dir").strip()) / self.config["log_dir"]
 
-    def run_worker(self, cmd, log):
-        """Run the worker, copying its output to the terminal and the log. Returns the exit code."""
+    def run_worker(self, cmd, log, tid):
+        """Run the worker, writing its output to the log and a readable form of it to the terminal. Returns the exit
+        code and what its JSON output (`--output-format stream-json`) says about the run: model, tokens, cost."""
         log.parent.mkdir(parents=True, exist_ok=True)
+        info = {}
         with open(log, "w", encoding="utf-8") as f:
-            with subprocess.Popen(cmd, cwd=self.root, env=os.environ | {"PM_WORKER": "1"}, stdout=subprocess.PIPE,
-                                  stderr=subprocess.STDOUT, text=True, bufsize=1) as proc:
+            with subprocess.Popen(cmd, cwd=self.root, env=os.environ | {"PM_WORKER": "1", "PM_TASK": str(tid)},
+                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1) as proc:
                 for line in proc.stdout:
                     f.write(line)
-                    self.out.write(line)
-                return proc.wait()
+                    shown = self.read_event(line, info)
+                    if shown is not None:
+                        self.out.write(shown)
+                        self.out.flush()
+                return proc.wait(), info
 
     @staticmethod
-    def limit_line(log):
-        """The usage-limit line among the log's last 5 lines, or None."""
+    def read_event(line, info):
+        """A line of the worker's output: plain text is shown as it is; a JSON event of claude's stream-json adds to
+        `info` and is shown as text, tool calls or a summary (None: nothing to show)."""
+        try:
+            e = json.loads(line)
+        except ValueError:
+            return line
+        if not isinstance(e, dict):
+            return line
+        if e.get("type") == "system" and e.get("subtype") == "init":
+            info["model"] = e.get("model")
+        elif e.get("type") == "assistant":
+            out = []
+            for c in (e.get("message") or {}).get("content") or []:
+                if c.get("type") == "text" and c.get("text", "").strip():
+                    out.append(c["text"].strip())
+                elif c.get("type") == "tool_use":
+                    i = c.get("input") or {}
+                    arg = i.get("command") or i.get("file_path") or i.get("pattern") or json.dumps(i)[:100]
+                    out.append(f"  → {c.get('name')}: {str(arg).splitlines()[0][:150] if arg else ''}")
+            return "".join(o + "\n" for o in out) or None
+        elif e.get("type") == "result":
+            u = e.get("usage") or {}
+            info.update(session_id=e.get("session_id"), turns=e.get("num_turns"), cost_usd=e.get("total_cost_usd"),
+                        input_tokens=u.get("input_tokens"), output_tokens=u.get("output_tokens"),
+                        cache_read_tokens=u.get("cache_read_input_tokens"),
+                        cache_creation_tokens=u.get("cache_creation_input_tokens"), result=e.get("result"))
+            cost = f", ${e['total_cost_usd']:.2f}" if e.get("total_cost_usd") is not None else ""
+            return f"[{e.get('subtype', 'result')}: {e.get('num_turns')} turns{cost}]\n"
+        return None
+
+    @staticmethod
+    def limit_line(log, info):
+        """The usage-limit message: the worker's result, or one of the log's last 5 lines; None if there is none."""
         tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-5:]
-        return next((l for l in reversed(tail) if any(w in l.lower() for w in LIMIT_WORDS)
-                     and "resets " in l.lower()), None)
+        for l in [info.get("result") or ""] + list(reversed(tail)):
+            if any(w in l.lower() for w in LIMIT_WORDS) and "resets " in l.lower():
+                return l
+        return None
 
     def wait_until(self, when):
         """Sleep until `when` by the wall clock, so a suspended machine still wakes up on time."""
         while (left := (when - datetime.datetime.now(when.tzinfo)).total_seconds()) > 0:
             time.sleep(min(left, 60))
 
+    def head(self):
+        try:
+            return self.git("rev-parse", "HEAD").strip()
+        except subprocess.CalledProcessError:
+            return None
+
+    def record_run(self, tid, started, base, code, info, result, reason=None):
+        cols = ("model", "session_id", "turns", "input_tokens", "output_tokens", "cache_read_tokens",
+                "cache_creation_tokens", "cost_usd")
+        with self.connect(write=True) as db:
+            db.execute(f"INSERT INTO run (task_id, started_at, ended_at, result, reason, exit_code, base_commit, "
+                       f"{', '.join(cols)}) VALUES ({', '.join('?' * (7 + len(cols)))})",
+                       (tid, started, now(), result, reason, code, base, *(info.get(c) for c in cols)))
+
     def work(self, tid):
-        """Run the worker for a task until no usage limit stops it. Returns ("done" | "blocked" | "failed", message)."""
+        """Run the worker for a task until no usage limit stops it; record each run and commit the task.
+        Returns ("done" | "blocked" | "failed", message)."""
         cmd, log = self.worker_command(tid), self.logs / f"task-{tid}.log"
         before = self.planning_snapshot()
         while True:
             self.say(f"\n== task {tid} (log: {log})")
-            code = self.run_worker(cmd, log)
-            limit = self.limit_line(log)
+            started, base = now(), self.head()
+            code, info = self.run_worker(cmd, log, tid)
+            limit = self.limit_line(log, info)
             if not limit:
                 break
+            self.record_run(tid, started, base, code, info, "limit", limit.strip())
             reset = limit_reset(limit)
             if reset is None:
-                return "failed", f"usage limit without a readable reset time: {limit}"
+                return self.failed(tid, f"usage limit without a readable reset time: {limit}")
             margin = datetime.timedelta(minutes=self.config["limit_margin_minutes"])
             until = max(reset + margin, datetime.datetime.now(reset.tzinfo) + margin)
             self.say(f"Usage limit ({limit.strip()}). Waiting until {until:%Y-%m-%d %H:%M %Z}, then the same task again.")
             self.wait_until(until)
         tail = "\n".join(log.read_text(encoding="utf-8", errors="replace").splitlines()[-30:])
+        if errors := self.validate():
+            return "failed", "the database is no longer valid, the run is not recorded:\n  " + "\n  ".join(errors)
         if code != 0:
-            return "failed", f"exit {code}\n{tail}"
-        errors = self.validate()
-        if errors:
-            return "failed", "the database is no longer valid:\n  " + "\n  ".join(errors)
+            self.record_run(tid, started, base, code, info, "failed", f"exit {code}")
+            return self.failed(tid, f"exit {code}\n{tail}")
         with self.connect() as db:
             t = self.get(db, "task", tid)
             blocked = [str(r[0]) for r in db.execute(
@@ -680,16 +802,27 @@ class Project:
         elif blocked:
             result = "blocked", "waits for decision(s) " + ", ".join(blocked)
         else:
-            return "failed", f"exit 0, but task {tid} is still open and not blocked\n{tail}"
+            self.record_run(tid, started, base, code, info, "failed", "still open and not blocked")
+            return self.failed(tid, f"exit 0, but task {tid} is still open and not blocked\n{tail}")
+        problem = None
+        if left := [l for l in self.git("status", "--porcelain").splitlines() if l[1] != " " and l[3:] != self.db]:
+            problem = "the worker left changes that are not staged:\n" + "\n".join(left)
+        elif t["status"] == "done" and (missing := self.planning_missing(t, before)):
+            problem = f"task {tid} is done, but it {missing}"
+        self.record_run(tid, started, base, code, info, "failed" if problem else result[0], problem)
         try:
             self.commit_task(tid, t["subject"], result[1])
         except subprocess.CalledProcessError as e:
             return "failed", f"git commit failed:\n{(e.stdout or '') + (e.stderr or '')}".rstrip()
-        if left := self.git("status", "--porcelain").rstrip():
-            return "failed", f"committed task {tid}; the worker left changes that are not staged:\n{left}"
-        if t["status"] == "done" and (missing := self.planning_missing(t, before)):
-            return "failed", f"committed task {tid}, done, but it {missing}"
-        return result
+        return ("failed", f"committed task {tid}; {problem}") if problem else result
+
+    def failed(self, tid, message):
+        """A failed run: commit the database alone (the recorded run), leave the rest to the human."""
+        try:
+            self.git("commit", "-q", "-m", f"pm: task {tid} failed", "--", self.db)
+        except subprocess.CalledProcessError as e:
+            message += f"\ncommitting {self.db} failed: {e.stderr.strip()}"
+        return "failed", message
 
     def planning_snapshot(self):
         """The plans: to tell whether a plan-writing task changed them."""
@@ -761,19 +894,43 @@ class Project:
 
     def status(self):
         for m in self.rows(
-                "SELECT m.id, m.subject, m.created_date, "
+                "SELECT m.id, m.subject, m.created_at, "
                 "(SELECT count(*) FROM plan p WHERE p.milestone_id = m.id) AS plans, "
                 "(SELECT count(*) FROM task t JOIN plan p ON p.id = t.plan_id WHERE p.milestone_id = m.id) AS tasks, "
                 "(SELECT count(*) FROM task t JOIN plan p ON p.id = t.plan_id "
-                "WHERE p.milestone_id = m.id AND t.status <> 'open') AS closed "
+                "WHERE p.milestone_id = m.id AND t.status <> 'open') AS closed, "
+                "(SELECT count(*) FROM run r JOIN task t ON t.id = r.task_id JOIN plan p ON p.id = t.plan_id "
+                "WHERE p.milestone_id = m.id) AS runs, "
+                "(SELECT count(*) FROM run r JOIN task t ON t.id = r.task_id JOIN plan p ON p.id = t.plan_id "
+                "WHERE p.milestone_id = m.id AND r.result = 'failed') AS failed, "
+                "(SELECT total(r.cost_usd) FROM run r JOIN task t ON t.id = r.task_id JOIN plan p ON p.id = t.plan_id "
+                "WHERE p.milestone_id = m.id) AS cost "
                 "FROM milestone m WHERE m.status = 'open' ORDER BY m.id"):
-            self.say(f"Milestone {m['id']}: {m['subject']} (created {m['created_date']}): {m['plans']} plan(s), "
-                     f"{m['closed']}/{m['tasks']} tasks closed")
+            self.say(f"Milestone {m['id']}: {m['subject']} (created {stamp(m['created_at'])}): {m['plans']} plan(s), "
+                     f"{m['closed']}/{m['tasks']} tasks closed, {m['runs']} run(s) ({m['failed']} failed), "
+                     f"${m['cost']:.2f}")
         self.print_queue(limit=10)
         pending = self.pending()
         self.say(f"\nPending decisions ({len(pending)}):")
         for d in pending:
             self.say(f"  {d['id']}: {d['subject']}")
+
+    def print_runs(self, tid=None):
+        """`pm runs`: every worker run, or a task's; then the totals per task kind."""
+        where, args = ("WHERE r.task_id = ?", (tid,)) if tid else ("", ())
+        runs = self.rows(f"SELECT r.*, t.kind FROM run r JOIN task t ON t.id = r.task_id {where} ORDER BY r.id", *args)
+        for r in runs:
+            self.say(f"task {r['task_id']:>4}  " + self.run_line(r))
+        totals = {}
+        for r in runs:
+            n, secs, cost = totals.get(r["kind"], (0, 0, 0.0))
+            secs += seconds(r["started_at"], r["ended_at"])
+            totals[r["kind"]] = (n + 1, secs, cost + (r["cost_usd"] or 0))
+        if totals:
+            self.say("\nPer kind: " + "; ".join(f"{k} {n} run(s), {duration(s)}, ${c:.2f}"
+                                                  for k, (n, s, c) in sorted(totals.items())))
+        else:
+            self.say("No runs yet.")
 
     def print_plans(self, new=None, file=None):
         """`pm plan list`: id, priority, subject; `new` marked."""
@@ -816,8 +973,10 @@ def main(argv=None):
                        ("decide", "answer pending decisions in the terminal"),
                        ("instructions", "the full reference for agents: every command with examples, recipes")]:
         sub.add_parser(name, help=text)
-    s = sub.add_parser("show", help="a task with its plan, milestone and decisions")
+    s = sub.add_parser("show", help="a task with its plan, milestone, decisions and runs")
     s.add_argument("task", type=int)
+    rs = sub.add_parser("runs", help="worker runs (time, result, tokens, cost) and totals per task kind")
+    rs.add_argument("task", type=int, nargs="?", help="only this task's runs")
     r = sub.add_parser("run", help="work the queue with the worker command (claude -p)")
     r.add_argument("--once", action="store_true", help="stop after one task")
     r.add_argument("--dry-run", action="store_true", help="print the next worker command; change nothing")
@@ -903,6 +1062,8 @@ def main(argv=None):
             pm.print_queue()
         elif args.cmd == "show":
             print(pm.show(args.task), end="")
+        elif args.cmd == "runs":
+            pm.print_runs(args.task)
         elif args.cmd == "decide":
             msg = pm.decide() and "decisions answered"
         elif args.cmd == "run":
