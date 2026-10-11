@@ -4,18 +4,18 @@
 
 ## Rules
 
-1. **Give every title on the command line and pipe the description on stdin.** Without a title, `pm milestone|plan|task add` opens an editor and fails without a terminal. Use a heredoc with a quoted delimiter (`<<'EOF'`), so `$`, backticks and `\` in Markdown stay as written.
+1. **Give every subject on the command line and pipe the body on stdin.** Without a subject, `pm milestone|plan|task add` opens an editor and fails without a terminal. Use a heredoc with a quoted delimiter (`<<'EOF'`), so `$`, backticks and `\` in Markdown stay as written.
 2. **Commands that create something print the new integer id on stdout**, and nothing else. Capture it: `tid=$(pm task add 4 "…" <<'EOF' … EOF)`.
 3. **IDs are plain integers**, unique per kind: `pm show 12` is task 12, `pm plan edit 3` is plan 3.
 4. **Never edit `tasks.sql` by hand** unless the human asks. If you do, run `pm validate` before committing.
 5. **Commits:** outside `pm run`, each `pm` command commits `tasks.sql` itself (`pm: …`). As a worker inside `pm run` (environment `PM_WORKER=1`), `pm` doesn't commit: commit `tasks.sql` together with your work, in one commit. Never push.
-6. **Descriptions are Markdown**, written for an engineer who knows the code but not the intentions: what, why, which files, how to tell it's done.
+6. **Bodies are Markdown**, written for an engineer who knows the code but not the intentions: what, why, which files, how to tell it's done.
 
 ## Model
 
-- **Milestone:** title, description (Markdown), status `open` | `implemented`, created date. `pm milestone add` also creates its first plan, the **masterplan** (description "tbd."), and the task "write the masterplan". Once a milestone has no open task, `pm run` queues the task "post-milestone cleanup" in its first plan (description: `cleanup_prompt` in project-manager.toml); when that is closed too, the milestone becomes `implemented`.
-- **Plan:** belongs to a milestone; title, description (required), priority (optional). Adding a plan, or changing its title or description, queues the task "create tasks for plan N", unless that task is already open.
-- **Task:** belongs to a plan; title, description (required while open), status `open` | `done` | `dropped`, note (done: date and files or commit; dropped: the reason), priority (optional; default: the plan's, else 0).
+- **Milestone:** subject, body (Markdown), status `open` | `implemented`, created date. `pm milestone add` also creates its first plan, the **masterplan** (body "tbd."), and the task "write the masterplan". Once a milestone has no open task, `pm run` queues the task "post-milestone cleanup" in its first plan (body: `cleanup_prompt` in project-manager.toml); when that is closed too, the milestone becomes `implemented`.
+- **Plan:** belongs to a milestone; subject, body (required), priority (optional). Adding a plan, or changing its subject or body, queues the task "create tasks for plan N", unless that task is already open.
+- **Task:** belongs to a plan; subject, body (required while open), status `open` | `done` | `dropped`, note (done: date and files or commit; dropped: the reason), priority (optional; default: the plan's, else 0).
 - **Decision:** question, context, options (the recommended one first), status `pending` | `answered` | `irrelevant`. A task linked to a pending decision waits. When the human answers, the task becomes workable again and its worker sees the answer in `pm show`. When a decision is marked irrelevant, the open tasks waiting for it are dropped.
 - **Queue:** open tasks of open milestones that no pending decision blocks; highest priority first, then by milestone, plan and task id. `pm run` takes the first one.
 
@@ -56,9 +56,9 @@ Users ask for their data outside the app; support exports it by hand today.
 EOF
 # prints the milestone id, e.g. 1; also creates plan "masterplan" and the task "write the masterplan"
 
-pm milestone set 1 --title "CSV export"
-pm milestone set 1 --description - <<'EOF'
-New description, replacing the old one.
+pm milestone set 1 --subject "CSV export"
+pm milestone set 1 --body - <<'EOF'
+New body, replacing the old one.
 EOF
 pm milestone set 1 --status implemented     # or open
 ```
@@ -80,18 +80,18 @@ pm plan add 1 "UI button" --priority 1 <<'EOF'
 …
 EOF
 
-pm plan edit 1 --description - <<'EOF'
+pm plan edit 1 --body - <<'EOF'
 The masterplan, divided into parts:
 
 1. Backend endpoint
 2. UI button
 EOF
-pm plan edit 2 --title "Export endpoint"
+pm plan edit 2 --subject "Export endpoint"
 pm plan edit 2 --priority 3      # its tasks without their own priority move up
 pm plan edit 2 --priority none   # back to 0
 ```
 
-A new title or description queues "create tasks for plan N" again, unless it is already open. A priority change doesn't.
+A new subject or body queues "create tasks for plan N" again, unless it is already open. A priority change doesn't.
 
 ## Tasks
 
@@ -142,26 +142,26 @@ Agents don't start `pm run`: a worker is already one task of a run.
 
 ## Recipes
 
-**Write the masterplan** (task "write the masterplan" of plan P): read the milestone (`pm show <task>`) and the code. Write the plan with `pm plan edit P --description -`, divided into parts, and state there that the masterplan's own tasks are not implementation work: each writes the plan for one part. That edit queues "create tasks for plan P". Finish with `pm task done`.
+**Write the masterplan** (task "write the masterplan" of plan P): read the milestone (`pm show <task>`) and the code. Write the plan with `pm plan edit P --body -`, divided into parts, and state there that the masterplan's own tasks are not implementation work: each writes the plan for one part. That edit queues "create tasks for plan P". Finish with `pm task done`.
 
-**Split a plan into tasks** (task "create tasks for plan P"): add one `pm task add P "<title>"` per task, in the order they should run. Use priorities only where that order is wrong. Raise a decision for each question only the human can answer, and link the tasks that wait for it. Then `pm task done <your task> "<date>, tasks …"`.
+**Split a plan into tasks** (task "create tasks for plan P"): add one `pm task add P "<subject>"` per task, in the order they should run. Use priorities only where that order is wrong. Raise a decision for each question only the human can answer, and link the tasks that wait for it. Then `pm task done <your task> "<date>, tasks …"`.
 
-**Write a part's plan** (a task of the masterplan): `pm plan add <milestone> "<part title>"` with the full description. That queues its "create tasks" task. Then close your task.
+**Write a part's plan** (a task of the masterplan): `pm plan add <milestone> "<part subject>"` with the full body. That queues its "create tasks" task. Then close your task.
 
-**Post-milestone cleanup** (task "post-milestone cleanup"): work through its description for the whole project, not just this milestone. Change other milestones with `pm milestone set`; for a pending decision that seems obsolete, say so in a new decision for the human. Then close your task.
+**Post-milestone cleanup** (task "post-milestone cleanup"): work through its body for the whole project, not just this milestone. Change other milestones with `pm milestone set`; for a pending decision that seems obsolete, say so in a new decision for the human. Then close your task.
 
 **Your task needs an answer first:** add the decision, `pm task-pending-decision <your task> <decision>`, commit what's done, stop. `pm run` reports the task as blocked and goes on with the next.
 
-**Finish a task:** `pm task done <task> "<YYYY-MM-DD, files or commit>"` or `pm task drop <task> "<reason>"`. Run the project's checks, then commit your work and `tasks.sql` in one commit: `task <id>: <title>`. Don't push.
+**Finish a task:** `pm task done <task> "<YYYY-MM-DD, files or commit>"` or `pm task drop <task> "<reason>"`. Run the project's checks, then commit your work and `tasks.sql` in one commit: `task <id>: <subject>`. Don't push.
 
 ## Errors
 
 | Message | Meaning |
 |---|---|
 | `no plan 9`, `no task 9`, `no milestone 9`, `no decision 9` | No such id; look it up with `pm status`, `pm queue` or `pm show` |
-| `the change breaks the schema, nothing written: … a plan needs a description` | Empty description: stdin was empty or not piped |
-| `… an open task needs a description` | The same for a task |
-| `` `pm task add` without a title needs a terminal `` | Give the title on the command line |
+| `the change breaks the schema, nothing written: … a plan needs a body` | Empty body: stdin was empty or not piped |
+| `… an open task needs a body` | The same for a task |
+| `` `pm task add` without a subject needs a terminal `` | Give the subject on the command line |
 | `decision 3 is not pending` | It was answered or marked irrelevant already |
 | `the database has errors (pm validate)` | `tasks.sql` was edited by hand into an invalid state; `pm validate` lists the problems |
 | `no project-manager.toml: run pm init first` | The project has no pm yet; that's the human's call |

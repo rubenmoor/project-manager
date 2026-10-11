@@ -10,7 +10,7 @@ In the project's git repository:
 
 ```sh
 pm init            # write project-manager.toml and tasks.sql, commit them
-pm milestone add   # editor: first line the title, the rest the description (Markdown)
+pm milestone add   # editor: first line the subject, the rest the body (Markdown)
 pm run             # work the queue; Ctrl-C stops, `pm run` continues
 ```
 
@@ -39,7 +39,7 @@ Users ask for their data outside the app; support exports it by hand today.
 - The API docs describe the endpoint.
 ```
 
-The first line is the title, the rest the description. The same without the editor, e.g. from a script:
+The first line is the subject, the rest the body. The same without the editor, e.g. from a script:
 
 ```sh
 pm milestone add "Users can export their data as CSV" < milestone-csv-export.md
@@ -49,11 +49,11 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 
 `pm init` writes `project-manager.toml` from the template `pm/project-manager.toml` (database file name, worker command, usage-limit margin, log folder, editor, the three prompts below) and `tasks.sql` with the schema (`SCHEMA` in `pm/__init__.py`), and commits them; run again, it adds only what is missing. Other commands need both files. Nothing is pushed.
 
-**Storage.** `tasks.sql` is the database: the schema, then one `INSERT` per row, sorted by key. Every command loads it into an in-memory SQLite database; a change rewrites it. So `git diff` shows changed rows, branches that change different rows merge cleanly, and two branches that create the same id conflict on that line (fix the file, then `pm validate`). `pm` commits its own changes (`pm: …`); inside `pm run`, workers commit theirs together with their work. Hand edits are fine; `pm validate` checks them.
+**Storage.** `tasks.sql` is the database: the schema, then one `INSERT` per row, sorted by key. Every command loads it into an in-memory SQLite database; a change rewrites it. So `git diff` shows changed rows, branches that change different rows merge cleanly, and two branches that create the same id conflict on that line (fix the file, then `pm validate`). `pm` commits its own changes (`pm: …`); inside `pm run`, workers commit theirs together with their work. Hand edits are fine; `pm validate` checks them. A `tasks.sql` from before the rename of title/description to subject/body (schema version 5) is migrated in memory and rewritten by the next change.
 
-**Flow.** A new milestone comes with a first plan, the masterplan (description "tbd."), and in it the task "write the masterplan" (`masterplan_prompt`): the worker writes the plan with `pm plan edit`, divided into parts, and states that the masterplan's own tasks each write the plan for one part. So splitting the masterplan into tasks yields one plan-writing task per part, and each of those adds a plan. A new plan, or a plan whose title or description changes, queues "create tasks for plan N" (`plan_tasks_prompt`): the worker splits it into tasks and decisions. Once a milestone has no open task, `pm run` queues "post-milestone cleanup" in its first plan (`cleanup_prompt`: bring top-level docs up to date, remove redundant files and unused code, review pending decisions and other milestones); when that is closed too, the milestone is `implemented`.
+**Flow.** A new milestone comes with a first plan, the masterplan (body "tbd."), and in it the task "write the masterplan" (`masterplan_prompt`): the worker writes the plan with `pm plan edit`, divided into parts, and states that the masterplan's own tasks each write the plan for one part. So splitting the masterplan into tasks yields one plan-writing task per part, and each of those adds a plan. A new plan, or a plan whose subject or body changes, queues "create tasks for plan N" (`plan_tasks_prompt`): the worker splits it into tasks and decisions. Once a milestone has no open task, `pm run` queues "post-milestone cleanup" in its first plan (`cleanup_prompt`: bring top-level docs up to date, remove redundant files and unused code, review pending decisions and other milestones); when that is closed too, the milestone is `implemented`.
 
-**Data.** A milestone has a title, a description, a status and a created date; plans belong to a milestone, tasks to a plan, and `task_decision` links tasks to the decisions they wait for. Everything is referenced by its integer id.
+**Data.** A milestone has a subject, a body, a status and a created date; plans belong to a milestone, tasks to a plan, and `task_decision` links tasks to the decisions they wait for. Everything is referenced by its integer id.
 
 **Queue** (the `queue` view): open tasks of open milestones that no pending decision blocks, by priority (task's, else plan's, else 0; highest first), then milestone, plan and task id.
 
@@ -66,10 +66,10 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 | `status`, `queue`, `show <task>`, `validate` | Inspect |
 | `decide` | Answer pending decisions (number, text, `s` skip, `x <reason>` irrelevant: drops the tasks it blocks) |
 | `run [--once] [--dry-run]` | Work the queue until it is empty, a worker fails, or the tree has uncommitted changes |
-| `milestone add`, `plan add <milestone>`, `task add <plan>` | In your editor (as `git commit`): first line title, rest description (Markdown); quit unsaved or save empty to abort |
-| `milestone add <title>`, `plan add <milestone> <title>`, `task add <plan> <title>` | Non-interactive: the description from stdin. `plan add` and `task add` also take `--priority` |
-| `milestone set <milestone>` | `--title`, `--status`, `--description` |
-| `plan edit <plan>` | `--title`, `--description`, `--priority <N\|none>` |
+| `milestone add`, `plan add <milestone>`, `task add <plan>` | In your editor (as `git commit`): first line subject, rest body (Markdown); quit unsaved or save empty to abort |
+| `milestone add <subject>`, `plan add <milestone> <subject>`, `task add <plan> <subject>` | Non-interactive: the body from stdin. `plan add` and `task add` also take `--priority` |
+| `milestone set <milestone>` | `--subject`, `--status`, `--body` |
+| `plan edit <plan>` | `--subject`, `--body`, `--priority <N\|none>` |
 | `task done\|drop <task> <note>`, `task priority <task> <N\|none>` | Close a task, set its priority |
 | `decision add <question>` | `--context`, `--option` (recommended first) |
 | `task-pending-decision <task> <decision>` | The task waits until the decision is answered |

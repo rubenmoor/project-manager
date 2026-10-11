@@ -16,15 +16,15 @@ log_dir = "pm-logs"
 # Editor for `pm milestone add`. Empty: the editor git uses.
 editor = ""
 
-# The task `pm milestone add` queues in the milestone's first plan (description "tbd.").
-# {milestone_id}, {milestone_title} and {plan_id} are replaced.
+# The task `pm milestone add` queues in the milestone's first plan (body "tbd.").
+# {milestone_id}, {milestone_subject} and {plan_id} are replaced.
 masterplan_prompt = '''
 Write plan {plan_id}, the masterplan of this milestone: expand on everything that needs to be done to achieve it,
 divided into parts. State in the masterplan that its own tasks are not implementation work: each of them writes the
 plan for one part.
 '''
 
-# The task `pm plan add` and `pm plan edit` queue. {plan_id} and {plan_title} are replaced.
+# The task `pm plan add` and `pm plan edit` queue. {plan_id} and {plan_subject} are replaced.
 plan_tasks_prompt = '''
 Split plan {plan_id} into tasks and identify all decisions that need to be made. If the plan already has tasks,
 bring them in line with the plan.
