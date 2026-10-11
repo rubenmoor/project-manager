@@ -1,6 +1,6 @@
 # pm
 
-Task queue for [Claude Code](https://claude.com/claude-code) workers. A project's work is **milestones → plans → tasks** in SQLite, kept in git as SQL text; `pm run` works the queue one task at a time with `claude -p`, waits out usage limits; the questions workers raise wait for `pm decide` while it goes on with other tasks.
+Task queue for [Claude Code](https://claude.com/claude-code) workers. A project's work is **milestones → plans → tasks** in SQLite, kept in git as SQL text; `pm run` works the queue one task at a time with `claude -p`, waits out usage limits; the questions workers raise wait for your answer while it goes on with other tasks.
 
 Python package `pm/` (code in `__init__.py`, the config template `project-manager.toml`, the agent reference `instructions.md`), standard library only (Python 3.11+), plus `git` and `claude`. Install: `nix run github:<you>/pm`, `pipx install .`, or `python3 -m pm` with this repository on `PYTHONPATH`.
 
@@ -45,7 +45,7 @@ The first line is the subject, the rest the body. The same without the editor, e
 pm milestone add "Users can export their data as CSV" < milestone-csv-export.md
 ```
 
-Questions you can't answer yet don't need to block the milestone: workers turn them into decisions, `pm run` skips the tasks they block, and you answer with `pm decide`.
+Questions you can't answer yet don't need to block the milestone: workers turn them into decisions, `pm run` skips the tasks they block, and you answer with `pm decision answer` (or ask a Claude session to).
 
 `pm init` writes `project-manager.toml` from the template `pm/project-manager.toml` (database file name, worker command, usage-limit margin, log folder, editor, the three prompts below, the priority settings, the sign-offs) and commits it; run again, it does nothing. Adjust the defaults (e.g. the database file name) before the first other command: that one writes `tasks.sql` with the schema (`SCHEMA` in `pm/__init__.py`) if it is missing. Other commands need the config. Nothing is pushed.
 
@@ -70,7 +70,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 - `"plans"`: "create tasks for plan N" of every other plan waits for "Sign off plan N"
 - `"task-queue"`: work tasks wait for "Sign off the task queue", one decision for all work tasks without a sign-off; asked when the first of them heads the queue, i.e. after all planning work; work tasks added later need a new one
 - pm creates the decision when such a task heads the queue; `pm run` never asks, it goes on with the unblocked tasks and stops when the queue is empty
-- the only answer is approve (`pm decide`: `a`); skip it to stop and change plans or tasks first; `pm decide` shows the plan or the waiting tasks as they are then
+- the only answer is approve (`pm decision approve <id>`); leave it pending to change plans or tasks first; `pm decision list` shows the plan or the waiting tasks as they are then
 - no `x` (irrelevant) for sign-offs
 
 **Priorities.** Set by workers, following rules in project-manager.toml:
@@ -88,7 +88,6 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 | `instructions` | The full reference for agents (`pm/instructions.md`): every command with examples, recipes, errors |
 | `status`, `queue`, `plans list`, `show <task>`, `validate` | Inspect |
 | `runs [task]` | Worker runs: start, duration, result, turns, tokens, cost; totals per task kind |
-| `decide` | Answer pending decisions (number, text, `s` skip, `x <reason>` irrelevant: drops the tasks it blocks; sign-offs: `a` approve, `s` skip) |
 | `run [--once] [--dry-run]` | Work the queue until it is empty, a worker fails, or the tree has uncommitted changes |
 | `milestone add`, `plan add <milestone>`, `task add <plan>` | In your editor (as `git commit`): first line subject, rest body (Markdown); quit unsaved or save empty to abort |
 | `milestone add <subject>`, `plan add <milestone> <subject>`, `task add <plan> <subject>` | Non-interactive: the body from stdin. `plan add` and `task add` also take `--priority`; `task add` `--kind plan` |
@@ -96,6 +95,8 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 | `plan edit <plan>` | `--subject`, `--body`, `--priority <N\|none>` |
 | `task done\|drop <task> <note>`, `task priority <task> <N\|none>` | Close a task, set its priority |
 | `decision add <subject>` | `--body`, `--option` (recommended first) |
+| `decision list` | Pending decisions: context, options, blocked tasks; sign-offs with what they approve |
+| `decision answer <id> <n\|text>`, `decision approve <id>`, `decision irrelevant <id> <reason>` | Close a decision; irrelevant drops the open tasks it blocks; approve: sign-offs only |
 | `task-pending-decision <task> <decision>` | The task waits until the decision is answered |
 
 Global: `--root <repo>`. A text value `-` reads stdin.

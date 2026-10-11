@@ -151,7 +151,16 @@ pm task-pending-decision 5 "$did"       # task 5 waits until the human answers
 
 `--option` is repeatable; put the recommended option first. `--body` takes `-` to read stdin. `decision add` doesn't link tasks: run `pm task-pending-decision <task> <decision>` for every task that waits for the answer, including your own task if it can't go on.
 
-The human answers with `pm decide`, or at the start of `pm run`. Don't run `pm decide` yourself: it asks the human in the terminal.
+The human answers, usually in a Claude session that runs these for them:
+
+```sh
+pm decision list                 # pending decisions: context, options, blocked tasks
+pm decision answer 3 1           # option 1, or own text: pm decision answer 3 "tabs"
+pm decision irrelevant 3 "<reason>"   # drops the open tasks it blocks
+pm decision approve 4            # sign-offs only
+```
+
+Record only answers the human gave. A worker never answers decisions.
 
 ## Run (for the human)
 
@@ -160,7 +169,6 @@ pm init              # once per project: project-manager.toml, committed; the da
 pm run               # work the queue until it is empty, a worker fails or the tree is dirty
 pm run --once        # one task
 pm run --dry-run     # print the next worker command; change nothing
-pm decide            # answer pending decisions: a number, own text, s = skip, x <reason> = irrelevant; sign-offs: a = approve
 ```
 
 Agents don't start `pm run`: a worker is already one task of a run.

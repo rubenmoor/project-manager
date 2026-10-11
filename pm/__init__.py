@@ -6,9 +6,9 @@ tasks are all closed gets a last one, the post-milestone cleanup, before it is i
 `queue` view): open tasks of open milestones that no pending decision blocks, highest priority first, then by
 milestone, plan and task. Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
 
-    pm init | status | queue | show <task> | validate | decide | run [--once] [--dry-run] | instructions
+    pm init | status | queue | show <task> | validate | run [--once] [--dry-run] | instructions
     pm milestone add|set …   pm plan add|edit|list …   pm task add|done|drop|priority …
-    pm decision add …   pm task-pending-decision <task> <decision>
+    pm decision add|list|answer|approve|irrelevant …   pm task-pending-decision <task> <decision>
 
 Works on the git repository around the current directory. `pm init` writes the settings, project-manager.toml (the
 template is the file of that name next to this one), and commits it; the first command that uses the database
@@ -450,7 +450,7 @@ class Project:
                     closed.append(mid)
         return closed, cleanup
 
-    # --- decide ------------------------------------------------------------------------------
+    # --- decisions ---------------------------------------------------------------------------
 
     def resolve(self, did, answer=None, irrelevant=None):
         """Close a pending decision. Answered: its tasks unblock by themselves. Irrelevant: the open tasks it
@@ -471,39 +471,35 @@ class Project:
                        "AND id IN (SELECT task_id FROM task_decision WHERE decision_id = ?)",
                        (f"decision {did} irrelevant", now(), did))
 
-    def decide(self, ask=input):
-        """Ask about every pending decision; returns how many were closed."""
-        closed = 0
+    def decisions(self):
+        """`pm decision list`: every pending decision with what it blocks, its context and options."""
+        out = []
         for d in self.pending():
-            opts = d["options"]
+            out.append(f"Decision {d['id']}{' (sign-off)' if d['signoff'] else ''}: {d['subject']}")
+            if d["signoff"]:
+                out.append("  " + self.signoff_view(d["id"], d["signoff"]).replace("\n", "\n  "))
+                out.append(f"  pm decision approve {d['id']}\n")
+                continue
             blocks = [str(r["id"]) for r in self.rows(
                 "SELECT t.id FROM task_decision td JOIN task t ON t.id = td.task_id "
                 "WHERE td.decision_id = ? AND t.status = 'open' ORDER BY t.id", d["id"])]
-            self.say(f"\nDecision {d['id']}: {d['subject']}")
-            if d["signoff"]:
-                self.say("  " + self.signoff_view(d["id"], d["signoff"]).replace("\n", "\n  "))
-                if ask(f"Answer [a = {SIGNOFF_ANSWER}, s = skip]: ").strip().lower() in ("a", SIGNOFF_ANSWER):
-                    self.resolve(d["id"], answer=SIGNOFF_ANSWER)
-                    closed += 1
-                continue
             if blocks:
-                self.say(f"  blocks task(s) {', '.join(blocks)}")
+                out.append(f"  blocks task(s) {', '.join(blocks)}")
             if d["body"]:
-                self.say("  " + d["body"].replace("\n", "\n  "))
-            for n, o in enumerate(opts, 1):
-                self.say(f"  {n}) {o}{'  (recommended)' if n == 1 else ''}")
-            hint = f"1-{len(opts)}, " if opts else ""
-            reply = ask(f"Answer [{hint}your own text, s = skip, x <reason> = irrelevant]: ").strip()
-            if not reply or reply.lower() == "s":
-                continue
-            if reply.lower() == "x" or reply.lower().startswith("x "):
-                self.resolve(d["id"], irrelevant=reply[1:].strip() or "no reason given")
-            elif reply.isdigit() and 1 <= int(reply) <= len(opts):
-                self.resolve(d["id"], answer=opts[int(reply) - 1])
-            else:
-                self.resolve(d["id"], answer=reply)
-            closed += 1
-        return closed
+                out.append("  " + d["body"].replace("\n", "\n  "))
+            for n, o in enumerate(d["options"], 1):
+                out.append(f"  {n}) {o}{'  (recommended)' if n == 1 else ''}")
+            out.append("")
+        return "\n".join(out) if out else "No pending decisions.\n"
+
+    def answer(self, did, reply):
+        """Answer decision did: an option's number or own text. Returns the answer."""
+        with self.connect() as db:
+            opts = json.loads(self.get(db, "decision", did)["options"])
+        if reply.isdigit() and 1 <= int(reply) <= len(opts):
+            reply = opts[int(reply) - 1]
+        self.resolve(did, answer=reply)
+        return reply
 
     # --- sign-offs ---------------------------------------------------------------------------
 
@@ -990,7 +986,7 @@ class Project:
             q = self.queue()
             if not q:
                 n = len(self.pending())
-                self.say(f"Queue empty; {n} pending decision(s)." + (" Answer them with `pm decide`." if n else ""))
+                self.say(f"Queue empty; {n} pending decision(s)." + (" See `pm decision list`." if n else ""))
                 return 0
             if level := self.needs_signoff(q[0][1]):
                 did = self.request_signoff(q[0][1])
@@ -1093,7 +1089,6 @@ def main(argv=None):
     for name, text in [("init", f"write {CONFIG_FILE} and the database (missing ones only) and commit them"),
                        ("status", "open milestones, the queue, pending decisions"), ("queue", "the whole queue"),
                        ("validate", "check the database"),
-                       ("decide", "answer pending decisions in the terminal"),
                        ("instructions", "the full reference for agents: every command with examples, recipes")]:
         sub.add_parser(name, help=text)
     s = sub.add_parser("show", help="a task with its plan, milestone, decisions and runs")
@@ -1142,11 +1137,21 @@ def main(argv=None):
     tp.add_argument("task", type=int)
     tp.add_argument("priority", type=prio_arg)
 
-    d = sub.add_parser("decision", help="ask the human").add_subparsers(dest="action", required=True)
+    d = sub.add_parser("decision", aliases=["decisions"], help="ask the human; the human's answers").add_subparsers(
+        dest="action", required=True)
     da = d.add_parser("add", help="new pending decision; prints its id")
     da.add_argument("subject", help="the question")
     da.add_argument("--body", type=text_arg, help="context for the human")
     da.add_argument("--option", action="append", default=[], help="repeat; the recommended one first")
+    d.add_parser("list", help="pending decisions with their context, options and the tasks they block")
+    dn = d.add_parser("answer", help="the human's answer; its tasks become workable")
+    dn.add_argument("decision", type=int)
+    dn.add_argument("answer", help="an option's number, or own text")
+    dap = d.add_parser("approve", help="approve a sign-off")
+    dap.add_argument("decision", type=int)
+    di = d.add_parser("irrelevant", help="close without answer; drops the open tasks it blocks")
+    di.add_argument("decision", type=int)
+    di.add_argument("reason")
     tpd = sub.add_parser("task-pending-decision", help="the task waits until the decision is answered")
     tpd.add_argument("task", type=int)
     tpd.add_argument("decision", type=int)
@@ -1187,8 +1192,6 @@ def main(argv=None):
             print(pm.show(args.task), end="")
         elif args.cmd == "runs":
             pm.print_runs(args.task)
-        elif args.cmd == "decide":
-            msg = pm.decide() and "decisions answered"
         elif args.cmd == "run":
             return pm.run(once=args.once, dry_run=args.dry_run)
         elif args.cmd == "milestone":
@@ -1234,10 +1237,23 @@ def main(argv=None):
             else:
                 pm.task_set(args.task, priority=args.priority)
                 msg = f"task {args.task} priority"
-        elif args.cmd == "decision":
-            did = pm.decision_add(args.subject, args.body, args.option)
-            print(did)
-            msg = f"decision {did} added: {args.subject}"
+        elif args.cmd in ("decision", "decisions"):
+            if args.action == "list":
+                print(pm.decisions(), end="")
+            elif args.action == "answer":
+                msg = f"decision {args.decision} answered: {pm.answer(args.decision, args.answer)}"
+            elif args.action == "approve":
+                if not pm.rows("SELECT 1 FROM decision WHERE id = ? AND signoff IS NOT NULL", args.decision):
+                    raise FormatError(f"decision {args.decision} is not a sign-off; use `pm decision answer`")
+                pm.resolve(args.decision, answer=SIGNOFF_ANSWER)
+                msg = f"decision {args.decision} approved"
+            elif args.action == "irrelevant":
+                pm.resolve(args.decision, irrelevant=args.reason)
+                msg = f"decision {args.decision} irrelevant: {args.reason}"
+            else:
+                did = pm.decision_add(args.subject, args.body, args.option)
+                print(did)
+                msg = f"decision {did} added: {args.subject}"
         elif args.cmd == "task-pending-decision":
             pm.task_pending_decision(args.task, args.decision)
             msg = f"task {args.task} waits for decision {args.decision}"
