@@ -46,13 +46,14 @@ cleanup_prompt = '''
 # "create tasks for plan N". Above every other plan, so all plans and their tasks exist before implementation starts.
 planning_priority = 1000
 
-# Sign-offs: `pm run` asks for your approval and works nothing that waits for it until you approve (`pm decide`).
-# Empty: only the decisions workers raise.
+# Decisions: workers create pending decisions for questions only you can answer, and the tasks that depend on them
+# wait until you answer them (`pm decide`; `pm run` asks). Customize the criteria for creating pending decisions in
+# your project's AGENTS.md or similar.
+#
+# In addition, you can force sign-off decisions; `pm run` works nothing that waits for one until you approve it.
 #   "masterplans"  a masterplan, before its tasks are created
 #   "plans"        every other plan, before its tasks are created
 #   "task-queue"   the work tasks, once all planning is done; work tasks added later need a new sign-off
-# Anything else: tell the workers in your project's AGENTS.md (or CLAUDE.md) when to stop and wait for you, e.g.
-# "Raise a decision before changing the database schema." They raise a decision, and the task waits for your answer.
 signoff = []
 
 # Appended to every worker's prompt and to `pm instructions`. Empty: nothing.
