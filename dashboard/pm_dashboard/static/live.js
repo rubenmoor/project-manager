@@ -22,7 +22,7 @@ function Item({ id, sel, select, cls = "", children }) {
     onClick=${() => select(id)} onKeyDown=${(e) => e.key === "Enter" && select(id)}>${children}</div>`;
 }
 
-const crumbs = (d, t) => html`<a href=${`#/plan/${t.plan_id}`}>${d.plan.get(t.plan_id).subject}</a> · <a href=${`#/milestone/${d.milestoneOfTask(t).id}`}>${d.milestoneOfTask(t).subject}</a>`;
+const crumbs = (d, t) => html`<a href=${`#/plan/${t.plan_id}`}>plan ${t.plan_id}: ${d.plan.get(t.plan_id).subject}</a> · <span class="muted">milestone</span> <a href=${`#/milestone/${d.milestoneOfTask(t).id}`}>${d.milestoneOfTask(t).subject}</a>`;
 
 function Runs({ d, runs }) {
   if (!runs.length) return null;
@@ -57,13 +57,13 @@ function Detail({ d, t, running }) {
   const decs = d.decisionsOf.get(t.id) || [];
   const last = runs.filter((r) => r.ended_at).pop();
   const head = html`<div class="live-head">
+    <div class="sub tl-detail-plan">${crumbs(d, t)}</div>
     <div class="row"><span class="grow tl-detail-subject">${t.subject}</span>
       <a class="btn" href=${`#/task/${t.id}`}>Task page →</a></div>
     <div class="row sub">${running ? html`<${Pill} status="running" />` : html`<${Pill} status=${t.status} />`}<${Kind} kind=${t.kind} />
       <span>task ${t.id} · priority <${Prio} p=${d.prio(t)} /></span>
       ${running ? html`<span>· <${Elapsed} start=${d.running.started_at} /></span>` : null}
-      ${qi >= 0 ? html`<span>· ${qi === 0 ? "next in the queue" : `#${qi + 1} in the queue`}</span>` : null}</div>
-    <div class="sub">${crumbs(d, t)}</div></div>`;
+      ${qi >= 0 ? html`<span>· ${qi === 0 ? "next in the queue" : `#${qi + 1} in the queue`}</span>` : null}</div></div>`;
   if (running) return html`${head}<${Log} d=${d} t=${t} live full />`;
   if (t.status === "open") return html`${head}<div class="live-detail">
     ${why ? html`<div class="banner warn">${typeof why === "string" ? `Not queued: ${why}.` : html`Waits for ${why.map((x, i) => html`${i ? ", " : ""}<a href=${`#/decision/${x.id}`}>decision ${x.id}: ${x.subject}</a>`)}.`}</div>` : null}

@@ -295,6 +295,7 @@ select.small { width: auto; }
 .tl-current-subject { font-size: 16px; font-weight: 600; margin: 6px 0 2px; }
 .live-out { display: flex; flex-direction: column; min-width: 0; min-height: 0; padding: 12px 16px; }
 .live-head { padding-bottom: 10px; border-bottom: 1px solid var(--border); margin-bottom: 10px; }
+.tl-detail-plan { margin-bottom: 4px; }
 .tl-detail-subject { font-size: 16px; font-weight: 600; }
 .live-detail { flex: 1; min-height: 0; overflow-y: auto; }
 .live-detail h3 { margin-top: 18px; }
