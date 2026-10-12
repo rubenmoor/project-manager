@@ -96,12 +96,25 @@ function Detail({ d, t, running }) {
 
 export function Live({ d }) {
   const r = d.running;
-  const current = r ? d.task.get(r.task_id) : null;
+  const rt = r ? d.task.get(r.task_id) : null;
+  // The worker closed its task (or made it wait for a decision) but hasn't exited yet.
+  const wrapping = rt && (rt.status !== "open" || d.blockers(rt).length > 0);
+  const current = wrapping ? null : rt;
   const queue = d.queue.filter((id) => !current || id !== current.id).map((id) => d.task.get(id)).reverse();
   const retired = d.tasks.filter((t) => t.retired_at).sort((a, b) => (a.retired_at < b.retired_at ? 1 : a.retired_at > b.retired_at ? -1 : b.id - a.id));
   const lastRun = [...d.runs].filter((x) => x.ended_at).sort((a, b) => (a.ended_at < b.ended_at ? 1 : -1))[0];
   const failedLast = (t) => { const e = d.taskRuns(t).filter((x) => x.ended_at).pop(); return e && e.result === "failed"; };
-  const stopped = !r && lastRun && lastRun.result === "failed" ? lastRun : null;
+  const alive = d.state.pm_run != null;
+  const between = !r && alive && lastRun ? lastRun : null;
+  const stopped = !r && !alive && lastRun && lastRun.result === "failed" ? lastRun : null;
+  const next = d.queue.length ? d.task.get(d.queue[0]) : null;
+  const busy = wrapping ? { spin: true, text: `Task ${rt.id} is ${rt.status === "open" ? "waiting for a decision" : rt.status}; its worker is finishing`,
+      sub: "Then pm records the run, commits, and starts the next task." }
+    : between && between.result === "limit" ? { spin: false, text: "pm run waits for the usage limit to reset",
+      sub: (between.reason || "").split("\n")[0] + "; then task " + between.task_id + " again." }
+    : between ? { spin: true, text: `Committing task ${between.task_id}, picking the next task`,
+      sub: next ? `Next in the queue: ${next.subject}` : "The queue is empty: pm run stops." }
+    : null;
   const [picked, setPicked] = useState(null);
   const sel = picked != null && d.task.get(picked) ? picked : current ? current.id : lastRun ? lastRun.task_id : null;
   const order = [...queue.map((t) => t.id), ...(current ? [current.id] : []), ...retired.map((t) => t.id)];
@@ -143,6 +156,8 @@ export function Live({ d }) {
             <div class="grow"><div class="row"><${Pill} status="running" /><span class="sub">task ${current.id} · <${Elapsed} start=${r.started_at} /></span></div>
             <div class="tl-current-subject">${current.subject} <${Kind} kind=${current.kind} /></div>
             <div class="muted">${d.plan.get(current.plan_id).subject} · ${d.milestoneOfTask(current).subject}</div></div></${Item}>`
+          : busy ? html`<div class="tl-idle tl-busy">${busy.spin ? html`<span class="spinner"></span>` : null}<div>
+            <div class="sub">${busy.text}</div><div class="muted">${busy.sub}</div></div></div>`
           : stopped ? html`<div class="tl-idle"><div class="sub"><code>pm run</code> stopped: <a href=${`#/task/${stopped.task_id}`} onClick=${(e) => { e.preventDefault(); setPicked(stopped.task_id); }}>task ${stopped.task_id} failed</a>.</div>
             <div class="muted">${(stopped.reason || "").split("\n").find((l) => l.startsWith("likely cause: ")) || (stopped.reason || "").split("\n")[0]}</div></div>`
           : html`<div class="tl-idle"><div class="sub">No worker is running${d.queue.length ? html`: start them with <code>pm run</code> in the project's terminal` : ""}.</div>

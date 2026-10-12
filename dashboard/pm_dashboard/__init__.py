@@ -41,6 +41,7 @@ class Watcher:
         self.state = None
         self.last_good = None
         self.sig = None
+        self.alive = None                       # the pid of `pm run`, while it lives
 
     def signature(self):
         git = Path(self.project.git("rev-parse", "--absolute-git-dir").strip())
@@ -63,6 +64,21 @@ class Watcher:
         except FileNotFoundError:
             return r["task_id"], 0
 
+    def pm_run(self):
+        """The pid of the `pm run` that made the latest run, if it still lives: between tasks it commits, picks the
+        next task or waits for a usage limit's reset."""
+        runs = (self.state or {}).get("tables", {}).get("run", [])
+        pid = max(runs, key=lambda r: r["id"])["pid"] if runs else None
+        if not pid:
+            return None
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return None
+        except PermissionError:
+            pass
+        return pid
+
     def loop(self):
         while True:
             try:
@@ -73,9 +89,10 @@ class Watcher:
                     self.state = read_state(self.project, self.last_good)
                     if "error" not in self.state:
                         self.last_good = self.state
-                log = self.running_log()
-                if changed or log != self.log:
-                    self.log = log
+                log, alive = self.running_log(), self.pm_run()
+                self.state["pm_run"] = alive
+                if changed or log != self.log or alive != self.alive:
+                    self.log, self.alive = log, alive
                     with self.cond:
                         self.version += 1
                         self.cond.notify_all()
