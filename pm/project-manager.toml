@@ -32,8 +32,24 @@ plan for one part.
 
 # The task `pm plan add` and `pm plan edit` queue. {plan_id} and {plan_subject} are replaced.
 plan_tasks_prompt = '''
-Split plan {plan_id} into tasks and identify all decisions that need to be made. If the plan already has tasks,
-bring them in line with the plan. A task that writes a plan gets `--kind plan`.
+Split plan {plan_id} into tasks and identify all decisions that need to be made. If the plan already has tasks, its
+done and dropped ones stay as they are (pm refuses to change them): drop the open ones that no longer fit and add
+tasks for what the plan asks beyond them. A task that writes a plan gets `--kind plan`.
+'''
+
+# The task a changed milestone queues in its masterplan, unless the masterplan is done (every plan of the milestone
+# done). {plan_id} is replaced.
+revise_masterplan_prompt = '''
+The milestone changed. Bring plan {plan_id}, the masterplan, in line with it (`pm plan edit {plan_id} --body -`), or
+leave it as it is if it still fits. An edit queues the revision of the plans below it and of its own open tasks.
+'''
+
+# The task a changed plan queues in each plan below it that isn't done (a plan is done when none of its tasks is open
+# and the plans below it are done). {plan_id} and {parent_plan_id} are replaced; the parent plan follows.
+revise_plan_prompt = '''
+Plan {parent_plan_id}, the plan above plan {plan_id}, changed; it is quoted below. Bring plan {plan_id} in line with it
+(`pm plan edit {plan_id} --body -`), or leave it as it is if it still fits. An edit queues the revision of the plans
+below it and of its own open tasks; its done and dropped tasks stay as they are.
 '''
 
 # The task "post-milestone cleanup", queued in a milestone's first plan once all its other tasks are closed; the

@@ -8,6 +8,7 @@ import { TaskDiff } from "/diff.js";
 const runningId = (d) => d.running && d.running.task_id;
 const saveTask = (id, field) => (v) => post({ op: "task_edit", id, [field]: v });
 const savePlan = (id, field) => (v) => post({ op: "plan_edit", id, [field]: v });
+const planSave = (d, id, field) => (d.planDone.has(id) ? null : savePlan(id, field));
 const saveMilestone = (id, field) => (v) => post({ op: "milestone_edit", id, [field]: v });
 
 function TaskPrio({ d, t }) {
@@ -165,6 +166,7 @@ export function Milestone({ d, id }) {
       ${m.implemented_at ? html`<span>· implemented ${stamp(m.implemented_at)}</span>` : null}</div>
     <${Progress} ...${counts(tasks)} />
     <div style="margin-top:12px"><${EditableBody} text=${m.body} save=${saveMilestone(m.id, "body")} /></div>
+    <div class="sub" style="margin-top:4px">A new subject or body queues "revise the masterplan", unless every plan is done.</div>
     <div class="section-head"><h2>Plans</h2></div>
     <${Chips} value=${show} set=${setShow} options=${[["open", "open tasks"], ["closed", "closed"], ["all", "all"]]} />
     <${Chips} value=${kind} set=${setKind} options=${[["all", "every kind"], ...KINDS.map((k) => [k, k])]} />
@@ -172,7 +174,7 @@ export function Milestone({ d, id }) {
       const ts = filt(d.tasksOf.get(p.id) || []);
       const c = counts(d.tasksOf.get(p.id) || []);
       return html`<details class="plan" open=${ts.length > 0}>
-        <summary><${PrioEdit} value=${p.priority} effective=${0} from="–" save=${savePlan(p.id, "priority")} /><a href=${`#/plan/${p.id}`} onClick=${(e) => e.stopPropagation()}><b>${p.subject}</b></a>
+        <summary><${PrioEdit} value=${p.priority} effective=${0} from="–" save=${planSave(d, p.id, "priority")} /><a href=${`#/plan/${p.id}`} onClick=${(e) => e.stopPropagation()}><b>${p.subject}</b></a>
           <span class="muted">plan ${p.id} · ${c.open} open · ${c.done} done${c.dropped ? ` · ${c.dropped} dropped` : ""}</span></summary>
         <div class="tasks">${ts.length ? html`<${TaskRows} d=${d} tasks=${ts} />` : html`<div class="empty" style="padding:10px 12px">No tasks match.</div>`}</div>
       </details>`;
@@ -186,16 +188,18 @@ export function Plan({ d, id }) {
   const m = d.milestone.get(p.milestone_id);
   const tasks = d.tasksOf.get(p.id) || [];
   return html`<div class="crumbs"><a href="#/milestones">Milestones</a> › <a href=${`#/milestone/${m.id}`}>${m.subject}</a></div>
-    <${EditableLine} text=${p.subject} save=${savePlan(p.id, "subject")} />
+    <${EditableLine} text=${p.subject} save=${planSave(d, p.id, "subject")} />
     <div class="row sub"><span>plan ${p.id}</span><span>· priority <${PrioEdit} value=${p.priority} effective=${0} from="none"
-      save=${savePlan(p.id, "priority")} /></span>
+      save=${planSave(d, p.id, "priority")} /></span>
       <span>· created ${stamp(p.created_at)}</span>${p.created_by_task != null ? html`<span>· by <a href=${`#/task/${p.created_by_task}`}>task ${p.created_by_task}</a></span>` : null}</div>
     <${Progress} ...${counts(tasks)} />
-    <div style="margin-top:12px"><${EditableBody} text=${p.body} save=${savePlan(p.id, "body")} /></div>
-    <div class="sub" style="margin-top:4px">A new subject or body queues "create tasks for plan ${p.id}" again.</div>
+    <div style="margin-top:12px"><${EditableBody} text=${p.body} save=${planSave(d, p.id, "body")} /></div>
+    <div class="sub" style="margin-top:4px">${d.planDone.has(p.id)
+      ? "Done: no open task, nor in the plans below it. It can't be changed; add a new plan instead."
+      : html`A new subject or body queues "create tasks for plan ${p.id}" again and the revision of the plans below it.`}</div>
     <h2>Tasks</h2>
     <div class="tablewrap">${tasks.length ? html`<${TaskRows} d=${d} tasks=${tasks} />` : html`<div class="empty" style="padding:10px 12px">No tasks yet.</div>`}</div>
-    <div style="margin-top:12px"><${AddButton} kind="task" parent=${p.id} /></div>`;
+    ${d.planDone.has(p.id) ? null : html`<div style="margin-top:12px"><${AddButton} kind="task" parent=${p.id} /></div>`}`;
 }
 
 function RunsTable({ d, runs, showTask = false }) {
@@ -252,7 +256,7 @@ export function Task({ d, id, query }) {
   const pos = d.queuePos.get(t.id);
   const why = d.excluded(t);
   return html`<div class="crumbs"><a href="#/milestones">Milestones</a> › <a href=${`#/milestone/${m.id}`}>${m.subject}</a> › <a href=${`#/plan/${p.id}`}>${p.subject}</a></div>
-    <${EditableLine} text=${t.subject} save=${saveTask(t.id, "subject")} disabled=${running} />
+    <${EditableLine} text=${t.subject} save=${t.status === "open" ? saveTask(t.id, "subject") : null} disabled=${running} />
     <div class="row sub">${running ? html`<${Pill} status="running" />` : html`<${Pill} status=${t.status} />`}<${Kind} kind=${t.kind} />
       <span>task ${t.id}</span><span>· priority <${TaskPrio} d=${d} t=${t} /></span>
       ${pos != null ? html`<span>· #${pos + 1} in the queue</span>` : null}
@@ -263,7 +267,7 @@ export function Task({ d, id, query }) {
       ${t.note ? html`<dt>note</dt><dd>${t.note}</dd>` : null}
     </dl>
     ${running ? html`<div class="banner warn">A worker is on this task: it can't be changed until the run ends.</div>` : null}
-    <${EditableBody} text=${t.body} save=${saveTask(t.id, "body")} disabled=${running} />
+    <${EditableBody} text=${t.body} save=${t.status === "open" ? saveTask(t.id, "body") : null} disabled=${running} />
     ${t.status === "open" && !running ? html`<${CloseTask} t=${t} />` : null}
     ${decs.length ? html`<h2>Decisions</h2><ul>${decs.map((x) => html`<li><a href=${`#/decision/${x.id}`}>${x.subject}</a> <${Pill} status=${x.status} />
       ${x.signoff ? html` <span class="tag signoff">sign-off: ${x.signoff}</span>` : null}</li>`)}</ul>` : null}

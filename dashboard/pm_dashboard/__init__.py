@@ -91,7 +91,7 @@ def read_state(project, last_good=None):
     base = {"root": str(project.root), "db": project.db, "head": head, "dirty": dirty, "read_at": pm.now(),
             "schema_version": pm.SCHEMA_VERSION, "planning_priority": project.config.get("planning_priority")}
     if not project.db_path.exists():               # written by the first pm command, e.g. adding a milestone
-        return base | {"tables": {t: [] for t in TABLES}, "queue": [], "head_signoff": None, "errors": []}
+        return base | {"tables": {t: [] for t in TABLES}, "queue": [], "head_signoff": None, "done_plans": [], "errors": []}
     try:
         with project.connect() as db:
             tables = {t: [dict(r) for r in db.execute(f"SELECT * FROM {t} ORDER BY rowid")] for t in TABLES}
@@ -101,10 +101,12 @@ def read_state(project, last_good=None):
             if d.get("signoff") and d["status"] == "pending":
                 d["signoff_view"] = project.signoff_view(d["id"], d["signoff"])
         head_signoff = project.needs_signoff(queue[0]) if queue and hasattr(project, "needs_signoff") else None
+        done_plans = project.done_plans()
         errors = project.validate()
     except pm.FormatError as e:
         return base | {"error": str(e), "last_good": last_good}
-    return base | {"tables": tables, "queue": queue, "head_signoff": head_signoff, "errors": errors}
+    return base | {"tables": tables, "queue": queue, "head_signoff": head_signoff, "done_plans": done_plans,
+                   "errors": errors}
 
 
 def usage(project):

@@ -7,6 +7,7 @@ export function index(state) {
     milestone: by(t.milestone), plan: by(t.plan), task: by(t.task), decision: by(t.decision),
     queue: state.queue, queuePos: new Map(state.queue.map((id, i) => [id, i])),
     running: t.run.find((r) => r.result === "running") || null,
+    planDone: new Set(state.done_plans || []),
   };
   const group = (rows, key) => {
     const m = new Map();
