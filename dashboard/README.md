@@ -18,9 +18,9 @@ In the project's git repository (the one with `project-manager.toml`):
   - open: queue position or what blocks it, body, decisions, earlier runs; after a failed run: pm's summary and the run's output
   - failed last run: a red "failed" pill in the queue; with no worker running, "pm run stopped: task N failed" and the likely cause
   - done or dropped: note, runs, files changed, the output of its last run
-- **Overview**: running task, decisions waiting on you, cost, open milestones with progress, queue head; without milestones a welcome screen with one button
+- **Overview**: running task, decisions waiting on you, cost, open and on-hold milestones with progress, queue head; without milestones a welcome screen with one button
 - **Queue**: as `pm run` sees it; open tasks it leaves out and why
-- **Milestones**, **plans**: plans by priority with their tasks; filters by status and kind
+- **Milestones**, **plans**: plans by priority with their tasks; filters by status and kind; put a milestone on hold or resume it
 - **Task**: body, note, priority, decisions, rows it created, runs, the diff of its commit (syntax highlighted), worker log
 - **Decisions**: pending sign-offs and questions by milestone, the ones holding up the most important work first; closed ones
 - **Since you looked**: rows changed since the commit you marked as seen (uncommitted ones included): decisions answered, plan bodies as diffs, new and closed tasks, runs

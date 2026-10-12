@@ -4,12 +4,13 @@ in-memory database (the schema is SCHEMA below). A new milestone comes with a fi
 "tbd."), and a task that writes it; a new or edited plan queues a task that splits it into tasks; edits cascade: a
 changed milestone queues the revision of its masterplan, a changed plan that of the plans below it and of its open
 tasks; implemented milestones, done plans and closed tasks can't be changed; a milestone whose tasks are all closed
-gets a last one, the post-milestone cleanup, before it is implemented. The queue (the `queue` view): open tasks of
+gets a last one, the post-milestone cleanup, before it is implemented; a milestone on hold keeps its tasks out of
+the queue until it is resumed. The queue (the `queue` view): open tasks of
 open milestones that no pending decision blocks, highest priority first, then by milestone, plan and task.
 Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
 
     pm init | status | queue | show <task> | validate | decide | run [--once] [--dry-run] | instructions
-    pm milestone add|set …   pm plan add|edit|list …   pm task add|done|drop|priority …
+    pm milestone add|set|hold|resume …   pm plan add|edit|list …   pm task add|done|drop|priority …
     pm decision add|list|answer|approve|irrelevant …   pm task-pending-decision <task> <decision>
 
 Works on the git repository around the current directory. `pm init` writes the settings, project-manager.toml (the
@@ -37,7 +38,7 @@ REVISE_MASTERPLAN_SUBJECT = "revise the masterplan"
 REVISE_PLAN_SUBJECT = "revise plan {}"
 # Dedupes queued planning tasks: a running one may have read the old text already, so it doesn't count.
 NOT_RUNNING = "AND id NOT IN (SELECT task_id FROM run WHERE result = 'running')"
-MILESTONE_STATES = ("open", "implemented")
+MILESTONE_STATES = ("open", "on-hold", "implemented")
 # work: the default; plan: writes a plan; masterplan, split ("create tasks for plan N"), cleanup: made by pm only
 TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup")
 PLANNING_KINDS = ("plan", "masterplan", "split")
@@ -45,13 +46,13 @@ PLANNING_KINDS = ("plan", "masterplan", "split")
 SIGNOFF_LEVELS = {"masterplans": "masterplan", "plans": "plan", "task-queue": "task-queue"}
 SIGNOFF_ANSWER = "approve"
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
     id             INTEGER PRIMARY KEY,
     subject        TEXT NOT NULL CHECK (trim(subject) <> ''),
-    status         TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'implemented')),
+    status         TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'on-hold', 'implemented')),
     body           TEXT NOT NULL DEFAULT '',               -- Markdown
     created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     implemented_at TEXT,
@@ -696,6 +697,8 @@ class Project:
                 why = "implemented" if m["status"] == "implemented" else "done: every plan of it is done"
                 raise FormatError(f"milestone {mid} is {why}; its subject and body can't be changed. "
                                   f"Add a new milestone instead: pm milestone add")
+            if fields.get("status") == "on-hold" and m["status"] == "implemented":
+                raise FormatError(f"milestone {mid} is implemented; it can't be put on hold")
             for k, v in fields.items():
                 if k == "status" and v is not None:
                     db.execute("UPDATE milestone SET status = ?, implemented_at = CASE WHEN ? = 'implemented' "
@@ -1281,7 +1284,9 @@ class Project:
             self.close_stale_run()
             self.close_and_commit()
             if not self.rows("SELECT 1 FROM milestone WHERE status = 'open'"):
-                self.say("No open milestone (`pm milestone add` starts one).")
+                held = [r["id"] for r in self.rows("SELECT id FROM milestone WHERE status = 'on-hold' ORDER BY id")]
+                self.say("No open milestone (`pm milestone add` starts one)." + (
+                    f" On hold: milestone(s) {', '.join(map(str, held))} (`pm milestone resume <id>`)." if held else ""))
                 return 0
             q = self.queue()
             if not q:
@@ -1336,7 +1341,7 @@ class Project:
             self.say(f"Running: task {r['task_id']} (run {r['id']}, pid {r['pid']}) since {stamp(r['started_at'])}, "
                      f"{duration(seconds(r['started_at'], None))}")
         for m in self.rows(
-                "SELECT m.id, m.subject, m.created_at, "
+                "SELECT m.id, m.subject, m.status, m.created_at, "
                 "(SELECT count(*) FROM plan p WHERE p.milestone_id = m.id) AS plans, "
                 "(SELECT count(*) FROM task t JOIN plan p ON p.id = t.plan_id WHERE p.milestone_id = m.id) AS tasks, "
                 "(SELECT count(*) FROM task t JOIN plan p ON p.id = t.plan_id "
@@ -1347,8 +1352,9 @@ class Project:
                 "WHERE p.milestone_id = m.id AND r.result = 'failed') AS failed, "
                 "(SELECT total(r.cost_usd) FROM run r JOIN task t ON t.id = r.task_id JOIN plan p ON p.id = t.plan_id "
                 "WHERE p.milestone_id = m.id) AS cost "
-                "FROM milestone m WHERE m.status = 'open' ORDER BY m.id"):
-            self.say(f"Milestone {m['id']}: {m['subject']} (created {stamp(m['created_at'])}): {m['plans']} plan(s), "
+                "FROM milestone m WHERE m.status <> 'implemented' ORDER BY m.id"):
+            held = ", on hold" if m["status"] == "on-hold" else ""
+            self.say(f"Milestone {m['id']}: {m['subject']} (created {stamp(m['created_at'])}{held}): {m['plans']} plan(s), "
                      f"{m['closed']}/{m['tasks']} tasks closed, {m['runs']} run(s) ({m['failed']} failed), "
                      f"${m['cost']:.2f}")
         self.print_queue(limit=10)
@@ -1415,7 +1421,7 @@ def main(argv=None):
     ap.add_argument("--root", help="the project's git repository (default: the one around the current directory)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name, text in [("init", f"write {CONFIG_FILE} and the database (missing ones only) and commit them"),
-                       ("status", "open milestones, the queue, pending decisions"), ("queue", "the whole queue"),
+                       ("status", "open and on-hold milestones, the queue, pending decisions"), ("queue", "the whole queue"),
                        ("validate", "check the database"),
                        ("decide", "answer pending decisions in the terminal, one by one"),
                        ("instructions", "the full reference for agents: every command with examples, recipes")]:
@@ -1438,6 +1444,9 @@ def main(argv=None):
     mset.add_argument("--subject")
     mset.add_argument("--status", choices=MILESTONE_STATES)
     mset.add_argument("--body", type=text_arg)
+    for name, text in [("hold", "put a milestone on hold: its plans and tasks leave the queue; a running task finishes"),
+                       ("resume", "resume a milestone on hold: its tasks are queued again")]:
+        ms.add_parser(name, help=text).add_argument("milestone", type=int)
 
     p = sub.add_parser("plan", aliases=["plans"], help="add, change or list plans").add_subparsers(
         dest="action", required=True)
@@ -1537,6 +1546,12 @@ def main(argv=None):
                 mid = pm.milestone_add(*entry)
                 print(mid)
                 msg = f"milestone {mid} added: {entry[0]}"
+            elif args.action in ("hold", "resume"):
+                if args.action == "resume" and pm.rows("SELECT 1 FROM milestone WHERE id = ? AND status <> 'on-hold'",
+                                                       args.milestone):
+                    raise FormatError(f"milestone {args.milestone} is not on hold")
+                pm.milestone_set(args.milestone, status="on-hold" if args.action == "hold" else "open")
+                msg = f"milestone {args.milestone} " + ("on hold" if args.action == "hold" else "resumed")
             else:
                 print_queued(pm.milestone_set(args.milestone, subject=args.subject, status=args.status,
                                               body=args.body))

@@ -42,7 +42,7 @@ function RunningCard({ d }) {
 
 export function Overview({ d }) {
   if (!d.milestones.length) return html`<${Welcome} />`;
-  const open = d.milestones.filter((m) => m.status === "open");
+  const open = d.milestones.filter((m) => m.status !== "implemented");
   const pending = d.decisions.filter((x) => x.status === "pending");
   const finished = d.runs.filter((r) => r.result !== "running");
   const today = day(new Date().toISOString());
@@ -125,7 +125,8 @@ export function Queue({ d }) {
 }
 
 export function Milestones({ d }) {
-  const ms = [...d.milestones].sort((a, b) => (a.status === b.status ? a.id - b.id : a.status === "open" ? -1 : 1));
+  const order = { open: 0, "on-hold": 1, implemented: 2 };
+  const ms = [...d.milestones].sort((a, b) => order[a.status] - order[b.status] || a.id - b.id);
   if (!ms.length) return html`<${Welcome} />`;
   return html`<h1>Milestones</h1>
     <div class="cards" style="margin-top:12px">${ms.map((m) => html`<${MilestoneCard} d=${d} m=${m} />`)}</div>
@@ -165,7 +166,9 @@ export function Milestone({ d, id }) {
   return html`<div class="crumbs"><a href="#/milestones">Milestones</a></div>
     <${EditableLine} text=${m.subject} save=${mDone ? null : saveMilestone(m.id, "subject")} />
     <div class="row sub"><${Pill} status=${m.status} /><span>milestone ${m.id} · created ${stamp(m.created_at)}</span>
-      ${m.implemented_at ? html`<span>· implemented ${stamp(m.implemented_at)}</span>` : null}</div>
+      ${m.implemented_at ? html`<span>· implemented ${stamp(m.implemented_at)}</span>` : null}
+      ${m.status !== "implemented" ? html`<${HoldButton} m=${m} />` : null}</div>
+    ${m.status === "on-hold" ? html`<div class="sub">On hold: its plans and tasks stay out of the queue until resumed.</div>` : null}
     <${Progress} ...${counts(tasks)} />
     <div style="margin-top:12px"><${EditableBody} text=${m.body} save=${mDone ? null : saveMilestone(m.id, "body")} /></div>
     <div class="sub" style="margin-top:4px">${mDone ? "Done: it can't be changed; add a new milestone instead."
@@ -281,6 +284,17 @@ export function Task({ d, id, query }) {
     <div class="section-head"><h2>Worker log${running ? " (live)" : ""}</h2>
       <button class="iconbtn" onClick=${() => setShowLog(!showLog)}>${showLog ? "hide" : "show"}</button></div>
     ${showLog ? html`<${Log} d=${d} t=${t} live=${running} />` : null}`;
+}
+
+function HoldButton({ m }) {
+  const [error, setError] = useState(null);
+  const hold = m.status === "open";
+  const go = async () => {
+    try { await post({ op: "milestone_hold", id: m.id, hold }); setError(null); }
+    catch (e) { setError(e.message); }
+  };
+  return html`<button class="btn" onClick=${go} title=${hold ? "keep its plans and tasks out of the queue; a running task finishes" : ""}>
+    ${hold ? "Put on hold" : "Resume"}</button>${error ? html`<span class="err">${error}</span>` : null}`;
 }
 
 function CloseTask({ t }) {

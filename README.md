@@ -55,14 +55,14 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 
 **Data.** Everything is referenced by its integer id.
 
-- milestone: subject, body, status, `created_at`, `implemented_at`
+- milestone: subject, body, status (`open`, `on-hold`, `implemented`), `created_at`, `implemented_at`
 - plan: belongs to a milestone; subject, body, priority, `created_at`, `created_by_task`
 - task: belongs to a plan; subject, body, kind (`work`, `plan`: writes a plan; made by pm: `masterplan`, `split` for "create tasks for plan N", `cleanup`), status, priority, note, `created_at`, `retired_at` (done or dropped), `created_by_task`
 - decision: subject, body, options, status, answer or reason, `created_at`, `closed_at`, `created_by_task`, `signoff` (made by pm, see below); `task_decision` links tasks to the decisions they wait for
 - run: one worker run of `pm run`: task, start, end, result (`running`, `done`, `blocked`, `failed`, `limit`), reason, exit code, `base_commit` (HEAD at the start), `pid` of `pm run`; from claude's JSON output: model, session, turns, tokens (input, output, cache read, cache creation), cost in USD; while it runs, `running` (at most one, uncommitted); a `pm run` that died leaves it, the next `pm run` marks it `failed` (`interrupted`), or refuses while that process lives
 - timestamps in UTC; `created_by_task`: the task whose worker created the row (`PM_TASK`), empty for the human or pm
 
-**Queue** (the `queue` view): open tasks of open milestones that no pending decision blocks, by priority (task's, else plan's, else 0; highest first), then milestone, plan and task id.
+**Queue** (the `queue` view): open tasks of open milestones (not on hold) that no pending decision blocks, by priority (task's, else plan's, else 0; highest first), then milestone, plan and task id.
 
 **Sign-offs.** `signoff` in project-manager.toml, empty by default: then only the decisions workers raise stop the run. Each value makes `pm run` wait for your approval before the next task of a kind runs:
 
@@ -93,6 +93,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 | `milestone add`, `plan add <milestone>`, `task add <plan>` | In your editor (as `git commit`): first line subject, rest body (Markdown); quit unsaved or save empty to abort |
 | `milestone add <subject>`, `plan add <milestone> <subject>`, `task add <plan> <subject>` | Non-interactive: the body from stdin. `plan add` and `task add` also take `--priority`; `task add` `--kind plan` |
 | `milestone set <milestone>` | `--subject`, `--status`, `--body` |
+| `milestone hold <milestone>`, `milestone resume <milestone>` | Keep its plans and tasks out of the queue (a running task finishes), and back |
 | `plan edit <plan>` | `--subject`, `--body`, `--priority <N\|none>` |
 | `task done\|drop <task> <note>`, `task priority <task> <N\|none>` | Close a task, set its priority |
 | `decision add <subject>` | `--body`, `--option` (recommended first) |

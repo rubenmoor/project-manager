@@ -48,6 +48,14 @@ def apply(project, op):
         project.milestone_set(int(op["id"]), subject=text(op.get("subject"), "the subject", False),
                               body=text(op.get("body"), "the body", False) if "body" in op else None)
         return f"milestone {op['id']} changed", None
+    if kind == "milestone_hold":
+        mid, hold = int(op["id"]), op.get("hold")
+        if not isinstance(hold, bool):
+            raise EditError("hold must be true or false")
+        if not hold and project.rows("SELECT 1 FROM milestone WHERE id = ? AND status <> 'on-hold'", mid):
+            raise EditError(f"milestone {mid} is not on hold")
+        project.milestone_set(mid, status="on-hold" if hold else "open")
+        return f"milestone {mid} " + ("on hold" if hold else "resumed"), None
     if kind == "plan_add":
         subject = text(op.get("subject"), "the subject")
         pid = project.plan_add(int(op["milestone"]), subject.strip(), text(op.get("body"), "the body"), prio(op.get("priority")))

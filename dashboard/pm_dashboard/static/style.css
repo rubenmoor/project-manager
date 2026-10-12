@@ -130,7 +130,7 @@ h3 { font-size: 14px; margin: 16px 0 6px; font-weight: 600; }
 .pill.done .dot, .pill.answered .dot, .pill.implemented .dot { background: var(--good); }
 .pill.dropped .dot, .pill.irrelevant .dot { background: var(--dropped); }
 .pill.failed .dot { background: var(--critical); }
-.pill.blocked .dot { background: var(--warning); }
+.pill.blocked .dot, .pill.on-hold .dot { background: var(--warning); }
 .pill.limit .dot { background: var(--serious); }
 .pill.running .dot { background: var(--good); animation: pulse 1.4s ease-in-out infinite; }
 .tag { display: inline-block; padding: 0 6px; border-radius: 4px; font-size: 11.5px; line-height: 18px;
