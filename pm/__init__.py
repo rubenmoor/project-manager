@@ -327,6 +327,7 @@ class Project:
         self.db = self.config["database"]
         self.db_path = self.root / self.db
         self.out = out
+        self.stopping = False       # `pm run` stops after the current task
 
     def say(self, *args):
         print(*args, file=self.out, flush=True)
@@ -919,7 +920,7 @@ class Project:
 
     def wait_until(self, when):
         """Sleep until `when` by the wall clock, so a suspended machine still wakes up on time."""
-        while (left := (when - datetime.datetime.now(when.tzinfo)).total_seconds()) > 0:
+        while not self.stopping and (left := (when - datetime.datetime.now(when.tzinfo)).total_seconds()) > 0:
             time.sleep(min(left, 60))
 
     def head(self):
@@ -984,6 +985,8 @@ class Project:
             until = max(reset + margin, datetime.datetime.now(reset.tzinfo) + margin)
             self.say(f"Usage limit ({limit.strip()}). Waiting until {until:%Y-%m-%d %H:%M %Z}, then the same task again.")
             self.wait_until(until)
+            if self.stopping:
+                return "limit", "stopped while waiting for the usage limit's reset"
         if errors := self.validate():
             return "failed", "the database is no longer valid, the run is not recorded:\n  " + "\n  ".join(errors)
         if code != 0:
@@ -1105,6 +1108,22 @@ class Project:
             self.commit_db(", ".join(done))
 
     def run(self, once=False, dry_run=False):
+        """Work the queue. The first Ctrl-C (SIGINT) or a SIGUSR1 (`pm stop`): stop after the current task; a second
+        Ctrl-C, SIGTERM or SIGHUP: stop now."""
+        def stop_later(sig, _):
+            if sig == signal.SIGINT and self.stopping:
+                raise KeyboardInterrupt("SIGINT")
+            if not self.stopping:
+                self.stopping = True
+                os.write(2, b"\n== stopping after this task (Ctrl-C again: stop now)\n")  # print() may be mid-write
+        old = {sig: signal.signal(sig, stop_later) for sig in (signal.SIGINT, signal.SIGUSR1)}
+        try:
+            return self.work_queue(once, dry_run)
+        finally:
+            for sig, handler in old.items():
+                signal.signal(sig, handler)
+
+    def work_queue(self, once, dry_run):
         for w in self.worker_warnings():
             self.say(w)
         while True:
@@ -1149,6 +1168,19 @@ class Project:
             self.close_and_commit()
             if once:
                 return 0
+            if self.stopping:
+                self.say("Stopped as asked; `pm run` continues with the queue.")
+                return 0
+
+    def stop(self):
+        """Ask the running `pm run` to stop after its current task."""
+        r = (self.rows("SELECT * FROM run WHERE result = 'running'") or [None])[0]
+        try:
+            os.kill(r["pid"], signal.SIGUSR1)
+        except (TypeError, ProcessLookupError):
+            raise FormatError("no `pm run` is working a task; between tasks or waiting for a usage limit, Ctrl-C "
+                              "or `kill <pid>` stops it with nothing lost") from None
+        self.say(f"`pm run` (pid {r['pid']}) stops after task {r['task_id']}")
 
     def dirty_message(self):
         files = self.git("status", "--porcelain").splitlines()
@@ -1253,6 +1285,7 @@ def main(argv=None):
     r = sub.add_parser("run", help="work the queue with the worker command (claude -p)")
     r.add_argument("--once", action="store_true", help="stop after one task")
     r.add_argument("--dry-run", action="store_true", help="print the next worker command; change nothing")
+    sub.add_parser("stop", help="have the running `pm run` stop after its current task")
 
     ms = sub.add_parser("milestone", help="add or change milestones").add_subparsers(dest="action", required=True)
     ma = ms.add_parser("add", help="new open milestone; prints its id. Without a subject: write it in your editor "
@@ -1351,6 +1384,8 @@ def main(argv=None):
             msg = pm.decide() and "decisions answered"
         elif args.cmd == "run":
             return pm.run(once=args.once, dry_run=args.dry_run)
+        elif args.cmd == "stop":
+            pm.stop()
         elif args.cmd == "milestone":
             if args.action == "add":
                 if not (entry := pm.subject_and_body("milestone", args.subject)):
