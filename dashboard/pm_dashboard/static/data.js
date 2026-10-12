@@ -23,6 +23,16 @@ export function index(state) {
     (d.decisionsOf.get(l.task_id) || d.decisionsOf.set(l.task_id, []).get(l.task_id)).push(d.decision.get(l.decision_id));
     (d.tasksWaiting.get(l.decision_id) || d.tasksWaiting.set(l.decision_id, []).get(l.decision_id)).push(d.task.get(l.task_id));
   }
+  // Supersede links: decision id → [{ id, note }] of the decisions it replaces, and of those replacing it.
+  d.supersedes = new Map();
+  d.supersededBy = new Map();
+  for (const l of t.decision_supersedes || []) {
+    (d.supersedes.get(l.decision_id) || d.supersedes.set(l.decision_id, []).get(l.decision_id)).push({ id: l.superseded_id, note: l.note });
+    (d.supersededBy.get(l.superseded_id) || d.supersededBy.set(l.superseded_id, []).get(l.superseded_id)).push({ id: l.decision_id, note: l.note });
+  }
+  // The decision log, as `pm decision list --answered`: answered lasting questions nothing fully supersedes.
+  d.inLog = (x) => x.status === "answered" && !x.signoff && x.kind !== "once"
+    && !(d.supersededBy.get(x.id) || []).some((s) => !s.note);
   d.createdBy = new Map();
   for (const [kind, rows] of [["plan", t.plan], ["task", t.task], ["decision", t.decision]])
     for (const r of rows)

@@ -348,7 +348,16 @@ function PendingGroups({ d, xs }) {
       <td class="muted" style="width:110px"><${Time} ts=${x.created_at} /></td></tr>`)}</tbody></table></div>`)}`;
 }
 
+// once, decided by a worker, superseded: what keeps a closed decision out of the log or marks it.
+function DecisionTags({ d, x }) {
+  const by = d.supersededBy.get(x.id) || [];
+  return html`${x.kind === "once" && !x.signoff ? html` <span class="tag">once</span>` : null}
+    ${x.decided_by_task != null ? html` <span class="tag">worker's choice</span>` : null}
+    ${by.length ? html` <span class="tag">${by.some((s) => !s.note) ? "superseded" : "partly superseded"} by ${by.map((s) => `d${s.id}`).join(", ")}</span>` : null}`;
+}
+
 export function Decisions({ d, query }) {
+  const [filter, setFilter] = useState("log");
   const mid = Number(new URLSearchParams(query || "").get("milestone")) || null;
   const ms = mid ? d.milestone.get(mid) : null;
   if (ms) {
@@ -360,10 +369,13 @@ export function Decisions({ d, query }) {
   }
   const pending = d.decisions.filter((x) => x.status === "pending");
   const signoffs = pending.filter((x) => x.signoff), questions = pending.filter((x) => !x.signoff);
-  const closed = d.decisions.filter((x) => x.status !== "pending").reverse();
+  const allClosed = d.decisions.filter((x) => x.status !== "pending")
+    .sort((a, b) => (b.closed_at || "").localeCompare(a.closed_at || "") || b.id - a.id);
+  const closed = filter === "log" ? allClosed.filter(d.inLog) : allClosed;
   const list = (xs) => html`<div class="tablewrap"><table><tbody>${xs.map((x) => html`<tr>
     <td style="width:56px"><${Id} kind="decision" id=${x.id} /></td>
     <td class="subject"><a href=${`#/decision/${x.id}`}>${x.subject}</a> ${x.signoff ? html`<span class="tag signoff">${x.signoff}</span>` : null}
+      <${DecisionTags} d=${d} x=${x} />
       ${x.status !== "pending" ? html`<div class="muted" style="font-size:12px">${x.answer || x.reason}</div>` : null}</td>
     <td style="width:110px"><${Pill} status=${x.status} /></td>
     <td class="muted" style="width:140px">${(d.tasksWaiting.get(x.id) || []).length} task(s)</td>
@@ -372,11 +384,16 @@ export function Decisions({ d, query }) {
     <div class="sub">Answer them in a Claude session, with <code>pm decide</code> or <code>pm decision answer</code>; <a href="#/since">since you last looked</a> shows what changed.</div>
     ${signoffs.length ? html`<h2>Sign-offs (${signoffs.length})</h2><${PendingGroups} d=${d} xs=${signoffs} />` : null}
     <h2>Questions (${questions.length})</h2>${questions.length ? html`<${PendingGroups} d=${d} xs=${questions} />` : html`<div class="empty">None pending.</div>`}
-    <h2>Closed (${closed.length})</h2>${closed.length ? list(closed) : html`<div class="empty">None yet.</div>`}`;
+    <h2>Closed (${closed.length})</h2>
+    <${Chips} value=${filter} set=${setFilter} options=${[["log", "decision log"], ["all", "all closed"]]} />
+    ${filter === "log" ? html`<div class="sub">Answered lasting decisions nothing fully supersedes, newest first: <code>pm decision list --answered</code>.</div>` : null}
+    ${closed.length ? list(closed) : html`<div class="empty">None yet.</div>`}`;
 }
 
 const KNOWN = new Set(["id", "subject", "status", "options", "body", "answer", "reason", "created_at", "closed_at",
-  "created_by_task", "signoff", "signoff_view"]);
+  "created_by_task", "signoff", "signoff_view", "kind", "decided_by_task", "consequences"]);
+
+const links = (d, xs, verb) => xs.map((s) => html`<div class="sub">${(s.note ? "Partly " + verb.toLowerCase() : verb) + " "}<a href=${`#/decision/${s.id}`}>decision ${s.id}: ${(d.decision.get(s.id) || {}).subject}</a>${s.note ? ` (${s.note})` : ""}</div>`);
 
 export function Decision({ d, id }) {
   const x = d.decision.get(id);
@@ -388,9 +405,12 @@ export function Decision({ d, id }) {
     <div class="row sub"><${Pill} status=${x.status} />${x.signoff ? html`<span class="tag signoff">sign-off: ${x.signoff}</span>` : null}
       <span>decision ${x.id} · created ${stamp(x.created_at)}</span>
       ${x.created_by_task != null ? html`<span>by <a href=${`#/task/${x.created_by_task}`}>task ${x.created_by_task}</a></span>` : null}
+      ${!x.signoff ? html`<span class="tag">${x.kind === "once" ? "once: not in the log" : "rule"}</span>` : null}
       ${extra.map(([k, v]) => html`<span class="tag">${k}: ${String(v)}</span>`)}</div>
+    ${links(d, d.supersededBy.get(x.id) || [], "Superseded by")}${links(d, d.supersedes.get(x.id) || [], "Supersedes")}
     ${x.status !== "pending" ? html`<div class="card" style="margin:12px 0"><b>${x.status === "answered" ? "Answer" : "Irrelevant"}</b>
-      (${stamp(x.closed_at)}): ${x.answer || x.reason}</div>` : null}
+      (${stamp(x.closed_at)}${x.decided_by_task != null ? html`, the own choice of <a href=${`#/task/${x.decided_by_task}`}>task ${x.decided_by_task}</a>` : null}): ${x.answer || x.reason}</div>` : null}
+    ${x.consequences ? html`<h3>Consequences</h3><div class="card"><${Markdown} text=${x.consequences} /></div>` : null}
     ${x.options.length ? html`<h3>Options</h3><ol class="options">${x.options.map((o, i) => html`<li class=${i === 0 ? "rec" : ""}>${o}</li>`)}</ol>` : null}
     ${x.body.trim() || !x.signoff_view ? html`<div class="card" style="margin-top:12px"><${Markdown} text=${x.body} empty="No body." /></div>` : null}
     ${x.signoff_view ? html`<h2>What it approves</h2><div class="card"><${Markdown} text=${x.signoff_view} /></div>` : null}

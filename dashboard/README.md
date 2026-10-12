@@ -23,8 +23,8 @@ In the project's git repository (the one with `project-manager.toml`):
 - **Milestones**: cards with progress and the number of pending decisions its open tasks wait for, linked to exactly those (`#/decisions?milestone=N`)
 - **Milestone**, **plans**: plans by priority with their tasks; filters by status and kind; put a milestone on hold or resume it (its plans and open tasks show "on hold")
 - **Task**: body, note, priority, decisions, rows it created, runs, the diff of its commit (syntax highlighted), worker log
-- **Decisions**: pending sign-offs and questions by milestone, the ones holding up the most important work first; closed ones
-- **Since you looked**: rows changed since the commit you marked as seen (uncommitted ones included): decisions answered, plan bodies as diffs, new and closed tasks, runs
+- **Decisions**: pending sign-offs and questions by milestone, the ones holding up the most important work first; closed ones: the decision log (as `pm decision list --answered`) or all; tags for one-offs, workers' own choices, superseded ones; a decision's page shows consequences and supersede links
+- **Since you looked**: rows changed since the commit you marked as seen (uncommitted ones included): decisions answered, choices workers recorded without asking, plan bodies as diffs, new and closed tasks, runs
 - **Runs**: cost per day, per task kind, per milestone; every run
 - Status line (bottom): Claude account usage of the 5-hour window and the week (%, reset time), tokens and cost of pm's workers in each window
 - Notifications (`notify` in the top bar): a new pending decision, a failed run, `pm run` stopped or done

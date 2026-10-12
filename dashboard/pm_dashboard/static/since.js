@@ -28,7 +28,7 @@ export function useSince(state) {
 
 export function sinceCount(since) {
   if (!since || !since.tables) return 0;
-  return Object.entries(since.tables).filter(([t]) => t !== "run" && t !== "task_decision")
+  return Object.entries(since.tables).filter(([t]) => !["run", "task_decision", "decision_supersedes"].includes(t))
     .reduce((n, [, x]) => n + x.added.length + x.removed.length + x.changed.length, 0);
 }
 
@@ -87,6 +87,7 @@ export function Since({ since, mark, state }) {
   const t = since.tables;
   const runs = t.run ? t.run.added.filter((r) => r.result !== "running") : [];
   const closedDecisions = t.decision ? t.decision.changed.filter((c) => c.before.status === "pending" && c.row.status !== "pending") : [];
+  const recorded = t.decision ? t.decision.added.filter((r) => r.decided_by_task != null) : [];
   const n = sinceCount(since);
   const atHead = state.head && since.commit === state.head.commit;
   return html`<div class="section-head"><h1>Since you last looked</h1>
@@ -97,6 +98,10 @@ export function Since({ since, mark, state }) {
     ${closedDecisions.length ? html`<h2>Decisions answered (${closedDecisions.length})</h2>
       <div class="tablewrap"><table><tbody>${closedDecisions.map((c) => html`<tr><td class="subject"><a href=${`#/decision/${c.row.id}`}>${c.row.subject}</a></td>
         <td><${Pill} status=${c.row.status} /></td><td>${c.row.answer || c.row.reason}</td></tr>`)}</tbody></table></div>` : null}
+    ${recorded.length ? html`<h2>Choices workers made (${recorded.length})</h2>
+      <div class="sub">Recorded without asking you; override one by answering a new decision that supersedes it.</div>
+      <div class="tablewrap"><table><tbody>${recorded.map((r) => html`<tr><td class="subject"><a href=${`#/decision/${r.id}`}>${r.subject}</a></td>
+        <td>${r.answer}</td><td class="muted"><a href=${`#/task/${r.decided_by_task}`}>task ${r.decided_by_task}</a></td></tr>`)}</tbody></table></div>` : null}
     ${["milestone", "plan", "task", "decision"].filter((k) => t[k]).map((k) => {
       const x = t[k];
       const changed = k === "decision" ? x.changed.filter((c) => !closedDecisions.includes(c)) : x.changed;

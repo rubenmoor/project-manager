@@ -144,8 +144,9 @@ def since(project, commit):
         o, n = old.get(t, {}), new[t]
         added = [n[k] for k in n if k not in o]
         removed = [o[k] for k in o if k not in n]
-        changed = [{"row": n[k], "before": {f: o[k].get(f) for f in n[k] if o[k].get(f) != n[k][f]}}
-                   for k in n if k in o and o[k] != n[k]]
+        # Columns a newer schema added aren't changes.
+        diff = lambda k: {f: o[k][f] for f in n[k] if f in o[k] and o[k][f] != n[k][f]}
+        changed = [{"row": n[k], "before": diff(k)} for k in n if k in o and diff(k)]
         for rows in (added, removed, [c["row"] for c in changed], [c["before"] for c in changed]):
             for r in rows:
                 if isinstance(r.get("options"), str):
