@@ -34,6 +34,9 @@ export function index(state) {
     const p = d.plan.get(task.plan_id);
     return p.priority != null ? { value: p.priority, from: "plan" } : { value: 0, from: "default" };
   };
+  // Pending decisions an open task of milestone m waits for: the ones the milestone needs answered to finish.
+  d.milestoneDecisions = (m) => d.decisions.filter((x) => x.status === "pending"
+    && (d.tasksWaiting.get(x.id) || []).some((t) => t.status === "open" && d.milestoneOfTask(t).id === m.id));
   d.blockers = (task) => (d.decisionsOf.get(task.id) || []).filter((x) => x.status === "pending");
   d.excluded = (task) => {
     if (task.status !== "open") return null;

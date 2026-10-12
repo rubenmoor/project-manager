@@ -88,6 +88,11 @@ function MilestoneCard({ d, m }) {
       <${Pill} status=${m.status} /></div>
     <${Progress} ...${counts(tasks)} />
     <div class="sub" style="margin-top:6px">${plans.length} plans · ${runs.length} runs · ${usd(d.cost(runs))} · created <${Time} ts=${m.created_at} /></div>
+    ${m.status !== "implemented" ? (() => {
+      const n = d.milestoneDecisions(m).length;
+      return html`<div class="sub" style="margin-top:4px">${n ? html`<a class="tag signoff" href=${`#/decisions?milestone=${m.id}`}
+        title="pending decisions its open tasks wait for">${n} pending decision${n > 1 ? "s" : ""}</a>` : "no pending decisions"}</div>`;
+    })() : null}
   </div>`;
 }
 
@@ -345,7 +350,16 @@ function PendingGroups({ d, xs }) {
       <td class="muted" style="width:110px"><${Time} ts=${x.created_at} /></td></tr>`)}</tbody></table></div>`)}`;
 }
 
-export function Decisions({ d }) {
+export function Decisions({ d, query }) {
+  const mid = Number(new URLSearchParams(query || "").get("milestone")) || null;
+  const ms = mid ? d.milestone.get(mid) : null;
+  if (ms) {
+    const xs = d.milestoneDecisions(ms);
+    return html`<div class="crumbs"><a href="#/decisions">Decisions</a></div>
+      <h1>Pending decisions for <a href=${`#/milestone/${ms.id}`}>${ms.subject}</a></h1>
+      <div class="sub">The ones its open tasks wait for: the milestone can't finish until they are answered. <a href="#/decisions">All decisions</a></div>
+      ${xs.length ? html`<${PendingGroups} d=${d} xs=${xs} />` : html`<div class="empty">None pending.</div>`}`;
+  }
   const pending = d.decisions.filter((x) => x.status === "pending");
   const signoffs = pending.filter((x) => x.signoff), questions = pending.filter((x) => !x.signoff);
   const closed = d.decisions.filter((x) => x.status !== "pending").reverse();
