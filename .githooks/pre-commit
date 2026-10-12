@@ -1,9 +1,16 @@
 #!/bin/sh
-# Every commit raises VERSION in pm/__init__.py (AGENTS.md).
-get() { git show "$1:pm/__init__.py" 2>/dev/null | sed -n 's/^VERSION = \([0-9][0-9]*\).*/\1/p'; }
-new=$(get "")
-old=$(get HEAD)
+# Every commit raises VERSION in pm/__init__.py; a change to SCHEMA raises SCHEMA_VERSION (AGENTS.md).
+src() { git show "$1:pm/__init__.py" 2>/dev/null; }
+num() { src "$1" | sed -n "s/^$2 = \([0-9][0-9]*\).*/\1/p"; }
+schema() { src "$1" | sed -n '/^SCHEMA = """/,/^"""/p'; }
+new=$(num "" VERSION)
+old=$(num HEAD VERSION)
 [ -n "$new" ] || { echo "pre-commit: no VERSION in pm/__init__.py" >&2; exit 1; }
-[ "$new" -gt "${old:-0}" ] && exit 0
-echo "pre-commit: raise VERSION in pm/__init__.py to $((old + 1)) (AGENTS.md)" >&2
-exit 1
+[ "$new" -gt "${old:-0}" ] || { echo "pre-commit: raise VERSION in pm/__init__.py to $((old + 1)) (AGENTS.md)" >&2; exit 1; }
+if [ "$(schema "")" != "$(schema HEAD)" ]; then
+    snew=$(num "" SCHEMA_VERSION)
+    sold=$(num HEAD SCHEMA_VERSION)
+    [ "${snew:-0}" -gt "${sold:-0}" ] || {
+        echo "pre-commit: SCHEMA changed: raise SCHEMA_VERSION in pm/__init__.py to $((sold + 1)) (AGENTS.md)" >&2; exit 1; }
+fi
+exit 0
