@@ -20,7 +20,12 @@ export function Prio({ p }) {
     ${p.value}${p.from !== "task" ? html`<span class="from"> ${p.from === "plan" ? "plan" : "–"}</span>` : null}</span>`;
 }
 
-export const TaskLink = ({ t }) => html`<a href=${`#/task/${t.id}`}>${t.subject}</a>`;
+// The id prefix shown before every task, plan and milestone subject: t12, p3, m1.
+export const Ref = ({ kind, id }) => html`<span class="ref">${kind[0]}${id}</span>`;
+export const Named = ({ kind, r }) => html`<${Ref} kind=${kind} id=${r.id} /> ${r.subject}`;
+export const NamedLink = ({ kind, r }) => html`<a href=${`#/${kind}/${r.id}`}><${Named} kind=${kind} r=${r} /></a>`;
+export const TaskLink = ({ t }) => html`<${NamedLink} kind="task" r=${t} />`;
+export const Titled = ({ kind, id, children }) => html`<div class="titled"><${Ref} kind=${kind} id=${id} />${children}</div>`;
 export const Id = ({ kind, id }) => html`<a class="mono muted" href=${`#/${kind}/${id}`}>${kind[0]}${id}</a>`;
 
 export function Time({ ts }) {

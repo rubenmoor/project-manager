@@ -1,5 +1,5 @@
 import { html, useState, useEffect, useRef } from "/vendor/preact-htm.js";
-import { Markdown, Pill, Kind, Prio, TaskLink, Id, Time, Elapsed, Tile, Progress, Bars } from "/ui.js";
+import { Markdown, Pill, Kind, Prio, TaskLink, Id, Ref, Named, NamedLink, Titled, Time, Elapsed, Tile, Progress, Bars } from "/ui.js";
 import { usd, tokens, stamp, duration, seconds, day } from "/data.js";
 import { EditableBody, EditableLine, PrioEdit, post, autofocus } from "/editor.js";
 import { AddButton, Welcome } from "/add.js";
@@ -31,12 +31,12 @@ function Banners({ d }) {
 function RunningCard({ d }) {
   const r = d.running;
   if (!r) return html`<div class="card"><div class="sub">No worker is running${d.queue.length ? html`: start them with <code>pm run</code> in the project's terminal` : ""}.</div>
-    ${d.queue.length ? html`<div class="muted" style="margin-top:4px">Next: <a href=${`#/task/${d.queue[0]}`}>task ${d.queue[0]}</a> ${d.task.get(d.queue[0]).subject}</div>` : null}</div>`;
+    ${d.queue.length ? html`<div class="muted" style="margin-top:4px">Next: <${TaskLink} t=${d.task.get(d.queue[0])} /></div>` : null}</div>`;
   const t = d.task.get(r.task_id);
   return html`<div class="card">
     <div class="row"><${Pill} status="running" /><span class="sub">task ${t.id}, run ${r.id}, for <${Elapsed} start=${r.started_at} /></span></div>
     <div style="margin-top:6px;font-weight:600"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /></div>
-    <div class="muted" style="margin-top:2px">${d.plan.get(t.plan_id).subject} · <a href=${`#/task/${t.id}?log`}>live log</a></div>
+    <div class="muted" style="margin-top:2px"><${Named} kind="plan" r=${d.plan.get(t.plan_id)} /> · <a href=${`#/task/${t.id}?log`}>live log</a></div>
   </div>`;
 }
 
@@ -84,7 +84,7 @@ function MilestoneCard({ d, m }) {
   const runs = tasks.flatMap(d.taskRuns);
   const plans = d.plansOf.get(m.id) || [];
   return html`<div class=${"card" + (d.held(m) ? " held" : "")}>
-    <div class="row" style="justify-content:space-between"><a href=${`#/milestone/${m.id}`}><b>${m.subject}</b></a>
+    <div class="row" style="justify-content:space-between"><a href=${`#/milestone/${m.id}`}><b><${Named} kind="milestone" r=${m} /></b></a>
       <${Pill} status=${m.status} /></div>
     <${Progress} ...${counts(tasks)} />
     <div class="sub" style="margin-top:6px">${plans.length} plans · ${runs.length} runs · ${usd(d.cost(runs))} · created <${Time} ts=${m.created_at} /></div>
@@ -99,15 +99,14 @@ function MilestoneCard({ d, m }) {
 function QueueTable({ d, ids }) {
   if (!ids.length) return html`<div class="empty">The queue is empty.</div>`;
   return html`<div class="tablewrap"><table>
-    <thead><tr><th class="r">#</th><th>prio</th><th>task</th><th>subject</th><th>plan</th><th>milestone</th></tr></thead>
+    <thead><tr><th class="r">#</th><th>prio</th><th>task</th><th>plan</th><th>milestone</th></tr></thead>
     <tbody>${ids.map((id) => {
       const t = d.task.get(id), p = d.plan.get(t.plan_id), m = d.milestone.get(p.milestone_id);
       const run = d.running && d.running.task_id === id;
       return html`<tr class=${d.queuePos.get(id) === 0 ? "head-row" : ""}>
         <td class="r num muted">${d.queuePos.get(id) + 1}</td><td><${Prio} p=${d.prio(t)} /></td>
-        <td><${Id} kind="task" id=${id} /></td>
         <td class="subject"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /> ${run ? html`<${Pill} status="running" />` : null}</td>
-        <td class="ink2"><a class="ink2" href=${`#/plan/${p.id}`}>${p.subject}</a></td><td class="muted">${m.subject}</td></tr>`;
+        <td class="ink2"><a class="ink2" href=${`#/plan/${p.id}`}><${Named} kind="plan" r=${p} /></a></td><td class="muted"><${Named} kind="milestone" r=${m} /></td></tr>`;
     })}</tbody></table></div>`;
 }
 
@@ -121,10 +120,10 @@ export function Queue({ d }) {
     <${QueueTable} d=${d} ids=${d.queue} />
     <h2>Open, not in the queue (${out.length})</h2>
     ${out.length ? html`<div class="tablewrap"><table>
-      <thead><tr><th>task</th><th>subject</th><th>why</th></tr></thead>
+      <thead><tr><th>task</th><th>why</th></tr></thead>
       <tbody>${out.map((t) => {
         const why = d.excluded(t);
-        return html`<tr><td><${Id} kind="task" id=${t.id} /></td><td class="subject"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /></td>
+        return html`<tr><td class="subject"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /></td>
           <td>${typeof why === "string" ? why : html`waits for ${why.map((x, i) => html`${i ? ", " : ""}<a href=${`#/decision/${x.id}`}>decision ${x.id}</a>`)}`}</td></tr>`;
       })}</tbody></table></div>` : html`<div class="empty">None.</div>`}`;
 }
@@ -144,7 +143,6 @@ function TaskRows({ d, tasks }) {
     const pos = d.queuePos.get(t.id);
     const why = d.excluded(t);
     return html`<tr class=${t.status !== "open" ? "closed" : ""}>
-      <td style="width:56px"><${Id} kind="task" id=${t.id} /></td>
       <td class="subject"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /></td>
       <td style="width:90px"><${TaskPrio} d=${d} t=${t} /></td>
       <td style="width:170px">${run ? html`<${Pill} status="running" />` : html`<${Pill} status=${d.taskState(t)} />`}
@@ -169,8 +167,8 @@ export function Milestone({ d, id }) {
   const filt = (ts) => ts.filter((t) => (show === "all" || (show === "open" ? t.status === "open" : t.status !== "open"))
     && (kind === "all" || t.kind === kind));
   return html`<div class="crumbs"><a href="#/milestones">Milestones</a></div>
-    <${EditableLine} text=${m.subject} save=${mDone ? null : saveMilestone(m.id, "subject")} />
-    <div class="row sub"><${Pill} status=${m.status} /><span>milestone ${m.id} · created ${stamp(m.created_at)}</span>
+    <${Titled} kind="milestone" id=${m.id}><${EditableLine} text=${m.subject} save=${mDone ? null : saveMilestone(m.id, "subject")} /></${Titled}>
+    <div class="row sub"><${Pill} status=${m.status} /><span>created ${stamp(m.created_at)}</span>
       ${m.implemented_at ? html`<span>· implemented ${stamp(m.implemented_at)}</span>` : null}
       ${m.status !== "implemented" ? html`<${HoldButton} m=${m} />` : null}</div>
     ${d.held(m) ? html`<div class="hold-note">On hold: its plans and tasks stay out of the queue until it is resumed.</div>` : null}
@@ -185,8 +183,8 @@ export function Milestone({ d, id }) {
       const ts = filt(d.tasksOf.get(p.id) || []);
       const c = counts(d.tasksOf.get(p.id) || []);
       return html`<details class="plan" open=${ts.length > 0}>
-        <summary><${PrioEdit} value=${p.priority} effective=${0} from="–" save=${planSave(d, p.id, "priority")} /><a href=${`#/plan/${p.id}`} onClick=${(e) => e.stopPropagation()}><b>${p.subject}</b></a>
-          ${d.held(m) && c.open ? html`<${Pill} status="on-hold" />` : null}<span class="muted">plan ${p.id} · ${c.open} open · ${c.done} done${c.dropped ? ` · ${c.dropped} dropped` : ""}</span></summary>
+        <summary><${PrioEdit} value=${p.priority} effective=${0} from="–" save=${planSave(d, p.id, "priority")} /><a href=${`#/plan/${p.id}`} onClick=${(e) => e.stopPropagation()}><b><${Named} kind="plan" r=${p} /></b></a>
+          ${d.held(m) && c.open ? html`<${Pill} status="on-hold" />` : null}<span class="muted">${c.open} open · ${c.done} done${c.dropped ? ` · ${c.dropped} dropped` : ""}</span></summary>
         <div class="tasks">${ts.length ? html`<${TaskRows} d=${d} tasks=${ts} />` : html`<div class="empty" style="padding:10px 12px">No tasks match.</div>`}</div>
       </details>`;
     })}
@@ -198,9 +196,9 @@ export function Plan({ d, id }) {
   if (!p) return html`<div class="empty">No plan ${id}.</div>`;
   const m = d.milestone.get(p.milestone_id);
   const tasks = d.tasksOf.get(p.id) || [];
-  return html`<div class="crumbs"><a href="#/milestones">Milestones</a> › <a href=${`#/milestone/${m.id}`}>${m.subject}</a></div>
-    <${EditableLine} text=${p.subject} save=${planSave(d, p.id, "subject")} />
-    <div class="row sub">${d.held(m) && !d.planDone.has(p.id) ? html`<${Pill} status="on-hold" />` : null}<span>plan ${p.id}</span><span>· priority <${PrioEdit} value=${p.priority} effective=${0} from="none"
+  return html`<div class="crumbs"><a href="#/milestones">Milestones</a> › <${NamedLink} kind="milestone" r=${m} /></div>
+    <${Titled} kind="plan" id=${p.id}><${EditableLine} text=${p.subject} save=${planSave(d, p.id, "subject")} /></${Titled}>
+    <div class="row sub">${d.held(m) && !d.planDone.has(p.id) ? html`<${Pill} status="on-hold" />` : null}<span>priority <${PrioEdit} value=${p.priority} effective=${0} from="none"
       save=${planSave(d, p.id, "priority")} /></span>
       <span>· created ${stamp(p.created_at)}</span>${p.created_by_task != null ? html`<span>· by <a href=${`#/task/${p.created_by_task}`}>task ${p.created_by_task}</a></span>` : null}</div>
     ${d.held(m) && !d.planDone.has(p.id) ? html`<div class="hold-note">On hold with <a href=${`#/milestone/${m.id}`}>milestone ${m.id}</a>: its tasks stay out of the queue.</div>` : null}
@@ -221,7 +219,7 @@ function RunsTable({ d, runs, showTask = false }) {
       <th class="r">turns</th><th class="r">tokens</th><th class="r">cost</th><th>model</th><th>commit</th></tr></thead>
     <tbody>${[...runs].reverse().map((r) => html`<tr>
       <td class="num muted">${r.id}</td>
-      ${showTask ? html`<td><a href=${`#/task/${r.task_id}`}>${d.task.get(r.task_id).subject}</a></td>` : null}
+      ${showTask ? html`<td><${TaskLink} t=${d.task.get(r.task_id)} /></td>` : null}
       <td class="num">${stamp(r.started_at)}</td>
       <td class="r"><${Elapsed} start=${r.started_at} end=${r.ended_at} /></td>
       <td><${Pill} status=${r.result} />${r.reason ? html`<div class="muted reason" style="font-size:12px;max-width:520px" title=${r.reason}>${reasonText(r)}</div>` : null}</td>
@@ -267,10 +265,10 @@ export function Task({ d, id, query }) {
   const created = d.createdBy.get(t.id) || [];
   const pos = d.queuePos.get(t.id);
   const why = d.excluded(t);
-  return html`<div class="crumbs"><a href="#/milestones">Milestones</a> › <a href=${`#/milestone/${m.id}`}>${m.subject}</a> › <a href=${`#/plan/${p.id}`}>${p.subject}</a></div>
-    <${EditableLine} text=${t.subject} save=${t.status === "open" ? saveTask(t.id, "subject") : null} disabled=${running} />
+  return html`<div class="crumbs"><a href="#/milestones">Milestones</a> › <${NamedLink} kind="milestone" r=${m} /> › <${NamedLink} kind="plan" r=${p} /></div>
+    <${Titled} kind="task" id=${t.id}><${EditableLine} text=${t.subject} save=${t.status === "open" ? saveTask(t.id, "subject") : null} disabled=${running} /></${Titled}>
     <div class="row sub">${running ? html`<${Pill} status="running" />` : html`<${Pill} status=${d.taskState(t)} />`}<${Kind} kind=${t.kind} />
-      <span>task ${t.id}</span><span>· priority <${TaskPrio} d=${d} t=${t} /></span>
+      <span>priority <${TaskPrio} d=${d} t=${t} /></span>
       ${pos != null ? html`<span>· #${pos + 1} in the queue</span>` : null}
       ${why && typeof why === "string" ? html`<span>· not queued: ${why}</span>` : null}</div>
     <dl class="meta">
@@ -283,7 +281,7 @@ export function Task({ d, id, query }) {
     ${t.status === "open" && !running ? html`<${CloseTask} t=${t} />` : null}
     ${decs.length ? html`<h2>Decisions</h2><ul>${decs.map((x) => html`<li><a href=${`#/decision/${x.id}`}>${x.subject}</a> <${Pill} status=${x.status} />
       ${x.signoff ? html` <span class="tag signoff">sign-off: ${x.signoff}</span>` : null}</li>`)}</ul>` : null}
-    ${created.length ? html`<h2>Created by this task</h2><ul>${created.map(([k, r]) => html`<li>${k} <a href=${`#/${k}/${r.id}`}>${r.subject}</a></li>`)}</ul>` : null}
+    ${created.length ? html`<h2>Created by this task</h2><ul>${created.map(([k, r]) => html`<li>${k} ${k === "decision" ? html`<a href=${`#/${k}/${r.id}`}>${r.subject}</a>` : html`<${NamedLink} kind=${k} r=${r} />`}</li>`)}</ul>` : null}
     <h2>Runs (${runs.length}${runs.length ? `, ${usd(d.cost(runs))}` : ""})</h2>
     <${RunsTable} d=${d} runs=${runs} />
     ${t.status !== "open" || runs.length ? html`<h2>Changes</h2><${TaskDiff} task=${t} version=${t.retired_at} />` : null}
@@ -340,7 +338,7 @@ function PendingGroups({ d, xs }) {
     const k = it.milestone ? it.milestone.id : 0;
     (groups.get(k) || groups.set(k, []).get(k)).push(it);
   }
-  return html`${[...groups].map(([k, its]) => html`<h3>${k ? html`<a href=${`#/milestone/${k}`}>${d.milestone.get(k).subject}</a>` : "No open task waits"}</h3>
+  return html`${[...groups].map(([k, its]) => html`<h3>${k ? html`<${NamedLink} kind="milestone" r=${d.milestone.get(k)} />` : "No open task waits"}</h3>
     <div class="tablewrap"><table><tbody>${its.map(({ x, waiting, top, stalls }) => html`<tr>
       <td style="width:56px"><${Id} kind="decision" id=${x.id} /></td>
       <td class="subject"><a href=${`#/decision/${x.id}`}>${x.subject}</a> ${x.signoff ? html`<span class="tag signoff">${x.signoff}</span>` : null}
@@ -356,7 +354,7 @@ export function Decisions({ d, query }) {
   if (ms) {
     const xs = d.milestoneDecisions(ms);
     return html`<div class="crumbs"><a href="#/decisions">Decisions</a></div>
-      <h1>Pending decisions for <a href=${`#/milestone/${ms.id}`}>${ms.subject}</a></h1>
+      <h1>Pending decisions for <${NamedLink} kind="milestone" r=${ms} /></h1>
       <div class="sub">The ones its open tasks wait for: the milestone can't finish until they are answered. <a href="#/decisions">All decisions</a></div>
       ${xs.length ? html`<${PendingGroups} d=${d} xs=${xs} />` : html`<div class="empty">None pending.</div>`}`;
   }
@@ -415,7 +413,7 @@ export function Runs({ d }) {
   }
   const kindOf = (r) => d.task.get(r.task_id).kind;
   const byKind = KINDS.map((k) => ({ label: k, value: d.cost(finished.filter((r) => kindOf(r) === k)) })).filter((x) => x.value > 0);
-  const byMilestone = d.milestones.map((m) => ({ label: m.subject.length > 16 ? m.subject.slice(0, 15) + "…" : m.subject,
+  const byMilestone = d.milestones.map((m) => ({ label: `m${m.id} ` + (m.subject.length > 16 ? m.subject.slice(0, 15) + "…" : m.subject),
     value: d.cost(d.milestoneTasks(m).flatMap(d.taskRuns)) })).filter((x) => x.value > 0);
   const tok = finished.reduce((s, r) => s + d.tokens(r), 0);
   const cacheRead = finished.reduce((s, r) => s + (r.cache_read_tokens || 0), 0);

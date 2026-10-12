@@ -2,7 +2,7 @@
 // tasks below, newest first); right, the selected task: the running one's output, an open one's details, a retired
 // one's outcome. A click selects (outline); j/k move the selection.
 import { html, useState, useEffect, useRef, useLayoutEffect } from "/vendor/preact-htm.js";
-import { Pill, Kind, Prio, Elapsed, Time, Markdown } from "/ui.js";
+import { Pill, Kind, Prio, Elapsed, Time, Markdown, Ref, Named, NamedLink } from "/ui.js";
 import { Log } from "/views.js";
 import { usd, stamp, duration, seconds, tokens } from "/data.js";
 
@@ -25,8 +25,8 @@ function Item({ id, sel, select, cls = "", children }) {
 const crumbs = (d, t) => {
   const m = d.milestoneOfTask(t);
   return html`<div class="tl-detail-parents">
-    <span class="muted">milestone</span><a href=${`#/milestone/${m.id}`}>${m.subject}</a>
-    <span class="muted">plan</span><a href=${`#/plan/${t.plan_id}`}>${d.plan.get(t.plan_id).subject}</a></div>`;
+    <span class="muted">milestone</span><${NamedLink} kind="milestone" r=${m} />
+    <span class="muted">plan</span><${NamedLink} kind="plan" r=${d.plan.get(t.plan_id)} /></div>`;
 };
 
 function Runs({ d, runs }) {
@@ -63,7 +63,7 @@ function Detail({ d, t, running }) {
   const last = runs.filter((r) => r.ended_at).pop();
   const head = html`<div class="live-head">
     ${crumbs(d, t)}
-    <div class="row"><span class="grow tl-detail-subject">${t.subject}</span>
+    <div class="row"><span class="grow tl-detail-subject"><${Named} kind="task" r=${t} /></span>
       <a class="btn" href=${`#/task/${t.id}`}>Task page →</a></div>
     <div class="row sub">${running ? html`<${Pill} status="running" />` : html`<${Pill} status=${d.taskState(t)} />`}<${Kind} kind=${t.kind} />
       <span>task ${t.id} · priority <${Prio} p=${d.prio(t)} /></span>
@@ -113,7 +113,7 @@ export function Live({ d }) {
     : between && between.result === "limit" ? { spin: false, text: "pm run waits for the usage limit to reset",
       sub: (between.reason || "").split("\n")[0] + "; then task " + between.task_id + " again." }
     : between ? { spin: true, text: `Committing task ${between.task_id}, picking the next task`,
-      sub: next ? `Next in the queue: ${next.subject}` : "The queue is empty: pm run stops." }
+      sub: next ? `Next in the queue: t${next.id} ${next.subject}` : "The queue is empty: pm run stops." }
     : null;
   const [picked, setPicked] = useState(null);
   const sel = picked != null && d.task.get(picked) ? picked : current ? current.id : lastRun ? lastRun.task_id : null;
@@ -150,12 +150,12 @@ export function Live({ d }) {
       <div ref=${top}>${queue.length ? html`<div class="tl-label">queue, next nearest</div>` : null}
         ${queue.map((t, i) => html`<${Item} id=${t.id} sel=${sel} select=${setPicked}>
           <span class="tl-pos num">${queue.length - i === 1 ? "next" : `#${queue.length - i}`}</span>
-          <span class="tl-subject">${t.subject} <${Kind} kind=${t.kind} />${failedLast(t) ? html` <${Pill} status="failed" />` : null}</span><${Prio} p=${d.prio(t)} /></${Item}>`)}</div>
+          <span class="tl-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} />${failedLast(t) ? html` <${Pill} status="failed" />` : null}</span><${Prio} p=${d.prio(t)} /></${Item}>`)}</div>
       <div class="tl-current" ref=${card}>
         ${current ? html`<${Item} id=${current.id} sel=${sel} select=${setPicked} cls="now">
             <div class="grow"><div class="row"><${Pill} status="running" /><span class="sub">task ${current.id} · <${Elapsed} start=${r.started_at} /></span></div>
-            <div class="tl-current-subject">${current.subject} <${Kind} kind=${current.kind} /></div>
-            <div class="muted">${d.plan.get(current.plan_id).subject} · ${d.milestoneOfTask(current).subject}</div></div></${Item}>`
+            <div class="tl-current-subject"><${Named} kind="task" r=${current} /> <${Kind} kind=${current.kind} /></div>
+            <div class="muted"><${Named} kind="plan" r=${d.plan.get(current.plan_id)} /> · <${Named} kind="milestone" r=${d.milestoneOfTask(current)} /></div></div></${Item}>`
           : busy ? html`<div class="tl-idle tl-busy">${busy.spin ? html`<span class="spinner"></span>` : null}<div>
             <div class="sub">${busy.text}</div><div class="muted">${busy.sub}</div></div></div>`
           : stopped ? html`<div class="tl-idle"><div class="sub"><code>pm run</code> stopped: <a href=${`#/task/${stopped.task_id}`} onClick=${(e) => { e.preventDefault(); setPicked(stopped.task_id); }}>task ${stopped.task_id} failed</a>.</div>
@@ -167,7 +167,7 @@ export function Live({ d }) {
         ${retired.map((t) => {
           const runs = d.taskRuns(t);
           return html`<${Item} id=${t.id} sel=${sel} select=${setPicked} cls="retired"><${Pill} status=${t.status} />
-            <span class="tl-subject">${t.subject} <${Kind} kind=${t.kind} /></span>
+            <span class="tl-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} /></span>
             <span class="muted num" style="white-space:nowrap">${runs.length ? usd(d.cost(runs)) + " · " : ""}<${Time} ts=${t.retired_at} /></span></${Item}>`;
         })}</div>
       <div style=${`height:${padBottom}px`}></div>

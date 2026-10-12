@@ -28,6 +28,7 @@ In the project's git repository (the one with `project-manager.toml`):
 - **Runs**: cost per day, per task kind, per milestone; every run
 - Status line (bottom): Claude account usage of the 5-hour window and the week (%, reset time), tokens and cost of pm's workers in each window
 - Notifications (`notify` in the top bar): a new pending decision, a failed run, `pm run` stopped or done
+- Ids: every task, plan and milestone shown with its id first (`t12`, `p3`, `m1`), as workers and Claude refer to them
 - Keys: `g` then `l o q m d s r` to go; `/` search (a number finds that id); `i` edit; Esc save
 
 ## Editing

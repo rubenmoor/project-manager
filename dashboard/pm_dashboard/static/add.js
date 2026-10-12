@@ -1,6 +1,7 @@
 // Adding milestones, plans and tasks; the welcome screen of a project without milestones.
 import { html, useState, useRef } from "/vendor/preact-htm.js";
 import { CodeEditor, post, autofocus } from "/editor.js";
+import { NamedLink } from "/ui.js";
 
 const MILESTONE_TEMPLATE = `What should be true afterwards, and why.
 
@@ -77,7 +78,7 @@ export function MilestoneAdded({ d, id }) {
   return html`<div class="welcome"><div class="welcome-inner added">
     <div class="welcome-mark">✓</div>
     <h1>Milestone added</h1>
-    <p class="sub">${m ? html`<a href=${`#/milestone/${m.id}`}>${m.subject}</a>` : `milestone ${id}`}. pm queued the task that writes its masterplan;
+    <p class="sub">${m ? html`<${NamedLink} kind="milestone" r=${m} />` : `milestone ${id}`}. pm queued the task that writes its masterplan;
       workers take it from there: plans, tasks, the work.</p>
     ${d.running ? html`<div class="card next running-now"><b>pm run is working.</b>
         <div class="sub">It picks up the new milestone's tasks by priority. Follow it on the <a href="#/live">live view</a>.</div></div>`

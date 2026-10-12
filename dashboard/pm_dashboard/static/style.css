@@ -379,3 +379,7 @@ ins { color: var(--good-text); text-decoration: none; }
   animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 @media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 3s; } }
+.ref { font-family: var(--mono); font-size: 0.85em; color: var(--muted); font-weight: 400; }
+.titled { display: flex; align-items: baseline; gap: 8px; }
+.titled > .ref { font-size: 15px; }
+.titled > :last-child { flex: 1; min-width: 0; }

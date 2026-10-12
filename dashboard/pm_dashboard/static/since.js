@@ -1,9 +1,12 @@
 // "Since you last looked": rows changed between the commit you marked as seen and now.
 import { html, useState, useEffect } from "/vendor/preact-htm.js";
-import { Pill, Time } from "/ui.js";
+import { Pill, Time, Named } from "/ui.js";
 import { usd, stamp } from "/data.js";
 
 const KEY = "pm-seen";
+const PREFIXED = new Set(["milestone", "plan", "task"]);
+const name = (k, r) => (PREFIXED.has(k) ? html`<${Named} kind=${k} r=${r} />` : r.subject);
+const suffix = (k, r) => (PREFIXED.has(k) ? null : html` <span class="muted">${k} ${r.id}</span>`);
 export const getSeen = () => { try { return localStorage.getItem(KEY); } catch { return null; } };
 export const setSeen = (c) => { try { localStorage.setItem(KEY, c); } catch {} };
 
@@ -67,7 +70,7 @@ const SKIP = new Set(["retired_at", "closed_at", "implemented_at"]);
 function Change({ table, row, before }) {
   const fields = Object.keys(before).filter((f) => !SKIP.has(f));
   return html`<div class="change">
-    <div><a href=${`#/${table}/${row.id}`}>${row.subject}</a> <span class="muted">${table} ${row.id}</span></div>
+    <div><a href=${`#/${table}/${row.id}`}>${name(table, row)}</a>${suffix(table, row)}</div>
     ${fields.map((f) => TEXT.has(f) && (before[f] || "").includes("\n") || TEXT.has(f) && (row[f] || "").includes("\n")
       ? html`<div class="field"><span class="muted">${f}</span><${TextDiff} before=${before[f]} after=${row[f]} /></div>`
       : html`<div class="field"><span class="muted">${f}</span> ${f === "status" ? html`<${Pill} status=${before[f]} /> → <${Pill} status=${row[f]} />`
@@ -100,13 +103,13 @@ export function Since({ since, mark, state }) {
       if (!x.added.length && !changed.length && !x.removed.length) return null;
       return html`<h2>${LABEL[k]}</h2>
         ${x.added.length ? html`<div class="card"><b>New (${x.added.length})</b><ul class="plain">${x.added.map((r) => html`<li>
-          <a href=${`#/${k}/${r.id}`}>${r.subject}</a> <span class="muted">${k} ${r.id}</span>
+          <a href=${`#/${k}/${r.id}`}>${name(k, r)}</a>${suffix(k, r)}
           ${r.status && !["open", "pending"].includes(r.status) ? html` <${Pill} status=${r.status} />` : null}
           ${r.created_by_task != null ? html` <span class="muted">by task ${r.created_by_task}</span>` : null}</li>`)}</ul></div>` : null}
         ${changed.length ? html`<div class="card" style="margin-top:8px"><b>Changed (${changed.length})</b>
           ${changed.map((c) => html`<${Change} table=${k} row=${c.row} before=${c.before} />`)}</div>` : null}
         ${x.removed.length ? html`<div class="card" style="margin-top:8px"><b>Removed (${x.removed.length})</b>
-          <ul class="plain">${x.removed.map((r) => html`<li>${r.subject} <span class="muted">${k} ${r.id}</span></li>`)}</ul></div>` : null}`;
+          <ul class="plain">${x.removed.map((r) => html`<li>${name(k, r)}${suffix(k, r)}</li>`)}</ul></div>` : null}`;
     })}
     ${runs.length ? html`<h2>Runs</h2><div class="sub">${`${runs.length} runs, ${usd(runs.reduce((s, r) => s + (r.cost_usd || 0), 0))}, ${runs.filter((r) => r.result === "failed").length} failed. `}<a href="#/runs">All runs</a></div>` : null}`;
 }
