@@ -6,7 +6,7 @@ tasks are all closed gets a last one, the post-milestone cleanup, before it is i
 `queue` view): open tasks of open milestones that no pending decision blocks, highest priority first, then by
 milestone, plan and task. Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
 
-    pm init | status | queue | show <task> | validate | run [--once] [--dry-run] | instructions
+    pm init | status | queue | show <task> | validate | decide | run [--once] [--dry-run] | instructions
     pm milestone add|set …   pm plan add|edit|list …   pm task add|done|drop|priority …
     pm decision add|list|answer|approve|irrelevant …   pm task-pending-decision <task> <decision>
 
@@ -473,8 +473,11 @@ class Project:
 
     def decisions(self):
         """`pm decision list`: every pending decision with what it blocks, its context and options."""
+        return self.decisions_of(self.pending()) or "No pending decisions.\n"
+
+    def decisions_of(self, ds):
         out = []
-        for d in self.pending():
+        for d in ds:
             out.append(f"Decision {d['id']}{' (sign-off)' if d['signoff'] else ''}: {d['subject']}")
             if d["signoff"]:
                 out.append("  " + self.signoff_view(d["id"], d["signoff"]).replace("\n", "\n  "))
@@ -490,7 +493,28 @@ class Project:
             for n, o in enumerate(d["options"], 1):
                 out.append(f"  {n}) {o}{'  (recommended)' if n == 1 else ''}")
             out.append("")
-        return "\n".join(out) if out else "No pending decisions.\n"
+        return "\n".join(out)
+
+    def decide(self, ask=input):
+        """`pm decide`: ask about every pending decision in the terminal; returns how many were closed."""
+        closed = 0
+        for d in self.pending():
+            self.say("\n" + self.decisions_of([d]).rstrip("\n"))
+            if d["signoff"]:
+                if ask(f"Answer [a = {SIGNOFF_ANSWER}, s = skip]: ").strip().lower() in ("a", SIGNOFF_ANSWER):
+                    self.resolve(d["id"], answer=SIGNOFF_ANSWER)
+                    closed += 1
+                continue
+            hint = f"1-{len(d['options'])}, " if d["options"] else ""
+            reply = ask(f"Answer [{hint}your own text, s = skip, x <reason> = irrelevant]: ").strip()
+            if not reply or reply.lower() == "s":
+                continue
+            if reply.lower() == "x" or reply.lower().startswith("x "):
+                self.resolve(d["id"], irrelevant=reply[1:].strip() or "no reason given")
+            else:
+                self.answer(d["id"], reply)
+            closed += 1
+        return closed
 
     def answer(self, did, reply):
         """Answer decision did: an option's number or own text. Returns the answer."""
@@ -986,7 +1010,7 @@ class Project:
             q = self.queue()
             if not q:
                 n = len(self.pending())
-                self.say(f"Queue empty; {n} pending decision(s)." + (" See `pm decision list`." if n else ""))
+                self.say(f"Queue empty; {n} pending decision(s)." + (" Answer them with `pm decide`." if n else ""))
                 return 0
             if level := self.needs_signoff(q[0][1]):
                 did = self.request_signoff(q[0][1])
@@ -1089,6 +1113,7 @@ def main(argv=None):
     for name, text in [("init", f"write {CONFIG_FILE} and the database (missing ones only) and commit them"),
                        ("status", "open milestones, the queue, pending decisions"), ("queue", "the whole queue"),
                        ("validate", "check the database"),
+                       ("decide", "answer pending decisions in the terminal, one by one"),
                        ("instructions", "the full reference for agents: every command with examples, recipes")]:
         sub.add_parser(name, help=text)
     s = sub.add_parser("show", help="a task with its plan, milestone, decisions and runs")
@@ -1192,6 +1217,8 @@ def main(argv=None):
             print(pm.show(args.task), end="")
         elif args.cmd == "runs":
             pm.print_runs(args.task)
+        elif args.cmd == "decide":
+            msg = pm.decide() and "decisions answered"
         elif args.cmd == "run":
             return pm.run(once=args.once, dry_run=args.dry_run)
         elif args.cmd == "milestone":

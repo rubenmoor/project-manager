@@ -45,7 +45,7 @@ The first line is the subject, the rest the body. The same without the editor, e
 pm milestone add "Users can export their data as CSV" < milestone-csv-export.md
 ```
 
-Questions you can't answer yet don't need to block the milestone: workers turn them into decisions, `pm run` skips the tasks they block, and you answer with `pm decision answer` (or ask a Claude session to).
+Questions you can't answer yet don't need to block the milestone: workers turn them into decisions, `pm run` skips the tasks they block, and you answer with `pm decide` in the terminal, or `pm decision answer` (e.g. from a Claude session).
 
 `pm init` writes `project-manager.toml` from the template `pm/project-manager.toml` (database file name, worker command, usage-limit margin, log folder, editor, the three prompts below, the priority settings, the sign-offs) and commits it; run again, it does nothing. Adjust the defaults (e.g. the database file name) before the first other command: that one writes `tasks.sql` with the schema (`SCHEMA` in `pm/__init__.py`) if it is missing. Other commands need the config. Nothing is pushed.
 
@@ -70,7 +70,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 - `"plans"`: "create tasks for plan N" of every other plan waits for "Sign off plan N"
 - `"task-queue"`: work tasks wait for "Sign off the task queue", one decision for all work tasks without a sign-off; asked when the first of them heads the queue, i.e. after all planning work; work tasks added later need a new one
 - pm creates the decision when such a task heads the queue; `pm run` never asks, it goes on with the unblocked tasks and stops when the queue is empty
-- the only answer is approve (`pm decision approve <id>`); leave it pending to change plans or tasks first; `pm decision list` shows the plan or the waiting tasks as they are then
+- the only answer is approve (`pm decide`: `a`, or `pm decision approve <id>`); leave it pending to change plans or tasks first; `pm decision list` shows the plan or the waiting tasks as they are then
 - no `x` (irrelevant) for sign-offs
 
 **Priorities.** Set by workers, following rules in project-manager.toml:
@@ -95,6 +95,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 | `plan edit <plan>` | `--subject`, `--body`, `--priority <N\|none>` |
 | `task done\|drop <task> <note>`, `task priority <task> <N\|none>` | Close a task, set its priority |
 | `decision add <subject>` | `--body`, `--option` (recommended first) |
+| `decide` | Answer pending decisions one by one in the terminal (number, text, `s` skip, `x <reason>` irrelevant; sign-offs: `a` approve, `s` skip) |
 | `decision list` | Pending decisions: context, options, blocked tasks; sign-offs with what they approve |
 | `decision answer <id> <n\|text>`, `decision approve <id>`, `decision irrelevant <id> <reason>` | Close a decision; irrelevant drops the open tasks it blocks; approve: sign-offs only |
 | `task-pending-decision <task> <decision>` | The task waits until the decision is answered |
