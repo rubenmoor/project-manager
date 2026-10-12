@@ -23,7 +23,7 @@ import argparse, collections, contextlib, datetime, fcntl, json, os, re, shlex, 
 from pathlib import Path
 
 
-VERSION = 7  # bump by one with every commit (AGENTS.md)
+VERSION = 8  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -177,6 +177,11 @@ CLAUDE.md or similar), then do task {id} and nothing else.
 Before you start, look up what the project decided about what task {id} touches (its subjects, files, terms): \
 `pm decision list --answered --grep <word> [--grep <word> …]`. Those answers are binding, unless a newer one \
 supersedes them; follow them, and cite one where you rely on it, as `decision <id>: <subject>`.
+
+Work you find beyond task {id} (a bug, a missing test, a part the plan forgot, cleanup your change makes necessary) \
+is a follow-up task, not part of yours: `pm task add <plan id> "<subject>" < body.md`, in the plan it belongs to \
+(usually task {id}'s, above), with a body that lets another worker do it without your context; don't add one the \
+plan already lists.
 
 Milestones, plans, tasks and decisions are in {db}; change them only with these commands (a text value - reads stdin):
   pm plan add <milestone id> "<subject>" < body.md     a task to split it into tasks is queued

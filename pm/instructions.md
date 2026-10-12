@@ -151,6 +151,25 @@ pm task priority 6 none     # back to the plan's priority
 
 A task should fit one worker run: one change you can describe, check and commit.
 
+### Follow-up tasks
+
+Work you find beyond your task is a follow-up task: add it, don't do it, don't leave it in a note.
+
+- A bug or gap your task doesn't cover, a missing test, a part the plan forgot, cleanup your change makes necessary
+- Into the plan it belongs to, usually your task's: `pm show <your task>` names it and lists its tasks; don't add one twice
+- Body: what, where, done when; written for a worker without your context
+- No `--priority` unless it must run earlier or later than its plan's other tasks
+- Your task can't be done without it: do it yourself, it's part of your task
+- It needs the human's answer first: also `pm decision add` and `pm task-pending-decision <new task> <decision>`
+
+```sh
+pm task add 2 "Escape newlines in CSV cells" <<'EOF'
+`app/api/export.py` writes cells with newlines unquoted; found in task 5.
+
+Done when: a test exports a cell with a newline and reads it back.
+EOF
+```
+
 ## Decisions
 
 ```sh
