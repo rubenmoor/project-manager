@@ -13,7 +13,10 @@ In the project's git repository (the one with `project-manager.toml`):
 
 ## Views
 
-- **Live** (home while pm runs): left, one timeline: queue above (next nearest), the running task, done and dropped tasks below (newest first); right, the running task's output
+- **Live** (home while pm runs): left, one timeline: queue above (next nearest), the running task between two rules, done and dropped tasks below (newest first); a click (or `j`/`k`) selects a task (outline); right, the selected task, with a link to its page:
+  - running: its output, live
+  - open: queue position or what blocks it, body, decisions, earlier runs
+  - done or dropped: note, runs, files changed, the output of its last run
 - **Overview**: running task, decisions waiting on you, cost, open milestones with progress, queue head; without milestones a welcome screen with one button
 - **Queue**: as `pm run` sees it; open tasks it leaves out and why
 - **Milestones**, **plans**: plans by priority with their tasks; filters by status and kind
