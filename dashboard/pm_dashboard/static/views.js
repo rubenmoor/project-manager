@@ -158,15 +158,18 @@ export function Milestone({ d, id }) {
   const [kind, setKind] = useState("all");
   if (!m) return html`<div class="empty">No milestone ${id}.</div>`;
   const tasks = d.milestoneTasks(m);
+  const master = tasks.find((t) => t.kind === "masterplan");
+  const mDone = m.status === "implemented" || (master && d.planDone.has(master.plan_id));
   const filt = (ts) => ts.filter((t) => (show === "all" || (show === "open" ? t.status === "open" : t.status !== "open"))
     && (kind === "all" || t.kind === kind));
   return html`<div class="crumbs"><a href="#/milestones">Milestones</a></div>
-    <${EditableLine} text=${m.subject} save=${saveMilestone(m.id, "subject")} />
+    <${EditableLine} text=${m.subject} save=${mDone ? null : saveMilestone(m.id, "subject")} />
     <div class="row sub"><${Pill} status=${m.status} /><span>milestone ${m.id} · created ${stamp(m.created_at)}</span>
       ${m.implemented_at ? html`<span>· implemented ${stamp(m.implemented_at)}</span>` : null}</div>
     <${Progress} ...${counts(tasks)} />
-    <div style="margin-top:12px"><${EditableBody} text=${m.body} save=${saveMilestone(m.id, "body")} /></div>
-    <div class="sub" style="margin-top:4px">A new subject or body queues "revise the masterplan", unless every plan is done.</div>
+    <div style="margin-top:12px"><${EditableBody} text=${m.body} save=${mDone ? null : saveMilestone(m.id, "body")} /></div>
+    <div class="sub" style="margin-top:4px">${mDone ? "Done: it can't be changed; add a new milestone instead."
+      : 'A new subject or body queues "revise the masterplan".'}</div>
     <div class="section-head"><h2>Plans</h2></div>
     <${Chips} value=${show} set=${setShow} options=${[["open", "open tasks"], ["closed", "closed"], ["all", "all"]]} />
     <${Chips} value=${kind} set=${setKind} options=${[["all", "every kind"], ...KINDS.map((k) => [k, k])]} />

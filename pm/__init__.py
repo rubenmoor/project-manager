@@ -3,7 +3,7 @@ human, in SQLite: the project keeps them as SQL text in tasks.sql, tracked by gi
 in-memory database (the schema is SCHEMA below). A new milestone comes with a first plan, the masterplan (body
 "tbd."), and a task that writes it; a new or edited plan queues a task that splits it into tasks; edits cascade: a
 changed milestone queues the revision of its masterplan, a changed plan that of the plans below it and of its open
-tasks; done plans and closed tasks can't be changed; a milestone whose tasks are all closed gets a last one, the post-milestone cleanup, before it is implemented. The queue (the
+tasks; implemented milestones, done plans and closed tasks can't be changed; a milestone whose tasks are all closed gets a last one, the post-milestone cleanup, before it is implemented. The queue (the
 `queue` view): open tasks of open milestones that no pending decision blocks, highest priority first, then by
 milestone, plan and task. Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
 
@@ -683,17 +683,22 @@ class Project:
 
     def milestone_set(self, mid, **fields):
         """Set fields of a milestone (subject, status, body); None leaves a field as it is. A changed subject or body
-        queues the revision of the masterplan, unless it is done. Returns the queued tasks: [(id, subject)]."""
+        queues the revision of the masterplan; refused once the milestone is implemented or every plan of it is done.
+        Returns the queued tasks: [(id, subject)]."""
         with self.connect(write=True) as db:
             m = self.get(db, "milestone", mid)
             changed = any(fields.get(k) is not None and fields[k].strip() != m[k] for k in ("subject", "body"))
+            master = self.masterplan(db, mid)
+            if changed and (m["status"] == "implemented" or master and self.plan_done(db, master)):
+                why = "implemented" if m["status"] == "implemented" else "done: every plan of it is done"
+                raise FormatError(f"milestone {mid} is {why}; its subject and body can't be changed. "
+                                  f"Add a new milestone instead: pm milestone add")
             for k, v in fields.items():
                 if k == "status" and v is not None:
                     db.execute("UPDATE milestone SET status = ?, implemented_at = CASE WHEN ? = 'implemented' "
                                "THEN coalesce(implemented_at, ?) END WHERE id = ?", (v, v, now(), mid))
                 elif v is not None:
                     db.execute(f"UPDATE milestone SET {k} = ? WHERE id = ?", (v.strip(), mid))
-            master = self.masterplan(db, mid)
             return [q for q in [self.queue_revision(db, master)] if q] if changed and master else []
 
     # --- plan tree ---------------------------------------------------------------------------

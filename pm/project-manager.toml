@@ -37,7 +37,7 @@ done and dropped ones stay as they are (pm refuses to change them): drop the ope
 tasks for what the plan asks beyond them. A task that writes a plan gets `--kind plan`.
 '''
 
-# The task a changed milestone queues in its masterplan, unless the masterplan is done (every plan of the milestone
+# The task a changed milestone queues in its masterplan (pm refuses the change once every plan of the milestone is
 # done). {plan_id} is replaced.
 revise_masterplan_prompt = '''
 The milestone changed. Bring plan {plan_id}, the masterplan, in line with it (`pm plan edit {plan_id} --body -`), or

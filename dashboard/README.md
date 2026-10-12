@@ -38,7 +38,7 @@ Text is edited in place, through pm's own methods; each change is a commit (`pm:
 - Tasks: done or drop with a note; add milestones and tasks (plans come from workers)
 - After adding a milestone: add another, or start `pm run` in the terminal (the page says whether it runs)
 - Edits cascade as in pm: a changed milestone queues "revise the masterplan"; a changed plan queues "create tasks for plan N" and "revise plan M" for each plan below it
-- Done plans (no open task, nor in the plans below them) and closed tasks are read-only; pm refuses changes to them
+- Implemented milestones, done plans (no open task, nor in the plans below them) and closed tasks are read-only; pm refuses changes to them
 - While a worker runs: the running task can't be changed; other changes are allowed and committed with the running task, not on their own
 - pm's checks apply: e.g. an open task needs a body
 
