@@ -10,12 +10,15 @@
   outputs = { self, nixpkgs }:
     let
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
+      # VERSION in pm/__init__.py, the one version of pm and the dashboard
+      version = builtins.head (builtins.concatMap (l: let m = builtins.match "VERSION = ([0-9]+).*" l; in
+        if m == null then [ ] else m) (nixpkgs.lib.splitString "\n" (builtins.readFile ./pm/__init__.py)));
       forAll = f: nixpkgs.lib.genAttrs systems (system: f nixpkgs.legacyPackages.${system});
     in {
       packages = forAll (pkgs: rec {
         default = pkgs.python3Packages.buildPythonApplication {
           pname = "pm";
-          version = "0.1.0";
+          inherit version;
           pyproject = true;
           src = ./.;
           build-system = [ pkgs.python3Packages.setuptools ];
@@ -24,7 +27,7 @@
         };
         dashboard = pkgs.python3Packages.buildPythonApplication {
           pname = "pm-dashboard";
-          version = "0.1.0";
+          inherit version;
           pyproject = true;
           src = ./dashboard;
           build-system = [ pkgs.python3Packages.setuptools ];
@@ -40,7 +43,10 @@
       });
 
       devShells = forAll (pkgs: {
-        default = pkgs.mkShell { packages = [ pkgs.python3 pkgs.git ]; };
+        default = pkgs.mkShell {
+          packages = [ pkgs.python3 pkgs.git ];
+          shellHook = "git config core.hooksPath .githooks";
+        };
       });
     };
 }

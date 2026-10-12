@@ -22,6 +22,7 @@ import argparse, collections, contextlib, datetime, fcntl, json, os, re, shlex, 
 from pathlib import Path
 
 
+VERSION = 1  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -1418,6 +1419,7 @@ def print_queued(queued):
 def main(argv=None):
     ap = argparse.ArgumentParser(prog="pm", description=__doc__, epilog=EPILOG,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--version", action="version", version=f"pm {VERSION}")
     ap.add_argument("--root", help="the project's git repository (default: the one around the current directory)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name, text in [("init", f"write {CONFIG_FILE} and the database (missing ones only) and commit them"),

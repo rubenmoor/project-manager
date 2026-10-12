@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pm"
-version = "0.1.0"
+dynamic = ["version"]
 description = "A project manager for Claude Code workers: milestones, plans and tasks in SQLite, worked by claude -p"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -15,6 +15,9 @@ pm = "pm:main"
 
 [tool.setuptools]
 packages = ["pm"]
+
+[tool.setuptools.dynamic]
+version = { attr = "pm.VERSION" }
 
 [tool.setuptools.package-data]
 pm = ["project-manager.toml", "instructions.md"]
