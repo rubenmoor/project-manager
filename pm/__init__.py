@@ -814,7 +814,7 @@ class Project:
 
     def worker_command(self, tid):
         """(command, prompt): the prompt goes to the worker's stdin; None if the command holds it ("{prompt}")."""
-        show = "\n".join([self.show(tid), *self.priority_prompts()]).rstrip() + "\n"
+        show = "\n".join([self.show(tid), self.earlier_failure(tid), *self.priority_prompts()]).rstrip() + "\n"
         prompt = WORKER_PROMPT.format(id=tid, db=self.db, show=show)
         hook = {"type": "command", "command": shlex.join([sys.executable, str(GUARD)])}
         settings = json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [hook]}], "Stop": [{"hooks": [hook]}]},
@@ -1021,6 +1021,8 @@ class Project:
             return "failed", f"git commit failed:\n{(e.stdout or '') + (e.stderr or '')}".rstrip()
         if problem and (stash := self.stash_leftovers(f"pm: task {tid} run {rid} left")):
             problem += "\n" + stash
+        if t["status"] != "open" and (dropped := self.drop_task_stashes(tid)):
+            self.say(f"dropped the stash(es) of task {tid}'s failed runs: {', '.join(dropped)}")
         return ("failed", f"committed task {tid}; {problem}") if problem else result
 
     def run_log(self, tid, rid):
@@ -1070,6 +1072,49 @@ class Project:
             summary += "\nlast lines of the log:\n" + "\n".join(
                 "  " + l[:300] for l in log.read_text(encoding="utf-8", errors="replace").splitlines()[-15:])
         return "failed", summary
+
+    def task_stashes(self, tid):
+        """[(ref, sha)] of the stashes failed runs of task tid left (stash_leftovers), newest first."""
+        try:
+            lines = self.git("stash", "list", "--format=%gd%x00%H%x00%s").splitlines()
+        except subprocess.CalledProcessError:
+            return []
+        return [(ref, sha) for ref, sha, subject in (l.split("\0", 2) for l in lines)
+                if re.search(rf"pm: task {tid} run \d+ failed$", subject)]
+
+    def drop_task_stashes(self, tid):
+        """Drop task tid's stashes (its work is committed or dropped); returns their short shas."""
+        dropped = []
+        for ref, sha in reversed(self.task_stashes(tid)):       # oldest first: the newer refs keep their index
+            with contextlib.suppress(subprocess.CalledProcessError):
+                self.git("stash", "drop", "-q", ref)
+                dropped.append(sha[:7])
+        return dropped
+
+    def earlier_failure(self, tid):
+        """For the worker's prompt: the last failed run's summary, if the task's last run failed, and the stashes
+        failed runs left. Empty if neither."""
+        last = (self.rows("SELECT id, result, reason FROM run WHERE task_id = ? AND result NOT IN ('running', 'limit') "
+                          "ORDER BY id DESC LIMIT 1", tid) or [None])[0]
+        stashes = self.task_stashes(tid)
+        out = []
+        if last and last["result"] == "failed":
+            out += [f"# Run {last['id']} of this task failed", "",
+                    *[f"    {l}" for l in (last["reason"] or "no reason recorded").splitlines()], ""]
+        if stashes:
+            out.append("Failed runs of this task left their work in git stashes, newest first:")
+            for _, sha in stashes:
+                try:
+                    files = self.git("stash", "show", "--name-only", "--include-untracked", sha).split()
+                except subprocess.CalledProcessError:
+                    files = []
+                more = f" … and {len(files) - 15} more" if len(files) > 15 else ""
+                out.append(f"  {sha[:7]}: {', '.join(files[:15])}{more}")
+            out += ["Before you start, look at each (`git stash show -p --include-untracked <sha>`), apply what is "
+                    "still good (`git stash apply <sha>`) and fix or undo the rest. Treat what it marks as done or "
+                    "checked as unchecked until your own check passes. Don't drop the stashes: pm drops them when the "
+                    "task is done or dropped.", ""]
+        return "\n".join(out)
 
     def stash_leftovers(self, message):
         """Stash the working tree's changes, the database aside, so the next `pm run` starts clean. Returns a line
