@@ -45,7 +45,7 @@ The first line is the subject, the rest the body. The same without the editor, e
 pm milestone add "Users can export their data as CSV" < milestone-csv-export.md
 ```
 
-Questions you can't answer yet don't need to block the milestone: workers turn them into decisions, `pm run` skips the tasks they block, and you answer with `pm decide` in the terminal, or `pm decision answer` (e.g. from a Claude session).
+Questions you can't answer yet don't need to block the milestone: workers turn them into decisions, `pm run` skips the tasks they block, and you answer with `pm decide` in the terminal, or `pm decision answer` (e.g. from a Claude session). Answered decisions are the project's decision log: `pm decision list --answered`, with what each answer changed (consequences), which newer answer replaced it (supersede), and the lasting choices workers recorded on their own (`pm decision record`), which you override by superseding them.
 
 `pm init` writes `project-manager.toml` from the template `pm/project-manager.toml` (database file name, worker command, usage-limit margin, log folder, editor, the five prompts below, the priority settings, the sign-offs) and commits it; run again, it does nothing. Adjust the defaults (e.g. the database file name) before the first other command: that one writes `tasks.sql` with the schema (`SCHEMA` in `pm/__init__.py`) if it is missing. Other commands need the config. Nothing is pushed.
 
@@ -58,7 +58,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 - milestone: subject, body, status (`open`, `on-hold`, `implemented`), `created_at`, `implemented_at`
 - plan: belongs to a milestone; subject, body, priority, `created_at`, `created_by_task`
 - task: belongs to a plan; subject, body, kind (`work`, `plan`: writes a plan; made by pm: `masterplan`, `split` for "create tasks for plan N", `cleanup`), status, priority, note, `created_at`, `retired_at` (done or dropped), `created_by_task`
-- decision: subject, body, options, status, answer or reason, `created_at`, `closed_at`, `created_by_task`, `signoff` (made by pm, see below); `task_decision` links tasks to the decisions they wait for
+- decision: subject, body, options, status, answer or reason, `created_at`, `closed_at`, `created_by_task`, `signoff` (made by pm, see below), `kind` (`rule` | `once`), `decided_by_task` (a worker's own choice), `consequences`; `task_decision` links tasks to the decisions they wait for; `decision_supersedes` links a decision to the ones it replaces (note: only partly)
 - run: one worker run of `pm run`: task, start, end, result (`running`, `done`, `blocked`, `failed`, `limit`), reason, exit code, `base_commit` (HEAD at the start), `pid` of `pm run`; from claude's JSON output: model, session, turns, tokens (input, output, cache read, cache creation), cost in USD; while it runs, `running` (at most one, uncommitted); a `pm run` that died leaves it, the next `pm run` marks it `failed` (`interrupted`), or refuses while that process lives
 - timestamps in UTC; `created_by_task`: the task whose worker created the row (`PM_TASK`), empty for the human or pm
 
@@ -86,7 +86,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 |---|---|
 | `init` | Write and commit the config (if missing) |
 | `instructions` | The full reference for agents (`pm/instructions.md`): every command with examples, recipes, errors |
-| `status`, `queue`, `plans list`, `show <task>`, `validate` | Inspect |
+| `status`, `queue`, `plans list`, `show <task\|d32\|p3\|m1>`, `validate` | Inspect; `show` also takes `decision 32` |
 | `runs [task]` | Worker runs: start, duration, result, turns, tokens, cost; totals per task kind |
 | `run [--once] [--dry-run]` | Work the queue until it is empty, a worker fails, or the tree has uncommitted changes |
 | `stop` | Have the running `pm run` stop after its current task (SIGUSR1; same as one Ctrl-C) |
@@ -98,8 +98,11 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 | `task done\|drop <task> <note>`, `task priority <task> <N\|none>` | Close a task, set its priority |
 | `decision add <subject>` | `--body`, `--option` (recommended first) |
 | `decide` | Answer pending decisions one by one in the terminal (number, text, `s` skip, `x <reason>` irrelevant; sign-offs: `a` approve, `s` skip) |
-| `decision list` | Pending decisions: context, options, blocked tasks; sign-offs with what they approve |
-| `decision answer <id> <n\|text>`, `decision approve <id>`, `decision irrelevant <id> <reason>` | Close a decision; irrelevant drops the open tasks it blocks; approve: sign-offs only |
+| `decision list` | Pending decisions: context, options, blocked tasks; sign-offs with what they approve. `--answered`: the decision log (answered `rule` decisions nothing fully supersedes, newest first); `--all`: every decision; `--grep <text>` |
+| `decision show <id>` | One decision: context, options, answer, consequences, tasks, supersede links (also `pm show d<id>`) |
+| `decision record <subject> --answer …` | A decision nobody asked, added answered; `--body`, `--once`, `--supersedes <id>`, `--consequences`. In a worker: its own choice (`decided_by_task`) |
+| `decision supersede <new> <old>`, `decision consequences <id> <text>`, `decision kind <id> rule\|once` | Link a replaced decision (`--note`: only partly); append what changed because of an answer; lasting rule or one-off |
+| `decision answer <id> <n\|text>`, `decision approve <id>`, `decision irrelevant <id> <reason>` | Close a decision (`answer`: `--once`, `--supersedes <id>`); irrelevant drops the open tasks it blocks; approve: sign-offs only. Refused in a worker |
 | `task-pending-decision <task> <decision>` | The task waits until the decision is answered |
 
 Global: `--root <repo>`. A text value `-` reads stdin.

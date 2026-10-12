@@ -25,6 +25,12 @@
   - `plan`, `masterplan`, `split`: priority `planning_priority` (1000) unless given
   - checked by `pm run` when done: `plan` and `masterplan` must add or change a plan (except "revise …", which may leave it as it is), `split` must leave its plan with tasks; otherwise the task is committed and the run stops
 - **Decision:** subject (the question), body (context), options (the recommended one first), status `pending` | `answered` | `irrelevant`. A task linked to a pending decision waits. When the human answers, the task becomes workable again and its worker sees the answer in `pm show`. When a decision is marked irrelevant, the open tasks waiting for it are dropped.
+- **Decision log:** answered decisions are the project's decision log (`pm decision list --answered`). Also:
+  - kind `rule` (default, lasting, in the log) | `once` (a go-ahead or check, not in the log)
+  - `decided_by_task`: set when a worker recorded its own choice (`pm decision record`); empty: the human decided
+  - consequences: what changed because of the answer, appended by the tasks that implement it
+  - supersede links: a newer answer replaces an older one, wholly or partly (with a note)
+  - cite a decision in code, prompts and docs as `decision 32: <subject>`; `pm show d32` finds it
 - **Sign-off:** a decision pm makes, per `signoff` in project-manager.toml, before a plan is split into tasks or before work tasks run; its only answer is approve. Shown as `Decision 4 (answered, sign-off): …`. Not for agents to create or answer.
 - **Recorded by pm, not set by you:** `created_at` everywhere, `retired_at` of tasks, `implemented_at`, `closed_at`; `created_by_task` (your task, when you create a plan, task or decision as a worker); one **run** per worker run, with result, time, tokens and cost.
 - **Queue:** open tasks of open milestones that no pending decision blocks; highest priority first, then by milestone, plan and task id. `pm run` takes the first one.
@@ -35,6 +41,7 @@
 pm status        # open and on-hold milestones, the first 10 queued tasks, pending decisions
 pm queue         # the whole queue
 pm show 7        # task 7 with its plan, its milestone, the plan's other tasks, its decisions and runs
+pm show d32      # decision 32 (also `decision 32`); p3: plan 3, m1: milestone 1
 pm runs          # worker runs: start, duration, result, turns, tokens, cost; totals per task kind
 pm validate      # check tasks.sql; exit 1 with the problems
 ```
@@ -164,7 +171,35 @@ pm decision irrelevant 3 "<reason>"   # drops the open tasks it blocks
 pm decision approve 4            # sign-offs only
 ```
 
-Record only answers the human gave. A worker never answers decisions.
+Record only answers the human gave. A worker never answers decisions: pm refuses `answer`, `approve`, `irrelevant` and `kind` in a worker.
+
+### The decision log
+
+```sh
+pm decision list --answered              # the log: lasting answered decisions, newest first, superseded ones left out
+pm decision list --all --grep delimiter  # every decision that mentions "delimiter": pending, one-off, superseded too
+pm decision show 32                      # one decision: context, options, answer, consequences, tasks, links
+pm show d32                              # the same
+```
+
+Before a choice the plan doesn't settle, look for an earlier decision about it. Cite decisions as `decision 32: <subject>`.
+
+**Your own choice:** a lasting choice the plan doesn't make (a design, a format, a rule others must follow), that the human doesn't need to make first: record it, answered. The human overrides it by superseding it.
+
+```sh
+pm decision record "Number style in prompts" --answer "RAE: 1 234,5; scan flags dotted thousands" \
+    --body "Prompts mixed three styles; RAE is what the data uses."
+pm decision record "Seen counters" --answer "…" --supersedes 41   # replaces decision 41, a worker's own choice
+pm decision supersede 44 28 --note "scope only"                  # partly: decision 44 replaces only the scope of 28
+```
+
+A question only the human can answer stays a question (`pm decision add`). You may supersede only a worker's choice; to change a human's answer, ask with `pm decision add` and name the decision. `--once` on `add` or `record`: a one-off go-ahead or check that isn't a lasting rule.
+
+**Consequences:** when `pm show` says your task is the last open one that waited for an answered decision, record what changed because of the answer, before `pm task done`:
+
+```sh
+pm decision consequences 32 "RAE number style in all prompts (prompts/*.md); scan.py flags dotted thousands"
+```
 
 ## Run (for the human)
 
@@ -173,7 +208,9 @@ pm init              # once per project: project-manager.toml, committed; the da
 pm run               # work the queue until it is empty, a worker fails or the tree is dirty
 pm run --once        # one task
 pm run --dry-run     # print the next worker command; change nothing
-pm decide            # answer pending decisions: a number, own text, s = skip, x <reason> = irrelevant; sign-offs: a = approve
+pm decide            # answer pending decisions: a number, own text, o <answer> = one-off, s = skip, x <reason> = irrelevant; sign-offs: a = approve
+pm decision answer 3 1 --once --supersedes 2   # a one-off answer; this one replaces decision 2
+pm decision kind 3 rule   # rule: lasting, in the log; once: a one-off
 ```
 
 Agents don't start `pm run`: a worker is already one task of a run.

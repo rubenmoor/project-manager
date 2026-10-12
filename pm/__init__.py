@@ -9,9 +9,10 @@ the queue until it is resumed. The queue (the `queue` view): open tasks of
 open milestones that no pending decision blocks, highest priority first, then by milestone, plan and task.
 Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
 
-    pm init | status | queue | show <task> | validate | decide | run [--once] [--dry-run] | instructions
+    pm init | status | queue | show <task|d32|p3|m1> | validate | decide | run [--once] [--dry-run] | instructions
     pm milestone add|set|hold|resume …   pm plan add|edit|list …   pm task add|done|drop|priority …
-    pm decision add|list|answer|approve|irrelevant …   pm task-pending-decision <task> <decision>
+    pm decision add|list|show|answer|approve|irrelevant|record|supersede|consequences|kind …
+    pm task-pending-decision <task> <decision>
 
 Works on the git repository around the current directory. `pm init` writes the settings, project-manager.toml (the
 template is the file of that name next to this one), and commits it; the first command that uses the database
@@ -22,7 +23,7 @@ import argparse, collections, contextlib, datetime, fcntl, json, os, re, shlex, 
 from pathlib import Path
 
 
-VERSION = 4  # bump by one with every commit (AGENTS.md)
+VERSION = 5  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -47,12 +48,12 @@ PLANNING_KINDS = ("plan", "masterplan", "split")
 SIGNOFF_LEVELS = {"masterplans": "masterplan", "plans": "plan", "task-queue": "task-queue"}
 SIGNOFF_ANSWER = "approve"
 
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 # A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
 # run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
 # Columns and tables SCHEMA dropped are left behind, new ones get their defaults; so only renames, moved data and new
 # columns without a default need a step, else "".
-MIGRATIONS = {}
+MIGRATIONS = {12: ""}
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -103,8 +104,13 @@ CREATE TABLE decision (
     closed_at       TEXT,
     created_by_task INTEGER REFERENCES task (id),
     signoff         TEXT CHECK (signoff IN ('masterplan', 'plan', 'task-queue')),  -- made by pm; NULL: a question
+    kind            TEXT NOT NULL DEFAULT 'rule' CHECK (kind IN ('rule', 'once')),  -- once: a go-ahead, not in the log
+    decided_by_task INTEGER REFERENCES task (id),          -- a worker's own choice (`pm decision record`); NULL: the human
+    consequences    TEXT NOT NULL DEFAULT '',              -- what changed because of the answer; appended
     CONSTRAINT "a sign-off is only approved"
     CHECK (signoff IS NULL OR status <> 'irrelevant' AND coalesce(answer, 'approve') = 'approve'),
+    CONSTRAINT "only an answered question has a decider and consequences"
+    CHECK (status = 'answered' AND signoff IS NULL OR decided_by_task IS NULL AND consequences = ''),
     CONSTRAINT "pending: no answer, reason or closed_at; answered: answer and closed_at; irrelevant: reason and closed_at"
     CHECK (status = 'pending' AND answer IS NULL AND reason IS NULL AND closed_at IS NULL
            OR status = 'answered' AND answer IS NOT NULL AND closed_at IS NOT NULL
@@ -138,9 +144,18 @@ CREATE TABLE task_decision (                               -- the task waits whi
     PRIMARY KEY (task_id, decision_id)
 ) STRICT;
 
+CREATE TABLE decision_supersedes (                         -- decision_id's answer replaces superseded_id's
+    decision_id   INTEGER NOT NULL REFERENCES decision (id),
+    superseded_id INTEGER NOT NULL REFERENCES decision (id),
+    note          TEXT NOT NULL DEFAULT '',                -- '': all of it; else partly, e.g. "scope only"
+    PRIMARY KEY (decision_id, superseded_id),
+    CHECK (decision_id <> superseded_id)
+) STRICT;
+
 CREATE INDEX plan_milestone ON plan (milestone_id);
 CREATE INDEX task_plan ON task (plan_id);
 CREATE INDEX task_decision_decision ON task_decision (decision_id);
+CREATE INDEX decision_superseded ON decision_supersedes (superseded_id);
 CREATE INDEX run_task ON run (task_id);
 CREATE UNIQUE INDEX run_running ON run (result) WHERE result = 'running';  -- at most one
 
@@ -166,7 +181,10 @@ Milestones, plans, tasks and decisions are in {db}; change them only with these 
   pm task add <plan id> "<subject>" [--kind plan] [--priority N] < body.md     --kind plan: the task writes a plan
   pm decision add "<subject>" [--body "<text>"] [--option "<recommended>"] [--option …]   prints its id
   pm task-pending-decision <task id> <decision id>     the task waits until the human answers
-  pm show <task id>
+  pm decision list --answered [--grep <text>]     the decision log: what was decided about X
+  pm decision record "<subject>" --answer "<choice>" --body "<why>"   a lasting choice of yours (design, a rule)
+  pm decision consequences <decision id> "<text>"     what changed because of an answer
+  pm show <task id>     also d<decision id>, p<plan id>, m<milestone id>
 Every command with examples, and recipes for the usual tasks: `pm instructions`.
 
 Stop processes you started by PID (`kill $!`), never with `pkill -f` or `killall`: the pattern can match your own \
@@ -231,6 +249,17 @@ def now():
 def creator():
     """The task whose worker runs this command (PM_TASK, set by `pm run`), or None."""
     return int(os.environ["PM_TASK"]) if os.environ.get("PM_TASK", "").isdigit() else None
+
+
+def human_only(what):
+    if creator() is not None:
+        raise FormatError(f"a worker doesn't {what}; only the human does")
+
+
+def matches(d, text):
+    """Decision d mentions text (any case) in its subject, body, options, answer, reason or consequences."""
+    return not text or text.casefold() in "\n".join(
+        str(d[k] or "") for k in ("subject", "body", "options", "answer", "reason", "consequences")).casefold()
 
 
 def stamp(ts):
@@ -528,9 +557,10 @@ class Project:
 
     # --- decisions ---------------------------------------------------------------------------
 
-    def resolve(self, did, answer=None, irrelevant=None):
-        """Close a pending decision. Answered: its tasks unblock by themselves. Irrelevant: the open tasks it
-        blocks are dropped."""
+    def resolve(self, did, answer=None, irrelevant=None, kind=None, supersedes=()):
+        """Close a pending decision (the human only). Answered: its tasks unblock by themselves. Irrelevant: the open
+        tasks it blocks are dropped."""
+        human_only("answer, approve or close decisions")
         with self.connect(write=True) as db:
             d = self.get(db, "decision", did)
             if d["status"] != "pending":
@@ -538,8 +568,10 @@ class Project:
             if d["signoff"] and (irrelevant is not None or answer != SIGNOFF_ANSWER):
                 raise FormatError(f"decision {did} is a sign-off: its only answer is {SIGNOFF_ANSWER!r}")
             if irrelevant is None:
-                db.execute("UPDATE decision SET status = 'answered', answer = ?, closed_at = ? WHERE id = ?",
-                           (answer, now(), did))
+                db.execute("UPDATE decision SET status = 'answered', answer = ?, closed_at = ?, kind = ? WHERE id = ?",
+                           (answer, now(), kind or d["kind"], did))
+                for old in supersedes:
+                    self.link_supersede(db, did, old)
                 return
             db.execute("UPDATE decision SET status = 'irrelevant', reason = ?, closed_at = ? WHERE id = ?",
                        (irrelevant, now(), did))
@@ -547,9 +579,78 @@ class Project:
                        "AND id IN (SELECT task_id FROM task_decision WHERE decision_id = ?)",
                        (f"decision {did} irrelevant", now(), did))
 
-    def decisions(self):
-        """`pm decision list`: every pending decision with what it blocks, its context and options."""
-        return self.decisions_of(self.pending()) or "No pending decisions.\n"
+    def decisions(self, answered=False, everything=False, grep=None):
+        """`pm decision list`: every pending decision with what it blocks, its context and options. answered: the
+        log, newest first: answered lasting questions (kind rule) that nothing fully supersedes. everything: all."""
+        if not answered and not everything:
+            ds = [d for d in self.pending() if matches(d, grep)]
+            return self.decisions_of(ds) or ("No pending decisions" + (f" matching {grep!r}" if grep else "") + ".\n")
+        where = "" if everything else (
+            "WHERE status = 'answered' AND signoff IS NULL AND kind = 'rule' "
+            "AND id NOT IN (SELECT superseded_id FROM decision_supersedes s JOIN decision n ON n.id = s.decision_id "
+            "WHERE s.note = '' AND n.status = 'answered')")
+        ds = [d for d in self.rows(f"SELECT * FROM decision {where} ORDER BY coalesce(closed_at, created_at) DESC, "
+                                   "id DESC") if matches(d, grep)]
+        return "\n".join(self.log_entry(d) for d in ds) or (
+            "No decisions" + (f" matching {grep!r}" if grep else "") + ".\n")
+
+    def log_entry(self, d):
+        """A decision in a few lines: header, answer, consequences, supersede links."""
+        out = [f"Decision {d['id']} ({self.decision_tags(d)}): {d['subject']}"]
+        if d["answer"] or d["reason"]:
+            out.append(f"  → {d['answer'] or d['reason']}".replace("\n", "\n    "))
+        if d["consequences"]:
+            out.append("  consequences: " + d["consequences"].replace("\n", "\n    "))
+        out += ["  " + x for x in self.supersede_lines(d["id"])]
+        return "\n".join(out) + "\n"
+
+    @staticmethod
+    def decision_tags(d):
+        """"rule, answered 2026-10-12 by task 7", "pending, sign-off", …"""
+        tags = [d["status"]] if d["signoff"] else [d["kind"], d["status"]]
+        if d["closed_at"]:
+            tags[-1] += " " + d["closed_at"][:10]
+        if d["decided_by_task"]:
+            tags[-1] += f" by task {d['decided_by_task']}"
+        return ", ".join(tags + ["sign-off"] * bool(d["signoff"]))
+
+    def supersede_lines(self, did):
+        """["supersedes decision 28: …", "partly superseded by decision 40: … (scope only)"]."""
+        def line(verb, r):
+            return (f"{'partly ' if r['note'] else ''}{verb} decision {r['id']}: {r['subject']}"
+                    + (f" ({r['note']})" if r["note"] else "") + ("" if r["status"] == "answered" else f" [{r['status']}]"))
+        return ([line("supersedes", r) for r in self.rows(
+                    "SELECT d.id, d.subject, d.status, s.note FROM decision_supersedes s "
+                    "JOIN decision d ON d.id = s.superseded_id WHERE s.decision_id = ? ORDER BY d.id", did)]
+                + [line("superseded by", r) for r in self.rows(
+                    "SELECT d.id, d.subject, d.status, s.note FROM decision_supersedes s "
+                    "JOIN decision d ON d.id = s.decision_id WHERE s.superseded_id = ? ORDER BY d.id", did)])
+
+    def decision_show(self, did):
+        """`pm decision show`: everything about one decision."""
+        with self.connect() as db:
+            d = self.get(db, "decision", did)
+            tasks = db.execute("SELECT t.id, t.status, t.subject FROM task_decision td JOIN task t ON t.id = td.task_id "
+                               "WHERE td.decision_id = ? ORDER BY t.id", (did,)).fetchall()
+        by = f", by task {d['created_by_task']}" if d["created_by_task"] else ""
+        out = [f"# Decision {did}: {d['subject']}", "", f"{self.decision_tags(d)}; created {stamp(d['created_at'])}{by}"]
+        out += self.supersede_lines(did)
+        if d["body"]:
+            out += ["", d["body"]]
+        if d["signoff"] and d["status"] == "pending":
+            out += ["", self.signoff_view(did, d["signoff"])]
+        if opts := json.loads(d["options"]):
+            out += ["", "Options:"] + [f"  {n}) {o}{'  (recommended)' if n == 1 else ''}" for n, o in enumerate(opts, 1)]
+        if d["answer"]:
+            out += ["", f"Answer ({stamp(d['closed_at'])}" + (f", task {d['decided_by_task']}'s own choice" if
+                                                             d["decided_by_task"] else "") + f"): {d['answer']}"]
+        elif d["reason"]:
+            out += ["", f"Irrelevant ({stamp(d['closed_at'])}): {d['reason']}"]
+        if d["consequences"]:
+            out += ["", "Consequences:", d["consequences"]]
+        if tasks:
+            out += ["", "Tasks:"] + [f"  task {t['id']} [{t['status']}] {t['subject']}" for t in tasks]
+        return "\n".join(out).rstrip() + "\n"
 
     def decisions_of(self, ds):
         out = []
@@ -582,24 +683,86 @@ class Project:
                     closed += 1
                 continue
             hint = f"1-{len(d['options'])}, " if d["options"] else ""
-            reply = ask(f"Answer [{hint}your own text, s = skip, x <reason> = irrelevant]: ").strip()
+            reply = ask(f"Answer [{hint}your own text, o <answer> = one-off (not in the log), s = skip, "
+                        f"x <reason> = irrelevant]: ").strip()
             if not reply or reply.lower() == "s":
                 continue
             if reply.lower() == "x" or reply.lower().startswith("x "):
                 self.resolve(d["id"], irrelevant=reply[1:].strip() or "no reason given")
+            elif reply.lower().startswith("o ") and reply[2:].strip():
+                self.answer(d["id"], reply[2:].strip(), kind="once")
             else:
                 self.answer(d["id"], reply)
             closed += 1
         return closed
 
-    def answer(self, did, reply):
+    def answer(self, did, reply, kind=None, supersedes=()):
         """Answer decision did: an option's number or own text. Returns the answer."""
         with self.connect() as db:
             opts = json.loads(self.get(db, "decision", did)["options"])
         if reply.isdigit() and 1 <= int(reply) <= len(opts):
             reply = opts[int(reply) - 1]
-        self.resolve(did, answer=reply)
+        self.resolve(did, answer=reply, kind=kind, supersedes=supersedes)
         return reply
+
+    def record(self, subject, answer, body=None, kind="rule", supersedes=(), consequences=None):
+        """`pm decision record`: a decision nobody asked, added answered: the human's, or in a worker its own choice
+        (decided_by_task). Returns its id."""
+        with self.connect(write=True) as db:
+            did = db.execute("INSERT INTO decision (subject, body, status, answer, closed_at, created_by_task, kind, "
+                             "decided_by_task) VALUES (?, ?, 'answered', ?, ?, ?, ?, ?)",
+                             (subject, (body or "").strip(), answer.strip(), now(), creator(), kind,
+                              creator())).lastrowid
+            for old in supersedes:
+                self.link_supersede(db, did, old)
+            if consequences:
+                self.add_consequences(db, did, consequences)
+            return did
+
+    def supersede(self, new, old, note=""):
+        with self.connect(write=True) as db:
+            self.link_supersede(db, new, old, note)
+
+    def link_supersede(self, db, new, old, note=""):
+        """Decision new's answer replaces old's (partly, when note says what). Both answered questions; in a worker,
+        old must be a worker's own choice: a human's answer is superseded only by the human."""
+        n, o = self.get(db, "decision", new), self.get(db, "decision", old)
+        for d in (n, o):
+            if d["signoff"] or d["status"] != "answered":
+                raise FormatError(f"decision {d['id']} is {'a sign-off' if d['signoff'] else d['status']}: "
+                                  "only answered questions supersede or are superseded")
+        if new == old or db.execute(
+                "WITH RECURSIVE up(id) AS (SELECT ? UNION SELECT s.superseded_id FROM decision_supersedes s "
+                "JOIN up ON s.decision_id = up.id) SELECT 1 FROM up WHERE id = ?", (old, new)).fetchone():
+            raise FormatError(f"decision {old} already supersedes decision {new}" if new != old else
+                              f"decision {new} can't supersede itself")
+        if creator() is not None and o["decided_by_task"] is None:
+            raise FormatError(f"decision {old} is the human's: a worker doesn't supersede it. Ask with "
+                              f"`pm decision add` (mention decision {old}) and wait for the answer")
+        db.execute("INSERT OR REPLACE INTO decision_supersedes VALUES (?, ?, ?)", (new, old, (note or "").strip()))
+
+    def consequences(self, did, text):
+        with self.connect(write=True) as db:
+            self.add_consequences(db, did, text)
+
+    def add_consequences(self, db, did, text):
+        """Append what changed because of decision did's answer, dated, with the task that wrote it."""
+        d = self.get(db, "decision", did)
+        if d["signoff"] or d["status"] != "answered":
+            raise FormatError(f"decision {did} is {'a sign-off' if d['signoff'] else d['status']}: consequences "
+                              "belong to answered questions")
+        if not (text := (text or "").strip()):
+            raise FormatError("no consequences given")
+        head = now()[:10] + (f", task {creator()}" if creator() else "")
+        db.execute("UPDATE decision SET consequences = ? WHERE id = ?",
+                   ("\n\n".join(x for x in (d["consequences"], f"{head}: {text}") if x), did))
+
+    def set_kind(self, did, kind):
+        human_only("change a decision's kind")
+        with self.connect(write=True) as db:
+            if self.get(db, "decision", did)["signoff"]:
+                raise FormatError(f"decision {did} is a sign-off; it has no kind")
+            db.execute("UPDATE decision SET kind = ? WHERE id = ?", (kind, did))
 
     # --- sign-offs ---------------------------------------------------------------------------
 
@@ -875,13 +1038,47 @@ class Project:
         with self.connect(write=True) as db:
             self.block(db, tid, did)
 
-    def decision_add(self, subject, body=None, options=()):
+    def decision_add(self, subject, body=None, options=(), kind="rule"):
         with self.connect(write=True) as db:
-            return db.execute("INSERT INTO decision (subject, options, body, created_by_task) VALUES (?, ?, ?, ?)",
+            return db.execute("INSERT INTO decision (subject, options, body, created_by_task, kind) VALUES (?, ?, ?, ?, ?)",
                               (subject, json.dumps(list(options), ensure_ascii=False), (body or "").strip(),
-                               creator())).lastrowid
+                               creator(), kind)).lastrowid
 
     # --- show --------------------------------------------------------------------------------
+
+    def show_ref(self, ref):
+        """`pm show`: "7" or "t7" (a task), "d32" or "decision 32", "p3" or "plan 3", "m1" or "milestone 1"."""
+        m = re.fullmatch(r"(?:(t|task|d|decision|p|plan|m|milestone)\s*)?(\d+)", " ".join(ref).strip().lower())
+        if not m:
+            raise FormatError(f"not a task, decision, plan or milestone: {' '.join(ref)!r} (e.g. 7, d32, p3, m1)")
+        rid = int(m[2])
+        return {"d": self.decision_show, "p": self.plan_show, "m": self.milestone_show}.get(
+            (m[1] or "t")[0], self.show)(rid)
+
+    def plan_show(self, pid):
+        with self.connect() as db:
+            p = self.get(db, "plan", pid)
+            m = self.get(db, "milestone", p["milestone_id"])
+            tasks = db.execute("SELECT id, status, kind, subject FROM task WHERE plan_id = ? ORDER BY id",
+                               (pid,)).fetchall()
+        by = f", by task {p['created_by_task']}" if p["created_by_task"] else ""
+        out = [f"# Plan {pid}: {p['subject']} (milestone {m['id']}: {m['subject']}; priority {p['priority'] or 0}, "
+               f"created {stamp(p['created_at'])}{by})", "", p["body"], ""]
+        out += [f"- task {x['id']} [{x['status']}{'' if x['kind'] == 'work' else ', ' + x['kind']}] {x['subject']}"
+                for x in tasks]
+        return "\n".join(out).rstrip() + "\n"
+
+    def milestone_show(self, mid):
+        with self.connect() as db:
+            m = self.get(db, "milestone", mid)
+            plans = db.execute("SELECT p.id, p.subject, sum(t.status = 'open') AS open, count(t.id) AS n FROM plan p "
+                               "LEFT JOIN task t ON t.plan_id = p.id WHERE p.milestone_id = ? GROUP BY p.id ORDER BY p.id",
+                               (mid,)).fetchall()
+        implemented = f", implemented {stamp(m['implemented_at'])}" if m["implemented_at"] else ""
+        out = [f"# Milestone {mid}: {m['subject']} ({m['status']}, created {stamp(m['created_at'])}{implemented})", "",
+               m["body"], ""]
+        out += [f"- plan {x['id']}: {x['subject']} ({x['open'] or 0} of {x['n']} task(s) open)" for x in plans]
+        return "\n".join(out).rstrip() + "\n"
 
     def show(self, tid):
         """The task with its plan and milestone: the context a worker gets."""
@@ -895,6 +1092,11 @@ class Project:
             ds = db.execute("SELECT d.* FROM task_decision td JOIN decision d ON d.id = td.decision_id "
                             "WHERE td.task_id = ? ORDER BY d.id", (tid,)).fetchall()
             runs = db.execute("SELECT * FROM run WHERE task_id = ? ORDER BY id", (tid,)).fetchall()
+            last_waiting = {r[0] for r in db.execute(
+                "SELECT d.id FROM task_decision td JOIN decision d ON d.id = td.decision_id WHERE td.task_id = ? "
+                "AND d.status = 'answered' AND d.signoff IS NULL AND d.kind = 'rule' AND NOT EXISTS (SELECT 1 FROM "
+                "task_decision o JOIN task t ON t.id = o.task_id WHERE o.decision_id = d.id AND o.task_id <> ? "
+                "AND t.status = 'open')", (tid, tid))}
         prio = t["priority"] if t["priority"] is not None else p["priority"] or 0
         by = lambda r: f", by task {r['created_by_task']}" if r["created_by_task"] else ""
         implemented = f", implemented {stamp(m['implemented_at'])}" if m["implemented_at"] else ""
@@ -914,6 +1116,10 @@ class Project:
             said = d["answer"] or d["reason"] or ""
             out.append(f"Decision {d['id']} ({d['status']}{', sign-off' if d['signoff'] else ''}): {d['subject']}"
                        + (f" → {said}" if said else ""))
+            if t["status"] == "open" and d["id"] in last_waiting:
+                out.append(f"  Task {tid} is the last open task that waited for decision {d['id']}: when done, record "
+                           f"what changed because of its answer (fields, files, rules, what no longer holds): "
+                           f"pm decision consequences {d['id']} \"<text>\"")
         if runs:
             out += ["", "Runs:"] + ["  " + self.run_line(r) for r in runs]
         return "\n".join(out).rstrip() + "\n"
@@ -1471,8 +1677,9 @@ def main(argv=None):
                        ("decide", "answer pending decisions in the terminal, one by one"),
                        ("instructions", "the full reference for agents: every command with examples, recipes")]:
         sub.add_parser(name, help=text)
-    s = sub.add_parser("show", help="a task with its plan, milestone, decisions and runs")
-    s.add_argument("task", type=int)
+    s = sub.add_parser("show", help="a task with its plan, milestone, decisions and runs; or a decision (d32, "
+                       "decision 32), plan (p3) or milestone (m1)")
+    s.add_argument("ref", nargs="+", help="7 or t7: task 7; d32, decision 32; p3, plan 3; m1, milestone 1")
     rs = sub.add_parser("runs", help="worker runs (time, result, tokens, cost) and totals per task kind")
     rs.add_argument("task", type=int, nargs="?", help="only this task's runs")
     r = sub.add_parser("run", help="work the queue with the worker command (claude -p)")
@@ -1522,16 +1729,45 @@ def main(argv=None):
     tp.add_argument("task", type=int)
     tp.add_argument("priority", type=prio_arg)
 
-    d = sub.add_parser("decision", aliases=["decisions"], help="ask the human; the human's answers").add_subparsers(
-        dest="action", required=True)
+    d = sub.add_parser("decision", aliases=["decisions"], help="ask the human; the human's answers: the project's "
+                       "decision log").add_subparsers(dest="action", required=True)
     da = d.add_parser("add", help="new pending decision; prints its id")
     da.add_argument("subject", help="the question")
     da.add_argument("--body", type=text_arg, help="context for the human")
     da.add_argument("--option", action="append", default=[], help="repeat; the recommended one first")
-    d.add_parser("list", help="pending decisions with their context, options and the tasks they block")
+    da.add_argument("--once", action="store_true", help="a one-off go-ahead or check, not a lasting rule")
+    dl = d.add_parser("list", help="pending decisions with their context, options and the tasks they block; "
+                      "--answered: the decision log")
+    dl.add_argument("--answered", action="store_true", help="the log: answered lasting decisions nothing fully "
+                    "supersedes, newest first")
+    dl.add_argument("--all", action="store_true", help="every decision: pending, one-off, superseded, irrelevant, "
+                    "sign-offs")
+    dl.add_argument("--grep", help="only decisions that mention this text (any case)")
+    dsh = d.add_parser("show", help="one decision: context, options, answer, consequences, tasks, supersede links")
+    dsh.add_argument("decision", type=int)
+    dr = d.add_parser("record", help="a decision nobody asked, added answered; prints its id. In a worker: your own "
+                      "choice, which the human can supersede")
+    dr.add_argument("subject")
+    dr.add_argument("--answer", type=text_arg, required=True, help="the decision")
+    dr.add_argument("--body", type=text_arg, help="context: why, what was considered")
+    dr.add_argument("--once", action="store_true", help="a one-off, not a lasting rule")
+    dr.add_argument("--supersedes", type=int, action="append", default=[], help="repeat; decisions it replaces")
+    dr.add_argument("--consequences", type=text_arg, help="what changed because of it")
     dn = d.add_parser("answer", help="the human's answer; its tasks become workable")
     dn.add_argument("decision", type=int)
     dn.add_argument("answer", help="an option's number, or own text")
+    dn.add_argument("--once", action="store_true", help="a one-off, not a lasting rule")
+    dn.add_argument("--supersedes", type=int, action="append", default=[], help="repeat; decisions it replaces")
+    dsu = d.add_parser("supersede", help="decision NEW's answer replaces OLD's")
+    dsu.add_argument("new", type=int)
+    dsu.add_argument("old", type=int)
+    dsu.add_argument("--note", default="", help="replaces only part of it, e.g. \"scope only\"")
+    dc = d.add_parser("consequences", help="append what changed because of an answered decision")
+    dc.add_argument("decision", type=int)
+    dc.add_argument("text", type=text_arg, help="fields, files, rules; what no longer holds; - reads stdin")
+    dk = d.add_parser("kind", help="rule: a lasting decision, in the log; once: a one-off go-ahead or check")
+    dk.add_argument("decision", type=int)
+    dk.add_argument("kind", choices=("rule", "once"))
     dap = d.add_parser("approve", help="approve a sign-off")
     dap.add_argument("decision", type=int)
     di = d.add_parser("irrelevant", help="close without answer; drops the open tasks it blocks")
@@ -1574,7 +1810,7 @@ def main(argv=None):
         elif args.cmd == "queue":
             pm.print_queue()
         elif args.cmd == "show":
-            print(pm.show(args.task), end="")
+            print(pm.show_ref(args.ref), end="")
         elif args.cmd == "runs":
             pm.print_runs(args.task)
         elif args.cmd == "decide":
@@ -1635,9 +1871,26 @@ def main(argv=None):
                 msg = f"task {args.task} priority"
         elif args.cmd in ("decision", "decisions"):
             if args.action == "list":
-                print(pm.decisions(), end="")
+                print(pm.decisions(args.answered, args.all, args.grep), end="")
+            elif args.action == "show":
+                print(pm.decision_show(args.decision), end="")
             elif args.action == "answer":
-                msg = f"decision {args.decision} answered: {pm.answer(args.decision, args.answer)}"
+                said = pm.answer(args.decision, args.answer, "once" if args.once else None, args.supersedes)
+                msg = f"decision {args.decision} answered: {said}"
+            elif args.action == "record":
+                did = pm.record(args.subject, args.answer, args.body, "once" if args.once else "rule", args.supersedes,
+                                args.consequences)
+                print(did)
+                msg = f"decision {did} recorded: {args.subject}"
+            elif args.action == "supersede":
+                pm.supersede(args.new, args.old, args.note)
+                msg = f"decision {args.new} supersedes decision {args.old}" + (f" ({args.note})" if args.note else "")
+            elif args.action == "consequences":
+                pm.consequences(args.decision, args.text)
+                msg = f"decision {args.decision}: consequences"
+            elif args.action == "kind":
+                pm.set_kind(args.decision, args.kind)
+                msg = f"decision {args.decision}: kind {args.kind}"
             elif args.action == "approve":
                 if not pm.rows("SELECT 1 FROM decision WHERE id = ? AND signoff IS NOT NULL", args.decision):
                     raise FormatError(f"decision {args.decision} is not a sign-off; use `pm decision answer`")
@@ -1647,7 +1900,7 @@ def main(argv=None):
                 pm.resolve(args.decision, irrelevant=args.reason)
                 msg = f"decision {args.decision} irrelevant: {args.reason}"
             else:
-                did = pm.decision_add(args.subject, args.body, args.option)
+                did = pm.decision_add(args.subject, args.body, args.option, "once" if args.once else "rule")
                 print(did)
                 msg = f"decision {did} added: {args.subject}"
         elif args.cmd == "task-pending-decision":
