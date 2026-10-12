@@ -182,7 +182,11 @@ pm decision show 32                      # one decision: context, options, answe
 pm show d32                              # the same
 ```
 
-Before a choice the plan doesn't settle, look for an earlier decision about it. Cite decisions as `decision 32: <subject>`.
+Every task, planning ones included, starts here: grep the log for what the task touches (subjects, files, terms; `--grep` repeats, any word matches). Answered decisions are binding until a newer one supersedes them: a plan follows them, a task implements them, neither asks again what is decided. Do the same before every choice the plan doesn't settle. Cite decisions as `decision 32: <subject>`.
+
+```sh
+pm decision list --answered --grep csv --grep delimiter --grep export
+```
 
 **Your own choice:** a lasting choice the plan doesn't make (a design, a format, a rule others must follow), that the human doesn't need to make first: record it, answered. The human overrides it by superseding it.
 

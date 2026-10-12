@@ -23,7 +23,7 @@ import argparse, collections, contextlib, datetime, fcntl, json, os, re, shlex, 
 from pathlib import Path
 
 
-VERSION = 6  # bump by one with every commit (AGENTS.md)
+VERSION = 7  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -174,6 +174,10 @@ WORKER_PROMPT = """You are the worker for task {id}. Follow the project's own in
 CLAUDE.md or similar), then do task {id} and nothing else.
 
 {show}
+Before you start, look up what the project decided about what task {id} touches (its subjects, files, terms): \
+`pm decision list --answered --grep <word> [--grep <word> …]`. Those answers are binding, unless a newer one \
+supersedes them; follow them, and cite one where you rely on it, as `decision <id>: <subject>`.
+
 Milestones, plans, tasks and decisions are in {db}; change them only with these commands (a text value - reads stdin):
   pm plan add <milestone id> "<subject>" < body.md     a task to split it into tasks is queued
   pm plan edit <plan id> [--subject …] [--body …] [--priority N]
@@ -181,7 +185,7 @@ Milestones, plans, tasks and decisions are in {db}; change them only with these 
   pm task add <plan id> "<subject>" [--kind plan] [--priority N] < body.md     --kind plan: the task writes a plan
   pm decision add "<subject>" [--body "<text>"] [--option "<recommended>"] [--option …]   prints its id
   pm task-pending-decision <task id> <decision id>     the task waits until the human answers
-  pm decision list --answered [--grep <text>]     the decision log: what was decided about X
+  pm decision list --answered [--grep <word> …]     the decision log: what was decided about X
   pm decision record "<subject>" --answer "<choice>" --body "<why>"   a lasting choice of yours (design, a rule)
   pm decision consequences <decision id> "<text>"     what changed because of an answer
   pm show <task id>     also d<decision id>, p<plan id>, m<milestone id>
@@ -256,10 +260,10 @@ def human_only(what):
         raise FormatError(f"a worker doesn't {what}; only the human does")
 
 
-def matches(d, text):
-    """Decision d mentions text (any case) in its subject, body, options, answer, reason or consequences."""
-    return not text or text.casefold() in "\n".join(
-        str(d[k] or "") for k in ("subject", "body", "options", "answer", "reason", "consequences")).casefold()
+def matches(d, texts):
+    """Decision d mentions one of texts (any case) in its subject, body, options, answer, reason or consequences."""
+    hay = "\n".join(str(d[k] or "") for k in ("subject", "body", "options", "answer", "reason", "consequences")).casefold()
+    return not texts or any(t.casefold() in hay for t in texts)
 
 
 def stamp(ts):
@@ -584,7 +588,7 @@ class Project:
         log, newest first: answered lasting questions (kind rule) that nothing fully supersedes. everything: all."""
         if not answered and not everything:
             ds = [d for d in self.pending() if matches(d, grep)]
-            return self.decisions_of(ds) or ("No pending decisions" + (f" matching {grep!r}" if grep else "") + ".\n")
+            return self.decisions_of(ds) or ("No pending decisions" + (" matching " + " or ".join(map(repr, grep)) if grep else "") + ".\n")
         where = "" if everything else (
             "WHERE status = 'answered' AND signoff IS NULL AND kind = 'rule' "
             "AND id NOT IN (SELECT superseded_id FROM decision_supersedes s JOIN decision n ON n.id = s.decision_id "
@@ -592,7 +596,7 @@ class Project:
         ds = [d for d in self.rows(f"SELECT * FROM decision {where} ORDER BY coalesce(closed_at, created_at) DESC, "
                                    "id DESC") if matches(d, grep)]
         return "\n".join(self.log_entry(d) for d in ds) or (
-            "No decisions" + (f" matching {grep!r}" if grep else "") + ".\n")
+            "No decisions" + (" matching " + " or ".join(map(repr, grep)) if grep else "") + ".\n")
 
     def log_entry(self, d):
         """A decision in a few lines: header, answer, consequences, supersede links."""
@@ -1742,7 +1746,8 @@ def main(argv=None):
                     "supersedes, newest first")
     dl.add_argument("--all", action="store_true", help="every decision: pending, one-off, superseded, irrelevant, "
                     "sign-offs")
-    dl.add_argument("--grep", help="only decisions that mention this text (any case)")
+    dl.add_argument("--grep", action="append", default=[], help="only decisions that mention this text (any case); "
+                    "repeat: any of them")
     dsh = d.add_parser("show", help="one decision: context, options, answer, consequences, tasks, supersede links")
     dsh.add_argument("decision", type=int)
     dr = d.add_parser("record", help="a decision nobody asked, added answered; prints its id. In a worker: your own "
