@@ -13,7 +13,7 @@
 
 ## Model
 
-- **Milestone:** subject, body (Markdown), status `open` | `on-hold` | `implemented`, created date. `pm milestone add` also creates its first plan, the **masterplan** (body "tbd."), and the task "write the masterplan". Once a milestone has no open task, `pm run` queues the task "post-milestone cleanup" in its first plan (body: `cleanup_prompt` in project-manager.toml); when that is closed too, the milestone becomes `implemented`. Changing its subject or body queues "revise the masterplan" in the masterplan, unless a masterplan task is open; refused once the milestone is implemented or every plan of it is done: add a new milestone. On hold (`pm milestone hold`): its plans and tasks stay out of the queue until `pm milestone resume`; a running task finishes. Only the human adds or changes milestones: `pm milestone …` is refused in a worker (`PM_TASK` set).
+- **Milestone:** subject, body (Markdown), status `open` | `on-hold` | `implemented`, created date. `pm milestone add` also creates its first plan, the **masterplan** (body "tbd."), and the task "write the masterplan". Once a milestone has no open task, `pm run` queues the task "post-milestone cleanup" in its first plan (body: `cleanup_prompt` in project-manager.toml); when that is closed too, the milestone becomes `implemented`. Changing its subject or body queues "revise the masterplan" in the masterplan, unless a masterplan task is open; refused once the milestone is implemented or every plan of it is done: add a new milestone. On hold (`pm milestone hold`): its plans and tasks stay out of the queue until `pm milestone resume`; a running task finishes. Only the human adds or changes milestones: `pm milestone add|set|hold|resume` is refused in a worker (`PM_TASK` set).
 - **Plan:** belongs to a milestone; subject, body (required), priority (optional; the masterplan: `planning_priority`, 1000). Adding a plan, or changing its subject or body, queues the task "create tasks for plan N" (priority `planning_priority`, 1000), unless one is waiting (a running one doesn't count: it may have read the old text). The same holds for the revision tasks below.
 - **Plan tree:** a plan's parent is the plan of the task that wrote it (same milestone), else the masterplan. Changing a plan's subject or body also queues "revise plan M" in each child plan that isn't done (an open one gets the new parent text).
 - **Done plan:** has tasks, none open, and every child plan is done; the masterplan is done when every plan of its milestone is. A done plan can't be changed and takes no new tasks: add a new plan. A closed (done or dropped) task can't be changed.
@@ -42,6 +42,8 @@ pm status        # open and on-hold milestones, the first 10 queued tasks, pendi
 pm queue         # the whole queue
 pm show 7        # task 7 with its plan, its milestone, the plan's other tasks, its decisions and runs
 pm show d32      # decision 32 (also `decision 32`); p3: plan 3, m1: milestone 1
+pm milestone list    # every milestone: id, status, closed/all tasks, subject
+pm milestone show 1  # milestone 1: body, plans with their open tasks (same as `pm show m1`)
 pm runs          # worker runs: start, duration, result, turns, tokens, cost; totals per task kind
 pm validate      # check tasks.sql; exit 1 with the problems
 ```
@@ -53,6 +55,14 @@ Queue (3):
    +1000  task 1: write the masterplan
    +1000  task 3: create tasks for plan 2
     +700  task 4: stream one table as CSV
+```
+
+`pm milestone list` (or `pm milestones list`), implemented ones included:
+
+```
+  id  status       tasks    subject
+   1  implemented  12/12    CSV export
+   2  open         3/8      Import from CSV
 ```
 
 `pm plans list` (or `pm plan list`): plans with open tasks in open milestones, one per line, highest priority first:

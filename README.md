@@ -86,13 +86,13 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 |---|---|
 | `init` | Write and commit the config (if missing) |
 | `instructions` | The full reference for agents (`pm/instructions.md`): every command with examples, recipes, errors |
-| `status`, `queue`, `plans list`, `show <task\|d32\|p3\|m1>`, `validate` | Inspect; `show` also takes `decision 32` |
+| `status`, `queue`, `milestone list`, `milestone show <id>`, `plans list`, `show <task\|d32\|p3\|m1>`, `validate` | Inspect; `show` also takes `decision 32` |
 | `runs [task]` | Worker runs: start, duration, result, turns, tokens, cost; totals per task kind |
 | `run [--once] [--dry-run]` | Work the queue until it is empty, a worker fails, or the tree has uncommitted changes |
 | `stop` | Have the running `pm run` stop after its current task (SIGUSR1; same as one Ctrl-C) |
 | `milestone add`, `plan add <milestone>`, `task add <plan>` | In your editor (as `git commit`): first line subject, rest body (Markdown); quit unsaved or save empty to abort |
 | `milestone add <subject>`, `plan add <milestone> <subject>`, `task add <plan> <subject>` | Non-interactive: the body from stdin. `plan add` and `task add` also take `--priority`; `task add` `--kind plan` |
-| `milestone set <milestone>` | `--subject`, `--status`, `--body`. `milestone …` is refused in a worker |
+| `milestone set <milestone>` | `--subject`, `--status`, `--body`. `milestone add\|set\|hold\|resume` is refused in a worker |
 | `milestone hold <milestone>`, `milestone resume <milestone>` | Keep its plans and tasks out of the queue (a running task finishes), and back |
 | `plan edit <plan>` | `--subject`, `--body`, `--priority <N\|none>` |
 | `task done\|drop <task> <note>`, `task priority <task> <N\|none>` | Close a task, set its priority |

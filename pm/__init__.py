@@ -10,7 +10,7 @@ open milestones that no pending decision blocks, highest priority first, then by
 Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
 
     pm init | status | queue | show <task|d32|p3|m1> | validate | decide | run [--once] [--dry-run] | instructions
-    pm milestone add|set|hold|resume …   pm plan add|edit|list …   pm task add|done|drop|priority …
+    pm milestone add|set|hold|resume|list|show …   pm plan add|edit|list …   pm task add|done|drop|priority …
     pm decision add|list|show|answer|approve|irrelevant|record|supersede|consequences|kind …
     pm task-pending-decision <task> <decision>
 
@@ -23,7 +23,7 @@ import argparse, collections, contextlib, datetime, fcntl, json, os, re, shlex, 
 from pathlib import Path
 
 
-VERSION = 9  # bump by one with every commit (AGENTS.md)
+VERSION = 10  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -187,6 +187,7 @@ Milestones, plans, tasks and decisions are in {db}; change them only with these 
   pm plan add <milestone id> "<subject>" < body.md     a task to split it into tasks is queued
   pm plan edit <plan id> [--subject …] [--body …] [--priority N]
   pm plans list     plans with open tasks, highest priority first
+  pm milestone list     every milestone; pm milestone show <milestone id>
   pm task add <plan id> "<subject>" [--kind plan] [--priority N] < body.md     --kind plan: the task writes a plan
   pm decision add "<subject>" [--body "<text>"] [--option "<recommended>"] [--option …]   prints its id
   pm task-pending-decision <task id> <decision id>     the task waits until the human answers
@@ -1091,6 +1092,17 @@ class Project:
         out += [f"- plan {x['id']}: {x['subject']} ({x['open'] or 0} of {x['n']} task(s) open)" for x in plans]
         return "\n".join(out).rstrip() + "\n"
 
+    def milestones(self):
+        """`pm milestone list`: every milestone, one per line: id, status, closed/all tasks, subject."""
+        rows = self.rows("SELECT m.id, m.status, m.subject, count(t.id) AS n, coalesce(sum(t.status <> 'open'), 0) AS closed "
+                         "FROM milestone m LEFT JOIN plan p ON p.milestone_id = m.id LEFT JOIN task t ON t.plan_id = p.id "
+                         "GROUP BY m.id ORDER BY m.id")
+        if not rows:
+            return "No milestones (`pm milestone add` starts one).\n"
+        return "\n".join(["  id  status       tasks    subject"] + [
+            f"{m['id']:4d}  {m['status']:<11}  {str(m['closed']) + '/' + str(m['n']):<7}  {m['subject']}"
+            for m in rows]) + "\n"
+
     def show(self, tid):
         """The task with its plan and milestone: the context a worker gets."""
         with self.connect() as db:
@@ -1698,7 +1710,7 @@ def main(argv=None):
     r.add_argument("--dry-run", action="store_true", help="print the next worker command; change nothing")
     sub.add_parser("stop", help="have the running `pm run` stop after its current task")
 
-    ms = sub.add_parser("milestone", help="add or change milestones").add_subparsers(dest="action", required=True)
+    ms = sub.add_parser("milestone", aliases=["milestones"], help="add, change, list or show milestones").add_subparsers(dest="action", required=True)
     ma = ms.add_parser("add", help="new open milestone; prints its id. Without a subject: write it in your editor "
                        "(first line: subject, the rest: body); with a subject: the body is read from stdin")
     ma.add_argument("subject", nargs="?")
@@ -1710,6 +1722,9 @@ def main(argv=None):
     for name, text in [("hold", "put a milestone on hold: its plans and tasks leave the queue; a running task finishes"),
                        ("resume", "resume a milestone on hold: its tasks are queued again")]:
         ms.add_parser(name, help=text).add_argument("milestone", type=int)
+    ms.add_parser("list", help="every milestone, one per line: id, status, closed/all tasks, subject")
+    ms.add_parser("show", help="one milestone: body, plans with their open tasks (also `pm show m1`)").add_argument(
+        "milestone", type=int)
 
     p = sub.add_parser("plan", aliases=["plans"], help="add, change or list plans").add_subparsers(
         dest="action", required=True)
@@ -1831,8 +1846,12 @@ def main(argv=None):
             return pm.run(once=args.once, dry_run=args.dry_run)
         elif args.cmd == "stop":
             pm.stop()
-        elif args.cmd == "milestone":
-            if args.action == "add":
+        elif args.cmd in ("milestone", "milestones"):
+            if args.action == "list":
+                print(pm.milestones(), end="")
+            elif args.action == "show":
+                print(pm.milestone_show(args.milestone), end="")
+            elif args.action == "add":
                 if not (entry := pm.subject_and_body("milestone", args.subject)):
                     print("pm: aborted, no milestone added")
                     return 1
