@@ -22,7 +22,12 @@ function Item({ id, sel, select, cls = "", children }) {
     onClick=${() => select(id)} onKeyDown=${(e) => e.key === "Enter" && select(id)}>${children}</div>`;
 }
 
-const crumbs = (d, t) => html`<a href=${`#/plan/${t.plan_id}`}>plan ${t.plan_id}: ${d.plan.get(t.plan_id).subject}</a> · <span class="muted">milestone</span> <a href=${`#/milestone/${d.milestoneOfTask(t).id}`}>${d.milestoneOfTask(t).subject}</a>`;
+const crumbs = (d, t) => {
+  const m = d.milestoneOfTask(t);
+  return html`<div class="tl-detail-parents">
+    <span class="muted">milestone</span><a href=${`#/milestone/${m.id}`}>${m.subject}</a>
+    <span class="muted">plan</span><a href=${`#/plan/${t.plan_id}`}>${d.plan.get(t.plan_id).subject}</a></div>`;
+};
 
 function Runs({ d, runs }) {
   if (!runs.length) return null;
@@ -57,30 +62,31 @@ function Detail({ d, t, running }) {
   const decs = d.decisionsOf.get(t.id) || [];
   const last = runs.filter((r) => r.ended_at).pop();
   const head = html`<div class="live-head">
-    <div class="sub tl-detail-plan">${crumbs(d, t)}</div>
+    ${crumbs(d, t)}
     <div class="row"><span class="grow tl-detail-subject">${t.subject}</span>
       <a class="btn" href=${`#/task/${t.id}`}>Task page →</a></div>
     <div class="row sub">${running ? html`<${Pill} status="running" />` : html`<${Pill} status=${t.status} />`}<${Kind} kind=${t.kind} />
       <span>task ${t.id} · priority <${Prio} p=${d.prio(t)} /></span>
       ${running ? html`<span>· <${Elapsed} start=${d.running.started_at} /></span>` : null}
       ${qi >= 0 ? html`<span>· ${qi === 0 ? "next in the queue" : `#${qi + 1} in the queue`}</span>` : null}</div></div>`;
-  if (running) return html`${head}<${Log} d=${d} t=${t} live full />`;
+  const body = html`<div class="card live-body"><${Markdown} text=${t.body} /></div>`;
+  if (running) return html`${head}${body}<${Log} d=${d} t=${t} live full />`;
   if (t.status === "open") return html`${head}<div class="live-detail">
     ${why ? html`<div class="banner warn">${typeof why === "string" ? `Not queued: ${why}.` : html`Waits for ${why.map((x, i) => html`${i ? ", " : ""}<a href=${`#/decision/${x.id}`}>decision ${x.id}: ${x.subject}</a>`)}.`}</div>` : null}
-    <div class="card"><${Markdown} text=${t.body} /></div>
+    ${body}
     ${decs.length ? html`<h3>Decisions</h3><ul class="plain">${decs.map((x) => html`<li><${Pill} status=${x.status} /> <a href=${`#/decision/${x.id}`}>${x.subject}</a></li>`)}</ul>` : null}
     <div class="muted" style="margin-top:10px">created ${stamp(t.created_at)}${t.created_by_task != null ? html` by <a href=${`#/task/${t.created_by_task}`}>task ${t.created_by_task}</a>` : ""}</div>
     <${Runs} d=${d} runs=${runs} />
   </div>`;
   const total = runs.reduce((s, r) => s + seconds(r.started_at, r.ended_at), 0);
   return html`${head}<div class="live-detail">
+    ${body}
     <div class="card outcome"><div class="row"><b>${t.status === "done" ? "Done" : "Dropped"}</b>
       <span class="muted">${stamp(t.retired_at)} · <${Time} ts=${t.retired_at} /></span>
       ${runs.length ? html`<span class="muted">· ${runs.length} run${runs.length > 1 ? "s" : ""}, ${duration(total)}, ${usd(d.cost(runs))}</span>` : null}</div>
       ${t.note ? html`<div class="note">${t.note}</div>` : null}</div>
     <${Files} t=${t} />
     <${Runs} d=${d} runs=${runs} />
-    <details><summary class="muted">The task's body</summary><div class="card"><${Markdown} text=${t.body} /></div></details>
     ${last ? html`<h3>Output of the last run</h3><${Log} d=${d} t=${t} live=${false} />` : null}
   </div>`;
 }
