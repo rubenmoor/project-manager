@@ -65,7 +65,7 @@ function Detail({ d, t, running }) {
     ${crumbs(d, t)}
     <div class="row"><span class="grow tl-detail-subject">${t.subject}</span>
       <a class="btn" href=${`#/task/${t.id}`}>Task page →</a></div>
-    <div class="row sub">${running ? html`<${Pill} status="running" />` : html`<${Pill} status=${t.status} />`}<${Kind} kind=${t.kind} />
+    <div class="row sub">${running ? html`<${Pill} status="running" />` : html`<${Pill} status=${d.taskState(t)} />`}<${Kind} kind=${t.kind} />
       <span>task ${t.id} · priority <${Prio} p=${d.prio(t)} /></span>
       ${running ? html`<span>· <${Elapsed} start=${d.running.started_at} /></span>` : null}
       ${qi >= 0 ? html`<span>· ${qi === 0 ? "next in the queue" : `#${qi + 1} in the queue`}</span>` : null}</div></div>`;

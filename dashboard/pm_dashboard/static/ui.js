@@ -12,7 +12,7 @@ export function Markdown({ text, empty = "No body." }) {
   return html`<div class="md" dangerouslySetInnerHTML=${{ __html: out }}></div>`;
 }
 
-export const Pill = ({ status, label }) => html`<span class="pill ${status}"><span class="dot"></span>${label || status}</span>`;
+export const Pill = ({ status, label }) => html`<span class="pill ${status}"><span class="dot"></span>${label || status.replace("-", " ")}</span>`;
 export const Kind = ({ kind }) => (kind && kind !== "work" ? html`<span class="tag">${kind}</span>` : null);
 
 export function Prio({ p }) {

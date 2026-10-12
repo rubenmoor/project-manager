@@ -38,10 +38,12 @@ export function index(state) {
   d.excluded = (task) => {
     if (task.status !== "open") return null;
     const m = d.milestoneOfTask(task);
-    if (m.status !== "open") return `milestone ${m.id} is ${m.status}`;
+    if (m.status !== "open") return `milestone ${m.id} is ${m.status.replace("-", " ")}`;
     const b = d.blockers(task);
     return b.length ? b : null;
   };
+  d.held = (m) => m.status === "on-hold";
+  d.taskState = (task) => (task.status === "open" && d.held(d.milestoneOfTask(task)) ? "on-hold" : task.status);
   d.cost = (runs) => runs.reduce((s, r) => s + (r.cost_usd || 0), 0);
   d.tokens = (r) => (r.input_tokens || 0) + (r.output_tokens || 0) + (r.cache_read_tokens || 0) + (r.cache_creation_tokens || 0);
   d.taskRuns = (task) => d.runsOf.get(task.id) || [];

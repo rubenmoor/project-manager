@@ -106,6 +106,9 @@ h3 { font-size: 14px; margin: 16px 0 6px; font-weight: 600; }
 
 /* pieces */
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+.card.held, .hold-note { border-left: 3px solid var(--warning); }
+.hold-note { margin: 8px 0; padding: 6px 10px; border-radius: 4px; color: var(--muted);
+  background: color-mix(in srgb, var(--warning) 10%, transparent); }
 .cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
 .tiles { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); margin: 12px 0; }
 .tile .label { color: var(--ink-2); font-size: 12px; }
