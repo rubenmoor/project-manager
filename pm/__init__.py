@@ -23,7 +23,7 @@ import argparse, collections, contextlib, datetime, fcntl, json, os, re, shlex, 
 from pathlib import Path
 
 
-VERSION = 8  # bump by one with every commit (AGENTS.md)
+VERSION = 9  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -889,6 +889,7 @@ class Project:
 
     def milestone_add(self, subject, body=""):
         """A new milestone with its first plan, the masterplan (a stub), and the task that writes it."""
+        human_only("add or change milestones (raise a decision instead: pm decision add)")
         with self.connect(write=True) as db:
             mid = db.execute("INSERT INTO milestone (subject, body) VALUES (?, ?)",
                              (subject, (body or "").strip())).lastrowid
@@ -905,6 +906,7 @@ class Project:
         """Set fields of a milestone (subject, status, body); None leaves a field as it is. A changed subject or body
         queues the revision of the masterplan; refused once the milestone is implemented or every plan of it is done.
         Returns the queued tasks: [(id, subject)]."""
+        human_only("add or change milestones (raise a decision instead: pm decision add)")
         with self.connect(write=True) as db:
             m = self.get(db, "milestone", mid)
             changed = any(fields.get(k) is not None and fields[k].strip() != m[k] for k in ("subject", "body"))

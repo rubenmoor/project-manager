@@ -60,7 +60,7 @@ cleanup_prompt = '''
 * suggest entirely new files, if necessary
 * delete code that isn't actually used
 * check pending decisions if they are still relevant and really pending
-* check other milestones if their contents are up-to-date and update them if necessary
+* check other milestones if their contents are up-to-date; raise a decision for each change they need
 '''
 
 # Priority of the planning work: the masterplan `pm milestone add` creates (its tasks write the plans) and every task
