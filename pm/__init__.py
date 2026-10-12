@@ -22,7 +22,7 @@ import argparse, collections, contextlib, datetime, fcntl, json, os, re, shlex, 
 from pathlib import Path
 
 
-VERSION = 3  # bump by one with every commit (AGENTS.md)
+VERSION = 4  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -48,6 +48,11 @@ SIGNOFF_LEVELS = {"masterplans": "masterplan", "plans": "plan", "task-queue": "t
 SIGNOFF_ANSWER = "approve"
 
 SCHEMA_VERSION = 12
+# A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
+# run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
+# Columns and tables SCHEMA dropped are left behind, new ones get their defaults; so only renames, moved data and new
+# columns without a default need a step, else "".
+MIGRATIONS = {}
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -369,7 +374,15 @@ class Project:
                     raise FormatError(f"{self.db}: {e}") from None
                 version = con.execute("PRAGMA user_version").fetchone()[0]
                 if version != SCHEMA_VERSION:
-                    raise FormatError(f"{self.db}: schema version {version}, this pm knows {SCHEMA_VERSION}")
+                    con = self.migrate(con, version)
+                    new = dump(con)
+                    with contextlib.nullcontext() if write else self.lock():
+                        if self.db_path.read_text(encoding="utf-8") != text:
+                            raise FormatError(f"{self.db} changed while migrating, try again")
+                        self.save(new)
+                        self.commit_db(f"{self.db}: schema {version} -> {SCHEMA_VERSION}")
+                    self.say(f"pm: migrated {self.db} from schema {version} to {SCHEMA_VERSION}")
+                    text = new
                 con.execute("PRAGMA foreign_keys = ON")
                 if text is None:
                     text = dump(con)
@@ -390,6 +403,36 @@ class Project:
                 raise FormatError(f"{self.db}: {e}") from None
             finally:
                 con.close()
+
+    def migrate(self, old, version):
+        """`old` (schema `version`) brought to SCHEMA_VERSION: MIGRATIONS in order, then the rows of the tables and
+        columns SCHEMA still has copied into a fresh SCHEMA database, whose constraints check them."""
+        if version > SCHEMA_VERSION:
+            raise FormatError(f"{self.db}: schema version {version}, this pm knows up to {SCHEMA_VERSION}: update pm")
+        missing = [v for v in range(version, SCHEMA_VERSION) if v not in MIGRATIONS]
+        if missing:
+            raise FormatError(f"{self.db}: schema version {version}, this pm knows {SCHEMA_VERSION} "
+                              f"and has no migration from {missing[0]}")
+        try:
+            for v in range(version, SCHEMA_VERSION):
+                step = MIGRATIONS[v]
+                step(old) if callable(step) else old.executescript(step)
+            con = sqlite3.connect(":memory:", isolation_level=None)
+            con.row_factory = sqlite3.Row
+            con.executescript(f"BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;")
+            con.execute("BEGIN")
+            for (t,) in con.execute("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY rowid").fetchall():
+                have = {c[1] for c in old.execute(f"PRAGMA table_info({t})")}
+                cols = [c[1] for c in con.execute(f"PRAGMA table_info({t})") if c[1] in have]
+                if cols:
+                    con.executemany(f"INSERT INTO {t} ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                                    old.execute(f"SELECT {', '.join(cols)} FROM {t}").fetchall())
+            con.execute("COMMIT")
+        except sqlite3.Error as e:
+            raise FormatError(f"{self.db}: migrating from schema {version} failed, nothing written: {e}") from None
+        finally:
+            old.close()
+        return con
 
     def save(self, text):
         tmp = self.db_path.with_name(self.db_path.name + ".tmp")

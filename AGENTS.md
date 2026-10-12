@@ -9,5 +9,5 @@
   - On a rebase or merge conflict: take the higher number, plus one.
   - Enforced by `.githooks/pre-commit`; enable once per clone: `git config core.hooksPath .githooks` (`nix develop` and Claude Code sessions do it).
 - Schema version: `SCHEMA_VERSION` in `pm/__init__.py`, also printed by `pm --version`.
-  - Raise it by one with every change to `SCHEMA` (no migrations: older `tasks.sql` files are refused).
+  - Raise it by one with every change to `SCHEMA`, and add `MIGRATIONS[old version]`: SQL run on the old database before its rows are copied into `SCHEMA` by column name; `""` when added columns have defaults and nothing is renamed or moved.
   - The pre-commit hook refuses a `SCHEMA` change without it.
