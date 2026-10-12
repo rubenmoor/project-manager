@@ -3,9 +3,10 @@ human, in SQLite: the project keeps them as SQL text in tasks.sql, tracked by gi
 in-memory database (the schema is SCHEMA below). A new milestone comes with a first plan, the masterplan (body
 "tbd."), and a task that writes it; a new or edited plan queues a task that splits it into tasks; edits cascade: a
 changed milestone queues the revision of its masterplan, a changed plan that of the plans below it and of its open
-tasks; implemented milestones, done plans and closed tasks can't be changed; a milestone whose tasks are all closed gets a last one, the post-milestone cleanup, before it is implemented. The queue (the
-`queue` view): open tasks of open milestones that no pending decision blocks, highest priority first, then by
-milestone, plan and task. Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
+tasks; implemented milestones, done plans and closed tasks can't be changed; a milestone whose tasks are all closed
+gets a last one, the post-milestone cleanup, before it is implemented. The queue (the `queue` view): open tasks of
+open milestones that no pending decision blocks, highest priority first, then by milestone, plan and task.
+Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
 
     pm init | status | queue | show <task> | validate | decide | run [--once] [--dry-run] | instructions
     pm milestone add|set …   pm plan add|edit|list …   pm task add|done|drop|priority …
@@ -34,6 +35,8 @@ CLEANUP_SUBJECT = "post-milestone cleanup"
 PLAN_TASKS_SUBJECT = "create tasks for plan {}"
 REVISE_MASTERPLAN_SUBJECT = "revise the masterplan"
 REVISE_PLAN_SUBJECT = "revise plan {}"
+# Dedupes queued planning tasks: a running one may have read the old text already, so it doesn't count.
+NOT_RUNNING = "AND id NOT IN (SELECT task_id FROM run WHERE result = 'running')"
 MILESTONE_STATES = ("open", "implemented")
 # work: the default; plan: writes a plan; masterplan, split ("create tasks for plan N"), cleanup: made by pm only
 TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup")
@@ -739,21 +742,21 @@ class Project:
 
     def queue_revision(self, db, pid, parent=None):
         """Queue the task that brings plan pid in line with its changed milestone (the masterplan) or parent plan,
-        unless pid is done. An open one gets the new parent text. Returns (id, subject) of a new task, else None."""
+        unless pid is done. A waiting one gets the new parent text. Returns (id, subject) of a new task, else None."""
         if self.plan_done(db, pid):
             return None
         if parent is None:
             subject, body = REVISE_MASTERPLAN_SUBJECT, self.prompt("revise_masterplan_prompt", plan_id=pid)
-            if db.execute("SELECT 1 FROM task WHERE plan_id = ? AND kind = 'masterplan' AND status = 'open'",
-                          (pid,)).fetchone():
+            if db.execute("SELECT 1 FROM task WHERE plan_id = ? AND kind = 'masterplan' AND status = 'open' "
+                          + NOT_RUNNING, (pid,)).fetchone():
                 return None
         else:
             q = self.get(db, "plan", parent)
             subject = REVISE_PLAN_SUBJECT.format(pid)
             body = (self.prompt("revise_plan_prompt", plan_id=pid, parent_plan_id=parent)
                     + f"\n\n# Plan {parent}: {q['subject']}\n\n{q['body']}")
-            if old := db.execute("SELECT id FROM task WHERE plan_id = ? AND subject = ? AND status = 'open'",
-                                 (pid, subject)).fetchone():
+            if old := db.execute("SELECT id FROM task WHERE plan_id = ? AND subject = ? AND status = 'open' "
+                                 + NOT_RUNNING, (pid, subject)).fetchone():
                 db.execute("UPDATE task SET body = ? WHERE id = ?", (body, old[0]))
                 return None
         tid = db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task) "
@@ -762,9 +765,10 @@ class Project:
         return tid, subject
 
     def queue_plan_tasks(self, db, pid):
-        """Queue the task that splits plan pid into tasks, unless one is still open. Returns (id, subject) or None."""
+        """Queue the task that splits plan pid into tasks, unless one is waiting. Returns (id, subject) or None."""
         p = self.get(db, "plan", pid)
-        if db.execute("SELECT 1 FROM task WHERE plan_id = ? AND kind = 'split' AND status = 'open'", (pid,)).fetchone():
+        if db.execute("SELECT 1 FROM task WHERE plan_id = ? AND kind = 'split' AND status = 'open' " + NOT_RUNNING,
+                      (pid,)).fetchone():
             return None
         subject = PLAN_TASKS_SUBJECT.format(pid)
         return db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task) "
