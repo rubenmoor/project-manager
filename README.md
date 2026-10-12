@@ -95,6 +95,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 | `milestone set <milestone>` | `--subject`, `--status`, `--body`. `milestone add\|set\|hold\|resume` is refused in a worker |
 | `milestone hold <milestone>`, `milestone resume <milestone>` | Keep its plans and tasks out of the queue (a running task finishes), and back |
 | `plan edit <plan>` | `--subject`, `--body`, `--priority <N\|none>` |
+| `task set <task>` | `--subject`, `--body`, `--priority <N\|none>`; open tasks that aren't running |
 | `task done\|drop <task> <note>`, `task priority <task> <N\|none>` | Close a task, set its priority |
 | `decision add <subject>` | `--body`, `--option` (recommended first) |
 | `decide` | Answer pending decisions one by one in the terminal (number, text, `s` skip, `x <reason>` irrelevant; sign-offs: `a` approve, `s` skip) |
@@ -113,7 +114,7 @@ Global: `--root <repo>`. A text value `-` reads stdin.
 
 ## Workers
 
-Each task runs the configured `worker` command (default: `claude -p` with `Bash Read Edit Write Glob Grep` allowed). The prompt (`WORKER_PROMPT` in `pm/__init__.py`) holds the task with its plan and milestone, and the `pm` commands the worker may use: `plan add`, `plan edit`, `task add`, `decision add`, `task-pending-decision`, `task done|drop`. It points the worker to `pm instructions` for examples of every command. Agents outside `pm run`, e.g. a Claude session asked to plan work, should run `pm instructions` too: say so in the project's `AGENTS.md` or `CLAUDE.md`. The prompt also has every worker look up the answered decisions on what its task touches first (`pm decision list --answered --grep …`). A project's `AGENTS.md`, for example:
+Each task runs the configured `worker` command (default: `claude -p` with `Bash Read Edit Write Glob Grep` allowed). The prompt (`WORKER_PROMPT` in `pm/__init__.py`) holds the task with its plan and milestone, and the `pm` commands the worker may use: `plan add`, `plan edit`, `task add`, `task set`, `decision add`, `task-pending-decision`, `task done|drop`. It points the worker to `pm instructions` for examples of every command. Agents outside `pm run`, e.g. a Claude session asked to plan work, should run `pm instructions` too: say so in the project's `AGENTS.md` or `CLAUDE.md`. The prompt also has every worker look up the answered decisions on what its task touches first (`pm decision list --answered --grep …`). A project's `AGENTS.md`, for example:
 
 ```markdown
 - Work is planned with pm: run `pm instructions` first.

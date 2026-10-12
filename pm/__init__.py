@@ -10,7 +10,7 @@ open milestones that no pending decision blocks, highest priority first, then by
 Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
 
     pm init | status | queue | show <task|d32|p3|m1> | validate | decide | run [--once] [--dry-run] | instructions
-    pm milestone add|set|hold|resume|list|show …   pm plan add|edit|list …   pm task add|done|drop|priority …
+    pm milestone add|set|hold|resume|list|show …   pm plan add|edit|list …   pm task add|set|done|drop|priority …
     pm decision add|list|show|answer|approve|irrelevant|record|supersede|consequences|kind …
     pm task-pending-decision <task> <decision>
 
@@ -23,7 +23,7 @@ import argparse, collections, contextlib, datetime, fcntl, json, os, re, shlex, 
 from pathlib import Path
 
 
-VERSION = 10  # bump by one with every commit (AGENTS.md)
+VERSION = 11  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -189,6 +189,7 @@ Milestones, plans, tasks and decisions are in {db}; change them only with these 
   pm plans list     plans with open tasks, highest priority first
   pm milestone list     every milestone; pm milestone show <milestone id>
   pm task add <plan id> "<subject>" [--kind plan] [--priority N] < body.md     --kind plan: the task writes a plan
+  pm task set <task id> [--subject …] [--body …] [--priority N]     an open task that isn't running
   pm decision add "<subject>" [--body "<text>"] [--option "<recommended>"] [--option …]   prints its id
   pm task-pending-decision <task id> <decision id>     the task waits until the human answers
   pm decision list --answered [--grep <word> …]     the decision log: what was decided about X
@@ -1035,10 +1036,15 @@ class Project:
                               "VALUES (?, ?, ?, ?, ?, ?)", (pid, subject, kind, prio, body.strip(), creator())).lastrowid
 
     def task_set(self, tid, **fields):
-        """Set fields of an open task (status, note, priority); a value None clears it."""
+        """Set fields of an open task (status, note, priority, subject, body); a value None clears it. Subject and
+        body: refused while the task runs."""
         with self.connect(write=True) as db:
             if (t := self.get(db, "task", tid))["status"] != "open":
                 raise FormatError(f"task {tid} is {t['status']}; a closed task can't be changed")
+            if {"subject", "body"} & fields.keys() and db.execute(
+                    "SELECT 1 FROM run WHERE task_id = ? AND result = 'running'", (tid,)).fetchone():
+                raise FormatError(f"task {tid} is running; its subject and body can't be changed. "
+                                  f"Add a follow-up task instead: pm task add {t['plan_id']}")
             for k, v in fields.items():
                 if k == "status":
                     db.execute("UPDATE task SET status = ?, retired_at = CASE WHEN ? <> 'open' THEN ? END WHERE id = ?",
@@ -1751,6 +1757,11 @@ def main(argv=None):
         x = t.add_parser(verb)
         x.add_argument("task", type=int)
         x.add_argument("note", help=text)
+    ts = t.add_parser("set", help="change an open task that isn't running: subject, body, priority")
+    ts.add_argument("task", type=int)
+    ts.add_argument("--subject")
+    ts.add_argument("--body", type=text_arg)
+    ts.add_argument("--priority", type=prio_arg, default=argparse.SUPPRESS, help="integer, or none for the plan's")
     tp = t.add_parser("priority", help="integer, or none for the plan's")
     tp.add_argument("task", type=int)
     tp.add_argument("priority", type=prio_arg)
@@ -1897,6 +1908,16 @@ def main(argv=None):
             elif args.action in ("done", "drop"):
                 pm.task_set(args.task, status="done" if args.action == "done" else "dropped", note=args.note)
                 msg = f"task {args.task} {args.action}"
+            elif args.action == "set":
+                fields = {k: v.strip() for k in ("subject", "body") if (v := getattr(args, k)) is not None}
+                if "priority" in args:
+                    fields["priority"] = args.priority
+                if not fields:
+                    raise FormatError("nothing to change: --subject, --body or --priority")
+                if fields.get("subject") == "":
+                    raise FormatError("the subject can't be empty")
+                pm.task_set(args.task, **fields)
+                msg = f"task {args.task} changed"
             else:
                 pm.task_set(args.task, priority=args.priority)
                 msg = f"task {args.task} priority"

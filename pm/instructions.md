@@ -157,7 +157,14 @@ pm task done 5 "2026-10-10, app/api/export.py, tests/test_export.py"
 pm task drop 6 "covered by task 5"
 pm task priority 6 710      # earlier than the plan's other tasks (plan priority 700)
 pm task priority 6 none     # back to the plan's priority
+pm task set 6 --subject "Stream every table as CSV"
+pm task set 6 --body - <<'EOF'
+…
+EOF
+pm task set 6 --priority 710   # also: none
 ```
+
+`pm task set` changes an open task that isn't running; a closed or running task can't be changed: add a new task instead.
 
 A task should fit one worker run: one change you can describe, check and commit.
 
@@ -278,6 +285,7 @@ Agents don't start `pm run`: a worker is already one task of a run.
 | `the change breaks the schema, nothing written: … a plan needs a body` | Empty body: stdin was empty or not piped |
 | `… an open task needs a body` | The same for a task |
 | `` `pm task add` without a subject needs a terminal `` | Give the subject on the command line |
+| `task 6 is running; its subject and body can't be changed`, `task 6 is done; a closed task can't be changed` | Add a new task instead: `pm task add <plan>` |
 | `decision 3 is not pending` | It was answered or marked irrelevant already |
 | `the database has errors (pm validate)` | `tasks.sql` was edited by hand into an invalid state; `pm validate` lists the problems |
 | `no project-manager.toml: run pm init first` | The project has no pm yet; that's the human's call |
