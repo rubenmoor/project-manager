@@ -23,6 +23,8 @@ CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
 GUARD = Path(__file__).parent / "guard.py"
+# In {settings}: `claude -p` ends with the turn, so a background job dies unwatched; long checks run in the foreground.
+WORKER_ENV = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1", "BASH_MAX_TIMEOUT_MS": "3600000"}
 EPILOG = "Agents (LLMs): read `pm instructions` first, the full reference with examples for every command."
 PROMPT_KEYS = ("masterplan_prompt", "plan_tasks_prompt", "cleanup_prompt")
 PRIORITY_KEYS = ("plan_priority_prompt", "task_priority_prompt")
@@ -154,7 +156,8 @@ Milestones, plans, tasks and decisions are in {db}; change them only with these 
 Every command with examples, and recipes for the usual tasks: `pm instructions`.
 
 Stop processes you started by PID (`kill $!`), never with `pkill -f` or `killall`: the pattern can match your own \
-process.
+process. Run long checks in the foreground (a Bash call with a timeout): your session ends with your turn, \
+and nothing wakes you later.
 
 Finish with `pm task done {id} "<YYYY-MM-DD, files>"` or `pm task drop {id} "<reason>"`. Stage (`git add`) the \
 changes meant to stay in the project and delete temporary files you created. Don't commit or push: pm commits what \
@@ -814,7 +817,8 @@ class Project:
         show = "\n".join([self.show(tid), *self.priority_prompts()]).rstrip() + "\n"
         prompt = WORKER_PROMPT.format(id=tid, db=self.db, show=show)
         hook = {"type": "command", "command": shlex.join([sys.executable, str(GUARD)])}
-        settings = json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [hook]}]}})
+        settings = json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [hook]}], "Stop": [{"hooks": [hook]}]},
+                               "env": WORKER_ENV})
         w = self.config["worker"]
         cmd = [a.replace("{prompt}", prompt).replace("{settings}", settings) for a in w]
         return cmd, None if any("{prompt}" in a for a in w) else prompt
@@ -1002,7 +1006,9 @@ class Project:
             result = "blocked", "waits for decision(s) " + ", ".join(blocked)
         else:
             return self.failed(tid, rid, "exit 0, but the task is still open and not blocked", code, info, started, log,
-                               cause=f"the worker ended without `pm task done|drop {tid}` or a pending decision")
+                               cause=f"the worker ended without `pm task done|drop {tid}` or a pending decision"
+                               + (f"; its last message: {info['last_text'].splitlines()[-1][:200]}"
+                                  if info.get("last_text") else ""))
         problem = None
         if left := [l for l in self.git("status", "--porcelain").splitlines() if l[1] != " " and l[3:] != self.db]:
             problem = "the worker left changes that are not staged:\n" + "\n".join(left)
