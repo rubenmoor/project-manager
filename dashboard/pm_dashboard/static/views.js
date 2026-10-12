@@ -208,20 +208,23 @@ function RunsTable({ d, runs, showTask = false }) {
       ${showTask ? html`<td><a href=${`#/task/${r.task_id}`}>${d.task.get(r.task_id).subject}</a></td>` : null}
       <td class="num">${stamp(r.started_at)}</td>
       <td class="r"><${Elapsed} start=${r.started_at} end=${r.ended_at} /></td>
-      <td><${Pill} status=${r.result} />${r.reason ? html`<div class="muted" style="font-size:12px;max-width:360px" title=${r.reason}>${r.reason.split("\n")[0].slice(0, 120)}</div>` : null}</td>
+      <td><${Pill} status=${r.result} />${r.reason ? html`<div class="muted reason" style="font-size:12px;max-width:520px" title=${r.reason}>${reasonText(r)}</div>` : null}</td>
       <td class="r num">${r.turns ?? ""}</td><td class="r num">${tokens(d.tokens(r))}</td><td class="r num">${usd(r.cost_usd)}</td>
       <td class="muted">${r.model || ""}</td><td class="mono muted">${r.base_commit ? r.base_commit.slice(0, 7) : ""}</td></tr>`)}</tbody></table></div>`;
 }
 
-export function Log({ d, t, live, full = false }) {
+// A failed run's reason is pm's summary: show it whole; others: the first line.
+export const reasonText = (r) => r.result === "failed" ? r.reason : r.reason.split("\n")[0].slice(0, 200);
+
+export function Log({ d, t, live, full = false, run = null }) {
   const [lines, setLines] = useState(null);
   const next = useRef(0);
   const box = useRef(null);
   const size = live && d.state.__log && d.state.__log.task === t.id ? d.state.__log.size : null;
-  useEffect(() => { next.current = 0; setLines(null); }, [t.id]);
+  useEffect(() => { next.current = 0; setLines(null); }, [t.id, run]);
   useEffect(() => {
     let gone = false;
-    fetch(`/api/log/${t.id}?from=${next.current}`).then((r) => r.json()).then((j) => {
+    fetch(`/api/log/${t.id}?from=${next.current}${run != null ? `&run=${run}` : ""}`).then((r) => r.json()).then((j) => {
       if (gone) return;
       const stick = box.current && box.current.scrollHeight - box.current.scrollTop - box.current.clientHeight < 40;
       if (j.next < next.current) return;
@@ -230,7 +233,7 @@ export function Log({ d, t, live, full = false }) {
       if (stick || !box.current) requestAnimationFrame(() => box.current && (box.current.scrollTop = box.current.scrollHeight));
     });
     return () => { gone = true; };
-  }, [t.id, size]);
+  }, [t.id, size, run]);
   if (lines === null) return html`<div class="empty">Loading the log…</div>`;
   if (!lines.length) return html`<div class="empty">No log for this task.</div>`;
   return html`<div class=${"log" + (full ? " full" : "")} ref=${box}>${lines.map((l) => html`<div class=${l.startsWith("  → ") ? "tool" : /^\[\w+: \d+ turns/.test(l) ? "res" : ""}>${l || " "}</div>`)}</div>`;

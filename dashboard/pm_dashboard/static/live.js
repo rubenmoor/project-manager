@@ -71,12 +71,15 @@ function Detail({ d, t, running }) {
       ${qi >= 0 ? html`<span>· ${qi === 0 ? "next in the queue" : `#${qi + 1} in the queue`}</span>` : null}</div></div>`;
   const body = html`<div class="card live-body"><${Markdown} text=${t.body} /></div>`;
   if (running) return html`${head}${body}<${Log} d=${d} t=${t} live full />`;
+  const fail = last && last.result === "failed" ? last : null;
   if (t.status === "open") return html`${head}<div class="live-detail">
+    ${fail ? html`<div class="banner error"><b>Run ${fail.id} failed</b> <span class="muted">${stamp(fail.ended_at)}</span><pre>${fail.reason || ""}</pre></div>` : null}
     ${why ? html`<div class="banner warn">${typeof why === "string" ? `Not queued: ${why}.` : html`Waits for ${why.map((x, i) => html`${i ? ", " : ""}<a href=${`#/decision/${x.id}`}>decision ${x.id}: ${x.subject}</a>`)}.`}</div>` : null}
     ${body}
     ${decs.length ? html`<h3>Decisions</h3><ul class="plain">${decs.map((x) => html`<li><${Pill} status=${x.status} /> <a href=${`#/decision/${x.id}`}>${x.subject}</a></li>`)}</ul>` : null}
     <div class="muted" style="margin-top:10px">created ${stamp(t.created_at)}${t.created_by_task != null ? html` by <a href=${`#/task/${t.created_by_task}`}>task ${t.created_by_task}</a>` : ""}</div>
     <${Runs} d=${d} runs=${runs} />
+    ${fail ? html`<h3>Output of the failed run</h3><${Log} d=${d} t=${t} live=${false} run=${fail.id} />` : null}
   </div>`;
   const total = runs.reduce((s, r) => s + seconds(r.started_at, r.ended_at), 0);
   return html`${head}<div class="live-detail">
@@ -97,6 +100,8 @@ export function Live({ d }) {
   const queue = d.queue.filter((id) => !current || id !== current.id).map((id) => d.task.get(id)).reverse();
   const retired = d.tasks.filter((t) => t.retired_at).sort((a, b) => (a.retired_at < b.retired_at ? 1 : a.retired_at > b.retired_at ? -1 : b.id - a.id));
   const lastRun = [...d.runs].filter((x) => x.ended_at).sort((a, b) => (a.ended_at < b.ended_at ? 1 : -1))[0];
+  const failedLast = (t) => { const e = d.taskRuns(t).filter((x) => x.ended_at).pop(); return e && e.result === "failed"; };
+  const stopped = !r && lastRun && lastRun.result === "failed" ? lastRun : null;
   const [picked, setPicked] = useState(null);
   const sel = picked != null && d.task.get(picked) ? picked : current ? current.id : lastRun ? lastRun.task_id : null;
   const order = [...queue.map((t) => t.id), ...(current ? [current.id] : []), ...retired.map((t) => t.id)];
@@ -132,12 +137,14 @@ export function Live({ d }) {
       <div ref=${top}>${queue.length ? html`<div class="tl-label">queue, next nearest</div>` : null}
         ${queue.map((t, i) => html`<${Item} id=${t.id} sel=${sel} select=${setPicked}>
           <span class="tl-pos num">${queue.length - i === 1 ? "next" : `#${queue.length - i}`}</span>
-          <span class="tl-subject">${t.subject} <${Kind} kind=${t.kind} /></span><${Prio} p=${d.prio(t)} /></${Item}>`)}</div>
+          <span class="tl-subject">${t.subject} <${Kind} kind=${t.kind} />${failedLast(t) ? html` <${Pill} status="failed" />` : null}</span><${Prio} p=${d.prio(t)} /></${Item}>`)}</div>
       <div class="tl-current" ref=${card}>
         ${current ? html`<${Item} id=${current.id} sel=${sel} select=${setPicked} cls="now">
             <div class="grow"><div class="row"><${Pill} status="running" /><span class="sub">task ${current.id} · <${Elapsed} start=${r.started_at} /></span></div>
             <div class="tl-current-subject">${current.subject} <${Kind} kind=${current.kind} /></div>
             <div class="muted">${d.plan.get(current.plan_id).subject} · ${d.milestoneOfTask(current).subject}</div></div></${Item}>`
+          : stopped ? html`<div class="tl-idle"><div class="sub"><code>pm run</code> stopped: <a href=${`#/task/${stopped.task_id}`} onClick=${(e) => { e.preventDefault(); setPicked(stopped.task_id); }}>task ${stopped.task_id} failed</a>.</div>
+            <div class="muted">${(stopped.reason || "").split("\n").find((l) => l.startsWith("likely cause: ")) || (stopped.reason || "").split("\n")[0]}</div></div>`
           : html`<div class="tl-idle"><div class="sub">No worker is running${d.queue.length ? html`: start them with <code>pm run</code> in the project's terminal` : ""}.</div>
             <div class="muted">${d.queue.length ? "The next task is just above." : "The queue is empty."}</div></div>`}
       </div>

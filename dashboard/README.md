@@ -15,7 +15,8 @@ In the project's git repository (the one with `project-manager.toml`):
 
 - **Live** (home while pm runs): left, one timeline: queue above (next nearest), the running task between two rules, done and dropped tasks below (newest first); a click (or `j`/`k`) selects a task (outline); right, the selected task, with a link to its page:
   - running: its output, live
-  - open: queue position or what blocks it, body, decisions, earlier runs
+  - open: queue position or what blocks it, body, decisions, earlier runs; after a failed run: pm's summary and the run's output
+  - failed last run: a red "failed" pill in the queue; with no worker running, "pm run stopped: task N failed" and the likely cause
   - done or dropped: note, runs, files changed, the output of its last run
 - **Overview**: running task, decisions waiting on you, cost, open milestones with progress, queue head; without milestones a welcome screen with one button
 - **Queue**: as `pm run` sees it; open tasks it leaves out and why
@@ -44,7 +45,7 @@ Text is edited in place, through pm's own methods; each change is a commit (`pm:
 - Reads the working copy of `tasks.sql` (a running worker's changes included) through `pm.Project.connect()`
 - Polls `tasks.sql`, `.git/HEAD`, `.git/index`, `.git/logs/HEAD` every 0.5 s; pushes changes over server-sent events; the browser refetches the snapshot
 - The running task: the `run` row with result `running` that `pm run` keeps while a worker works
-- Worker log: `.git/pm-logs/task-<id>.log`, shown as `pm run` shows it (`pm.Project.read_event`); `pm run` flushes it per line
+- Worker log: `.git/pm-logs/task-<id>-run-<run>.log` (`task-<id>.log`: the latest), shown as `pm run` shows it (`pm.Project.read_event`); `pm run` flushes it per line
 - A task's commit: the one `pm run` made, `task <id>: <subject>`
 - Unreadable `tasks.sql` (mid-merge, hand edit): the error, plus the last state that could be read
 - Security: binds 127.0.0.1; checks Host (and Origin for writes); writes need a JSON body; CSP without inline scripts; HTML in Markdown is shown as text

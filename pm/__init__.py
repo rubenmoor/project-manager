@@ -14,13 +14,15 @@ Works on the git repository around the current directory. `pm init` writes the s
 template is the file of that name next to this one), and commits it; the first command that uses the database
 writes it. pm commits its own changes to tasks.sql; workers commit them with their work. Nothing is pushed.
 """
-import argparse, contextlib, datetime, fcntl, json, os, re, sqlite3, subprocess, sys, time, tomllib, zoneinfo
+import argparse, collections, contextlib, datetime, fcntl, json, os, re, shlex, signal, sqlite3, subprocess, sys, \
+    time, tomllib, zoneinfo
 from pathlib import Path
 
 
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
+GUARD = Path(__file__).parent / "guard.py"
 EPILOG = "Agents (LLMs): read `pm instructions` first, the full reference with examples for every command."
 PROMPT_KEYS = ("masterplan_prompt", "plan_tasks_prompt", "cleanup_prompt")
 PRIORITY_KEYS = ("plan_priority_prompt", "task_priority_prompt")
@@ -151,6 +153,9 @@ Milestones, plans, tasks and decisions are in {db}; change them only with these 
   pm show <task id>
 Every command with examples, and recipes for the usual tasks: `pm instructions`.
 
+Stop processes you started by PID (`kill $!`), never with `pkill -f` or `killall`: the pattern can match your own \
+process.
+
 Finish with `pm task done {id} "<YYYY-MM-DD, files>"` or `pm task drop {id} "<reason>"`. Stage (`git add`) the \
 changes meant to stay in the project and delete temporary files you created. Don't commit or push: pm commits what \
 is staged, together with {db}, as "task {id}: <subject>". If task {id} itself needs an answer first, make it pending \
@@ -227,6 +232,21 @@ def duration(secs):
 
 
 
+def exit_signal(code):
+    """The signal that ended a process with this exit code (negative: Popen's; 129-159: a shell's 128 + n), or None."""
+    n = -code if code is not None and code < 0 else code - 128 if code is not None and 128 < code < 160 else None
+    try:
+        return signal.Signals(n) if n else None
+    except ValueError:
+        return None
+
+
+def exit_text(code):
+    """"killed by SIGTERM (exit 143)", "exit 1"."""
+    sig = exit_signal(code)
+    return f"killed by {sig.name} (exit {code})" if sig else f"exit {code}"
+
+
 def init(root, out=sys.stdout):
     """`pm init`: write project-manager.toml (the defaults) if missing and commit it. The database is created by
     the first command that uses it."""
@@ -260,8 +280,8 @@ def load_config(root):
     if not isinstance(config["database"], str) or not config["database"].strip():
         errors.append("database must be a file name")
     w = config["worker"]
-    if not isinstance(w, list) or not w or not all(isinstance(a, str) for a in w) or not any("{prompt}" in a for a in w):
-        errors.append('worker must be a list of strings, one of them containing "{prompt}"')
+    if not isinstance(w, list) or not w or not all(isinstance(a, str) for a in w):
+        errors.append("worker must be a non-empty list of strings")
     m = config["limit_margin_minutes"]
     if not isinstance(m, int) or isinstance(m, bool) or m < 0:
         errors.append("limit_margin_minutes must be an integer >= 0")
@@ -789,31 +809,68 @@ class Project:
         return [text for k in PRIORITY_KEYS if (text := self.prompt(k))]
 
     def worker_command(self, tid):
+        """(command, prompt): the prompt goes to the worker's stdin; None if the command holds it ("{prompt}")."""
         show = "\n".join([self.show(tid), *self.priority_prompts()]).rstrip() + "\n"
         prompt = WORKER_PROMPT.format(id=tid, db=self.db, show=show)
-        return [a.replace("{prompt}", prompt) for a in self.config["worker"]]
+        hook = {"type": "command", "command": shlex.join([sys.executable, str(GUARD)])}
+        settings = json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [hook]}]}})
+        w = self.config["worker"]
+        cmd = [a.replace("{prompt}", prompt).replace("{settings}", settings) for a in w]
+        return cmd, None if any("{prompt}" in a for a in w) else prompt
+
+    def worker_warnings(self):
+        w = self.config["worker"]
+        out = []
+        if any("{prompt}" in a for a in w):
+            out.append('the worker command holds the prompt ("{prompt}"), so `pkill -f <word in the task>` matches the '
+                       'worker itself; drop "{prompt}" and pm passes the prompt on stdin')
+        if Path(w[0]).name == "claude" and not any("{settings}" in a for a in w):
+            out.append('add "--settings", "{settings}" to the worker command: a hook that blocks `pkill -f` and '
+                       '`killall`')
+        return [f"pm: {CONFIG_FILE}: {x} (see `worker` in pm's template, pm/{CONFIG_FILE})" for x in out]
 
     @property
     def logs(self):
         """log_dir; relative: inside the git dir, so never tracked."""
         return Path(self.git("rev-parse", "--absolute-git-dir").strip()) / self.config["log_dir"]
 
-    def run_worker(self, cmd, log, tid):
-        """Run the worker, writing its output to the log and a readable form of it to the terminal. Returns the exit
-        code and what its JSON output (`--output-format stream-json`) says about the run: model, tokens, cost."""
+    def run_worker(self, cmd, prompt, log, tid, info):
+        """Run the worker in its own session, writing its output to the log and a readable form of it to the
+        terminal. Returns the exit code; `info` gets what its JSON output (`--output-format stream-json`) says about
+        the run (model, tokens, cost, the last tool call) and the last lines shown. Interrupted (Ctrl-C, SIGTERM,
+        SIGHUP): the worker's process group gets SIGTERM."""
         log.parent.mkdir(parents=True, exist_ok=True)
-        info = {}
-        with open(log, "w", encoding="utf-8") as f:
-            with subprocess.Popen(cmd, cwd=self.root, env=os.environ | {"PM_WORKER": "1", "PM_TASK": str(tid)},
-                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1) as proc:
-                for line in proc.stdout:
-                    f.write(line)
-                    f.flush()                   # read live by pm-dashboard
-                    shown = self.read_event(line, info)
-                    if shown is not None:
-                        self.out.write(shown)
-                        self.out.flush()
-                return proc.wait(), info
+        info["shown"] = shown_lines = collections.deque(maxlen=15)
+        def stop(sig, _):
+            raise KeyboardInterrupt(signal.Signals(sig).name)
+        old = {sig: signal.signal(sig, stop) for sig in (signal.SIGTERM, signal.SIGHUP)}
+        try:
+            with open(log, "w", encoding="utf-8") as f, subprocess.Popen(
+                    cmd, cwd=self.root, env=os.environ | {"PM_WORKER": "1", "PM_TASK": str(tid)},
+                    stdin=subprocess.DEVNULL if prompt is None else subprocess.PIPE, stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True) as proc:
+                try:
+                    if prompt is not None:
+                        with contextlib.suppress(BrokenPipeError):
+                            proc.stdin.write(prompt)
+                        with contextlib.suppress(BrokenPipeError):
+                            proc.stdin.close()
+                    for line in proc.stdout:
+                        f.write(line)
+                        f.flush()                   # read live by pm-dashboard
+                        shown = self.read_event(line, info)
+                        if shown is not None:
+                            shown_lines.extend(shown.rstrip("\n").split("\n"))
+                            self.out.write(shown)
+                            self.out.flush()
+                    return proc.wait()
+                except BaseException:
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
+                        os.killpg(proc.pid, signal.SIGTERM)
+                    raise
+        finally:
+            for sig, handler in old.items():
+                signal.signal(sig, handler)
 
     @staticmethod
     def read_event(line, info):
@@ -832,10 +889,14 @@ class Project:
             for c in (e.get("message") or {}).get("content") or []:
                 if c.get("type") == "text" and c.get("text", "").strip():
                     out.append(c["text"].strip())
+                    info["last_text"] = c["text"].strip()
                 elif c.get("type") == "tool_use":
                     i = c.get("input") or {}
                     arg = i.get("command") or i.get("file_path") or i.get("pattern") or json.dumps(i)[:100]
-                    out.append(f"  → {c.get('name')}: {str(arg).splitlines()[0][:150] if arg else ''}")
+                    first = str(arg).splitlines()[0] if str(arg).strip() else ""
+                    out.append(f"  → {c.get('name')}: {first[:150]}")
+                    info["last_tool"] = f"{c.get('name')}: {first[:300]}"
+                    info["last_arg"] = str(arg)[:4000]
             return "".join(o + "\n" for o in out) or None
         elif e.get("type") == "result":
             u = e.get("usage") or {}
@@ -899,34 +960,34 @@ class Project:
     def work(self, tid):
         """Run the worker for a task until no usage limit stops it; record each run and commit the task.
         Returns ("done" | "blocked" | "failed", message)."""
-        cmd, log = self.worker_command(tid), self.logs / f"task-{tid}.log"
+        cmd, prompt = self.worker_command(tid)
         before = self.planning_snapshot()
         while True:
-            self.say(f"\n== task {tid} (log: {log})")
-            rid = self.start_run(tid)
+            started, rid = now(), self.start_run(tid)
+            log = self.run_log(tid, rid)
+            self.say(f"\n== task {tid}, run {rid} (log: {log})")
+            info = {}
             try:
-                code, info = self.run_worker(cmd, log, tid)
-            except KeyboardInterrupt:
-                self.record_run(rid, None, {}, "failed", "interrupted")
-                self.failed(tid, "interrupted")
+                code = self.run_worker(cmd, prompt, log, tid, info)
+            except KeyboardInterrupt as e:
+                self.failed(tid, rid, f"interrupted ({e.args[0] if e.args else 'Ctrl-C'})", None, info, started, log)
                 raise
             limit = self.limit_line(log, info)
             if not limit:
                 break
-            self.record_run(rid, code, info, "limit", limit.strip())
             reset = limit_reset(limit)
             if reset is None:
-                return self.failed(tid, f"usage limit without a readable reset time: {limit}")
+                return self.failed(tid, rid, f"usage limit without a readable reset time: {limit.strip()}", code, info,
+                                   started, log)
+            self.record_run(rid, code, info, "limit", limit.strip())
             margin = datetime.timedelta(minutes=self.config["limit_margin_minutes"])
             until = max(reset + margin, datetime.datetime.now(reset.tzinfo) + margin)
             self.say(f"Usage limit ({limit.strip()}). Waiting until {until:%Y-%m-%d %H:%M %Z}, then the same task again.")
             self.wait_until(until)
-        tail = "\n".join(log.read_text(encoding="utf-8", errors="replace").splitlines()[-30:])
         if errors := self.validate():
             return "failed", "the database is no longer valid, the run is not recorded:\n  " + "\n  ".join(errors)
         if code != 0:
-            self.record_run(rid, code, info, "failed", f"exit {code}")
-            return self.failed(tid, f"exit {code}\n{tail}")
+            return self.failed(tid, rid, exit_text(code), code, info, started, log)
         with self.connect() as db:
             t = self.get(db, "task", tid)
             blocked = [str(r[0]) for r in db.execute(
@@ -937,8 +998,8 @@ class Project:
         elif blocked:
             result = "blocked", "waits for decision(s) " + ", ".join(blocked)
         else:
-            self.record_run(rid, code, info, "failed", "still open and not blocked")
-            return self.failed(tid, f"exit 0, but task {tid} is still open and not blocked\n{tail}")
+            return self.failed(tid, rid, "exit 0, but the task is still open and not blocked", code, info, started, log,
+                               cause=f"the worker ended without `pm task done|drop {tid}` or a pending decision")
         problem = None
         if left := [l for l in self.git("status", "--porcelain").splitlines() if l[1] != " " and l[3:] != self.db]:
             problem = "the worker left changes that are not staged:\n" + "\n".join(left)
@@ -949,15 +1010,71 @@ class Project:
             self.commit_task(tid, t["subject"], result[1])
         except subprocess.CalledProcessError as e:
             return "failed", f"git commit failed:\n{(e.stdout or '') + (e.stderr or '')}".rstrip()
+        if problem and (stash := self.stash_leftovers(f"pm: task {tid} run {rid} left")):
+            problem += "\n" + stash
         return ("failed", f"committed task {tid}; {problem}") if problem else result
 
-    def failed(self, tid, message):
-        """A failed run: commit the database alone (the recorded run), leave the rest to the human."""
+    def run_log(self, tid, rid):
+        """The run's log, task-<id>-run-<run>.log; task-<id>.log links to the task's latest."""
+        log = self.logs / f"task-{tid}-run-{rid}.log"
+        latest, tmp = self.logs / f"task-{tid}.log", self.logs / f".task-{tid}.log.tmp"
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with contextlib.suppress(OSError):
+            tmp.unlink(missing_ok=True)
+            tmp.symlink_to(log.name)
+            os.replace(tmp, latest)
+        return log
+
+    def failed(self, tid, rid, what, code=None, info=None, started=None, log=None, cause=None):
+        """A failed run: stash what the worker left (the database aside), record the run with a summary of what
+        happened, commit the database alone. Returns ("failed", the summary and the last lines shown)."""
+        info = info or {}
+        head = [what]
+        if started:
+            head.append(f"after {duration(seconds(started, None))}")
+        if info.get("turns") is not None:
+            head.append(f"{info['turns']} turns")
+        if info.get("model") and "result" not in info:
+            head.append("no result")
+        lines = [", ".join(head)]
+        if info.get("last_tool"):
+            lines.append(f"last tool call: {info['last_tool']}")
+        if cause is None and exit_signal(code):
+            cause = ("the worker's own kill command matched its process"
+                     if re.search(r"\b(pkill|killall|kill)\b", info.get("last_arg") or "")
+                     else "killed from outside (out of memory, Ctrl-C, another process)")
+        if cause:
+            lines.append(f"likely cause: {cause}")
+        if stash := self.stash_leftovers(f"pm: task {tid} run {rid} failed"):
+            lines.append(stash)
+        if log:
+            lines.append(f"log: {log}")
+        summary = "\n".join(lines)
+        self.record_run(rid, code, info, "failed", summary)
         try:
             self.git("commit", "-q", "-m", f"pm: task {tid} failed", "--", self.db)
         except subprocess.CalledProcessError as e:
-            message += f"\ncommitting {self.db} failed: {e.stderr.strip()}"
-        return "failed", message
+            summary += f"\ncommitting {self.db} failed: {e.stderr.strip()}"
+        if shown := info.get("shown"):
+            summary += "\nlast output:\n" + "\n".join("  " + l for l in shown)
+        elif log and log.exists():
+            summary += "\nlast lines of the log:\n" + "\n".join(
+                "  " + l[:300] for l in log.read_text(encoding="utf-8", errors="replace").splitlines()[-15:])
+        return "failed", summary
+
+    def stash_leftovers(self, message):
+        """Stash the working tree's changes, the database aside, so the next `pm run` starts clean. Returns a line
+        saying what was stashed and how to get it back, or None if nothing was left."""
+        files = [l[3:] for l in self.git("status", "--porcelain").splitlines() if l[3:] != self.db]
+        if not files:
+            return None
+        n = f"{len(files)} file{'s' if len(files) > 1 else ''}"
+        try:
+            self.git("stash", "push", "-q", "--include-untracked", "-m", message, "--", ".", f":(exclude){self.db}")
+            sha = self.git("rev-parse", "--short", "stash@{0}").strip()
+        except subprocess.CalledProcessError as e:
+            return f"left behind: {n}, stashing failed: {e.stderr.strip()}"
+        return f"left behind: {n}, stashed as {sha} ({message}); get them back with `git stash apply {sha}`"
 
     def planning_snapshot(self):
         """The plans: to tell whether a plan-writing task changed them."""
@@ -988,6 +1105,8 @@ class Project:
             self.commit_db(", ".join(done))
 
     def run(self, once=False, dry_run=False):
+        for w in self.worker_warnings():
+            self.say(w)
         while True:
             errors = self.validate()
             if errors:
@@ -1000,7 +1119,8 @@ class Project:
                 elif level := self.needs_signoff(q[0][1]):
                     self.say(f"task {q[0][1]} needs a sign-off ({level}); `pm run` would request it")
                 else:
-                    self.say(" ".join(f"'{a}'" if " " in a else a for a in self.worker_command(q[0][1])))
+                    cmd, prompt = self.worker_command(q[0][1])
+                    self.say(shlex.join(cmd) + ("" if prompt is None else f"\n\nstdin:\n{prompt}"))
                 return 0
             self.close_stale_run()
             self.close_and_commit()
@@ -1018,7 +1138,7 @@ class Project:
                 self.commit_db(f"sign-off requested: decision {did}")
                 continue
             if self.dirty():
-                self.say("The working tree has uncommitted changes; commit or stash them first.")
+                self.say(self.dirty_message())
                 return 1
             tid = q[0][1]
             result, message = self.work(tid)
@@ -1029,6 +1149,16 @@ class Project:
             self.close_and_commit()
             if once:
                 return 0
+
+    def dirty_message(self):
+        files = self.git("status", "--porcelain").splitlines()
+        out = [f"The working tree has {len(files)} uncommitted change(s); commit or stash them first:"]
+        out += ["  " + l for l in files[:10]] + ([f"  … and {len(files) - 10} more"] if len(files) > 10 else [])
+        last = (self.rows("SELECT * FROM run WHERE ended_at IS NOT NULL ORDER BY id DESC LIMIT 1") or [None])[0]
+        if last and last["result"] == "failed":
+            out.append(f"The last run, {last['id']} of task {last['task_id']}, failed; they may be its leftovers.")
+        out += ["  keep them aside:  git stash push --include-untracked", "  drop them:        git restore -SW . && git clean -fd"]
+        return "\n".join(out)
 
     # --- status ------------------------------------------------------------------------------
 

@@ -305,6 +305,7 @@ select.small { width: auto; }
 .outcome .note { margin-top: 6px; }
 table.compact td { padding: 3px 8px; border-bottom: 1px solid var(--grid); font-size: 13px; }
 table.compact td.reason { font-size: 12px; }
+.reason { white-space: pre-wrap; overflow-wrap: anywhere; }
 table.compact tr:hover { background: none; }
 details > summary { cursor: pointer; margin: 14px 0 6px; }
 .log.full { flex: 1; max-height: none; }

@@ -5,7 +5,7 @@ package, but it imports it, so both read the database the same way. Standard lib
 
 Serves the browser client (static/) and a JSON API on 127.0.0.1:
     /api/state           every table, the queue, git HEAD and changed files; or {"error": …}
-    /api/log/<task>      the task's worker log as readable lines, from byte ?from=N on
+    /api/log/<task>      the task's latest worker log (?run=R: run R's) as readable lines, from byte ?from=N on
     /api/events          server-sent events: "state" when tasks.sql or git changes, "log" when the running log grows
     /api/since?commit=C  rows changed between commit C and the working copy
     /api/task/<id>/commit  the commit pm made for the task, with its patch
@@ -115,9 +115,12 @@ def git_head(project):
         return None
 
 
-def read_log(project, tid, start=0):
-    """The worker log of task tid from byte `start`, as pm shows it in the terminal: (lines, end offset)."""
+def read_log(project, tid, start=0, rid=None):
+    """The worker log of task tid (its latest run, or run rid) from byte `start`, as pm shows it in the terminal:
+    (lines, end offset). Logs from before per-run logs: task-<id>.log is a file, not a link."""
     path = project.logs / f"task-{tid}.log"
+    if rid is not None and (project.logs / f"task-{tid}-run-{rid}.log").exists():
+        path = project.logs / f"task-{tid}-run-{rid}.log"
     if not path.exists():
         return [], 0
     with open(path, "rb") as f:
@@ -198,9 +201,10 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/log/"):
             try:
                 tid, start = int(path.rsplit("/", 1)[1]), int(query.get("from", ["0"])[0])
+                rid = int(query["run"][0]) if "run" in query else None
             except ValueError:
-                return self.send(400, {"error": "bad task id or offset"})
-            lines, end = read_log(w.project, tid, start)
+                return self.send(400, {"error": "bad task id, offset or run"})
+            lines, end = read_log(w.project, tid, start, rid)
             return self.send(200, {"task": tid, "lines": lines, "next": end})
         if path == "/api/events":
             return self.events()
