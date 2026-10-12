@@ -131,6 +131,7 @@ function App() {
   const View = { added: MilestoneAdded, live: Live, since: (p) => html`<${Since} since=${since.since} mark=${since.mark} state=${p.d.state} />`, overview: Overview, queue: Queue, milestones: Milestones, milestone: Milestone, plan: Plan, task: Task,
     decisions: Decisions, decision: Decision, runs: Runs }[r.page];
   const root = state ? state.root.split("/").pop() : "";
+  useEffect(() => { document.title = root ? `${root} - PM Dashboard` : "PM Dashboard"; }, [root]);
   return html`<div class="app">
     <header class="top">
       <span class="conn ${online ? "" : "off"}" title=${online ? "live" : "disconnected from pm-dashboard"}></span>
