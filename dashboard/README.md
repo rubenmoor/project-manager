@@ -25,6 +25,7 @@ In the project's git repository (the one with `project-manager.toml`):
 - **Decisions**: pending sign-offs and questions by milestone, the ones holding up the most important work first; closed ones
 - **Since you looked**: rows changed since the commit you marked as seen (uncommitted ones included): decisions answered, plan bodies as diffs, new and closed tasks, runs
 - **Runs**: cost per day, per task kind, per milestone; every run
+- Status line (bottom): Claude account usage of the 5-hour window and the week (%, reset time), tokens and cost of pm's workers in each window
 - Notifications (`notify` in the top bar): a new pending decision, a failed run, `pm run` stopped or done
 - Keys: `g` then `l o q m d s r` to go; `/` search (a number finds that id); `i` edit; Esc save
 
@@ -46,14 +47,15 @@ Text is edited in place, through pm's own methods; each change is a commit (`pm:
 - Polls `tasks.sql`, `.git/HEAD`, `.git/index`, `.git/logs/HEAD` every 0.5 s; pushes changes over server-sent events; the browser refetches the snapshot
 - The running task: the `run` row with result `running` that `pm run` keeps while a worker works
 - Worker log: `.git/pm-logs/task-<id>-run-<run>.log` (`task-<id>.log`: the latest), shown as `pm run` shows it (`pm.Project.read_event`); `pm run` flushes it per line
+- Usage limits: the newest `rate_limit_event` in the worker logs (claude's stream-json); as of the last worker's API call, so stale between runs; usage outside pm counts in the % but not in the token totals
 - A task's commit: the one `pm run` made, `task <id>: <subject>`
 - Unreadable `tasks.sql` (mid-merge, hand edit): the error, plus the last state that could be read
 - Security: binds 127.0.0.1; checks Host (and Origin for writes); writes need a JSON body; CSP without inline scripts; HTML in Markdown is shown as text
 
 ## Code
 
-- `pm_dashboard/__init__.py`: server, watcher, JSON API (`/api/state`, `/api/log/<task>?from=N`, `/api/events`, `/api/since?commit=C`, `/api/task/<id>/commit`, `POST /api/edit`)
+- `pm_dashboard/__init__.py`: server, watcher, JSON API (`/api/state`, `/api/log/<task>?from=N`, `/api/events`, `/api/since?commit=C`, `/api/task/<id>/commit`, `/api/usage`, `POST /api/edit`)
 - `pm_dashboard/edit.py`: writes and the run rules; history from git
-- `pm_dashboard/static/`: `app.js` (shell, routing, live state), `views.js` (pages), `live.js` (run view), `editor.js` (in-place editing), `add.js` (forms, welcome), `since.js`, `diff.js`, `notify.js`, `ui.js` (components, charts), `data.js` (indexes, what pm derives)
+- `pm_dashboard/static/`: `app.js` (shell, routing, live state), `views.js` (pages), `live.js` (run view), `editor.js` (in-place editing), `add.js` (forms, welcome), `since.js`, `diff.js`, `notify.js`, `usage.js`, `ui.js` (components, charts), `data.js` (indexes, what pm derives)
 - `pm_dashboard/static/vendor/`: Preact + htm 3.1.1, marked 12.0.2, diff2html 3.4.48 (slim, with highlight.js), CodeMirror 6 bundled from `vendor-src/codemirror.js`:
   `npm i esbuild codemirror@6.0.1 @codemirror/lang-markdown@6.2.5 && npx esbuild vendor-src/codemirror.js --bundle --format=esm --minify --outfile=…/vendor/codemirror.js`

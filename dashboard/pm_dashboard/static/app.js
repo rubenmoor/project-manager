@@ -6,6 +6,7 @@ import { Live } from "/live.js";
 import { MilestoneAdded } from "/add.js";
 import { Since, useSince, sinceCount } from "/since.js";
 import { useNotifications, NotifyButton } from "/notify.js";
+import { UsageLine } from "/usage.js";
 
 function route() {
   const [path, query] = location.hash.replace(/^#/, "").split("?");
@@ -154,6 +155,7 @@ function App() {
       ${!state ? html`<div class="empty">Loading…</div>` : d && View ? html`<${View} d=${d} id=${r.id} query=${r.query} />`
         : d ? html`<div class="empty">No such page.</div>` : null}
     </main>
+    <${UsageLine} d=${d} version=${shown} />
   </div>`;
 }
 

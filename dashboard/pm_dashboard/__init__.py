@@ -9,9 +9,10 @@ Serves the browser client (static/) and a JSON API on 127.0.0.1:
     /api/events          server-sent events: "state" when tasks.sql or git changes, "log" when the running log grows
     /api/since?commit=C  rows changed between commit C and the working copy
     /api/task/<id>/commit  the commit pm made for the task, with its patch
+    /api/usage           the account's usage limits, from the newest rate_limit_event in the worker logs
     POST /api/edit       {"op": …}: add or change milestones, plans, tasks through pm (edit.py)
 """
-import argparse, json, mimetypes, os, subprocess, sys, threading, time
+import argparse, datetime, json, mimetypes, os, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -104,6 +105,36 @@ def read_state(project, last_good=None):
     except pm.FormatError as e:
         return base | {"error": str(e), "last_good": last_good}
     return base | {"tables": tables, "queue": queue, "head_signoff": head_signoff, "errors": errors}
+
+
+def usage(project):
+    """The last rate_limit_event claude's stream-json wrote to a worker log: how much of the 5-hour and the weekly
+    limit the account had used then. Only `pm run` workers write logs, so it is as of their last API call."""
+    try:
+        logs = {f.resolve() for f in project.logs.glob("task-*.log")}
+    except OSError:
+        return {"event": None}
+    week = time.time() - 8 * 86400
+    for f in sorted((f for f in logs if f.is_file()), key=lambda f: f.stat().st_mtime, reverse=True):
+        st = f.stat()
+        if st.st_mtime < week:
+            break
+        with open(f, "rb") as fh:
+            fh.seek(max(0, st.st_size - (1 << 20)))
+            tail = fh.read().decode("utf-8", "replace").splitlines()
+        for line in reversed(tail):
+            if '"rate_limit_event"' not in line:
+                continue
+            try:
+                info = json.loads(line)["rate_limit_info"]
+            except (ValueError, KeyError, TypeError):
+                continue
+            windows = info.get("unifiedWindows") or {}
+            if not windows and info.get("rateLimitType"):
+                windows = {info["rateLimitType"]: {"utilization": info.get("utilization"), "resetsAt": info.get("resetsAt")}}
+            return {"event": {"status": info.get("status"), "windows": windows, "overage": info.get("isUsingOverage"),
+                              "at": datetime.datetime.fromtimestamp(st.st_mtime, datetime.UTC).isoformat()}}
+    return {"event": None}
 
 
 def git_head(project):
@@ -206,6 +237,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(400, {"error": "bad task id, offset or run"})
             lines, end = read_log(w.project, tid, start, rid)
             return self.send(200, {"task": tid, "lines": lines, "next": end})
+        if path == "/api/usage":
+            return self.send(200, usage(w.project))
         if path == "/api/events":
             return self.events()
         if path == "/":

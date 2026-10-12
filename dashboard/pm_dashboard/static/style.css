@@ -82,7 +82,7 @@ h3 { font-size: 14px; margin: 16px 0 6px; font-weight: 600; }
 .num { font-variant-numeric: tabular-nums; }
 
 /* layout */
-.app { display: grid; grid-template-columns: 200px 1fr; grid-template-rows: auto 1fr; min-height: 100vh; }
+.app { display: grid; grid-template-columns: 200px 1fr; grid-template-rows: auto 1fr auto; min-height: 100vh; }
 .top { grid-column: 1 / -1; display: flex; gap: 16px; align-items: center; padding: 8px 16px;
        background: var(--surface); border-bottom: 1px solid var(--border); position: sticky; top: 0; z-index: 5; }
 .brand { font-weight: 600; white-space: nowrap; }
@@ -277,7 +277,7 @@ select.small { width: auto; }
 
 /* live */
 .main.full { max-width: none; padding: 0; }
-.live { display: grid; grid-template-columns: minmax(320px, 42%) 1fr; height: calc(100vh - 49px); }
+.live { display: grid; grid-template-columns: minmax(320px, 42%) 1fr; height: calc(100vh - 49px - 29px); }
 .tl { overflow-y: auto; border-right: 1px solid var(--border); padding: 0 16px; }
 .tl-label { color: var(--muted); font-size: 12px; padding: 10px 4px 4px; }
 .tl-item { display: flex; gap: 10px; align-items: center; padding: 7px 10px; border-radius: 6px; color: var(--ink); }
@@ -363,3 +363,11 @@ ins { color: var(--good-text); text-decoration: none; }
 .cmd { display: flex; align-items: center; gap: 10px; margin: 10px 0 8px; padding: 10px 14px; border-radius: 8px;
   background: var(--code); }
 .cmd code { font-size: 15px; flex: 1; }
+
+.usage { grid-column: 1 / -1; position: sticky; bottom: 0; z-index: 5; display: flex; flex-wrap: wrap; gap: 4px 18px; align-items: center;
+  padding: 5px 16px; height: 29px; box-sizing: border-box; font-size: 12px; border-top: 1px solid var(--border); background: var(--surface); }
+.usage-win { display: inline-flex; gap: 6px; align-items: center; white-space: nowrap; }
+.usage .meter { display: inline-block; width: 60px; height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; }
+.usage .meter > span { display: block; height: 100%; background: var(--accent); }
+.usage .meter.warn > span { background: var(--warning); }
+.usage .meter.bad > span { background: var(--critical); }
