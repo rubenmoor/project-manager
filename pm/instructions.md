@@ -13,7 +13,7 @@
 
 ## Model
 
-- **Milestone:** subject, body (Markdown), status `open` | `on-hold` | `implemented`, created date. `pm milestone add` also creates its first plan, the **masterplan** (body "tbd."), and the task "write the masterplan". Once a milestone has no open task, `pm run` queues the task "post-milestone cleanup" in its first plan (body: `cleanup_prompt` in project-manager.toml); when that is closed too, the milestone becomes `implemented`. Changing its subject or body queues "revise the masterplan" in the masterplan, unless a masterplan task is open; refused once the milestone is implemented or every plan of it is done: add a new milestone. On hold (`pm milestone hold`): its plans and tasks stay out of the queue until `pm milestone resume`; a running task finishes. Only the human adds or changes milestones: `pm milestone add|set|hold|resume` is refused in a worker (`PM_TASK` set).
+- **Milestone:** subject, body (Markdown), status `open` | `on-hold` | `implemented`, queue index (default 0; its tasks are queued lowest index first, before priority), created date. `pm milestone add` also creates its first plan, the **masterplan** (body "tbd."), and the task "write the masterplan". Once a milestone has no open task, `pm run` queues the task "post-milestone cleanup" in its first plan (body: `cleanup_prompt` in project-manager.toml); when that is closed too, the milestone becomes `implemented`. Changing its subject or body queues "revise the masterplan" in the masterplan, unless a masterplan task is open; refused once the milestone is implemented or every plan of it is done: add a new milestone. On hold (`pm milestone hold`): its plans and tasks stay out of the queue until `pm milestone resume`; a running task finishes. Only the human adds or changes milestones: `pm milestone add|set|hold|resume` is refused in a worker (`PM_TASK` set).
 - **Plan:** belongs to a milestone; subject, body (required), priority (optional; the masterplan: `planning_priority`, 1000). Adding a plan, or changing its subject or body, queues the task "create tasks for plan N" (priority `planning_priority`, 1000), unless one is waiting (a running one doesn't count: it may have read the old text). The same holds for the revision tasks below.
 - **Plan tree:** a plan's parent is the plan of the task that wrote it (same milestone), else the masterplan. Changing a plan's subject or body also queues "revise plan M" in each child plan that isn't done (an open one gets the new parent text).
 - **Done plan:** has tasks, none open, and every child plan is done; the masterplan is done when every plan of its milestone is. A done plan can't be changed and takes no new tasks: add a new plan. A closed (done or dropped) task can't be changed.
@@ -33,7 +33,7 @@
   - cite a decision in code, prompts and docs as `decision 32: <subject>`; `pm show d32` finds it
 - **Sign-off:** a decision pm makes, per `signoff` in project-manager.toml, before a plan is split into tasks or before work tasks run; its only answer is approve. Shown as `Decision 4 (answered, sign-off): …`. Not for agents to create or answer.
 - **Recorded by pm, not set by you:** `created_at` everywhere, `retired_at` of tasks, `implemented_at`, `closed_at`; `created_by_task` (your task, when you create a plan, task or decision as a worker); one **run** per worker run, with result, time, tokens and cost.
-- **Queue:** open tasks of open milestones that no pending decision blocks; highest priority first, then by milestone, plan and task id. `pm run` takes the first one.
+- **Queue:** open tasks of open milestones that no pending decision blocks; by the milestone's queue index (lowest first), then highest priority first, then by milestone, plan and task id. `pm run` takes the first one.
 
 ## Inspect
 
@@ -42,7 +42,7 @@ pm status        # open and on-hold milestones, the first 10 queued tasks, pendi
 pm queue         # the whole queue
 pm show 7        # task 7 with its plan, its milestone, the plan's other tasks, its decisions and runs
 pm show d32      # decision 32 (also `decision 32`); p3: plan 3, m1: milestone 1
-pm milestone list    # every milestone: id, status, closed/all tasks, subject
+pm milestone list    # every milestone: id, queue index, status, closed/all tasks, subject
 pm milestone show 1  # milestone 1: body, plans with their open tasks (same as `pm show m1`)
 pm runs          # worker runs: start, duration, result, turns, tokens, cost; totals per task kind
 pm validate      # check tasks.sql; exit 1 with the problems
@@ -60,12 +60,12 @@ Queue (3):
 `pm milestone list` (or `pm milestones list`), implemented ones included:
 
 ```
-  id  status       tasks    subject
-   1  implemented  12/12    CSV export
-   2  open         3/8      Import from CSV
+  id  queue  status       tasks    subject
+   1      0  implemented  12/12    CSV export
+   2      0  open         3/8      Import from CSV
 ```
 
-`pm plans list` (or `pm plan list`): plans with open tasks in open milestones, one per line, highest priority first:
+`pm plans list` (or `pm plan list`): plans with open tasks in open milestones, one per line, by the milestone's queue index, then highest priority first:
 
 ```
   id   prio  subject
@@ -257,7 +257,7 @@ Agents don't start `pm run`: a worker is already one task of a run.
 
 ## Priorities
 
-- Higher runs first; a task without its own priority gets its plan's; planning tasks (`plan`, `masterplan`, `split`) get 1000.
+- Within the same milestone queue index, higher runs first (a lower queue index runs before any priority); a task without its own priority gets its plan's; planning tasks (`plan`, `masterplan`, `split`) get 1000.
 - Rules for choosing them: `plan_priority_prompt` and `task_priority_prompt` in project-manager.toml, printed at the end of `pm instructions`.
 - `pm run` appends both to every worker prompt.
 

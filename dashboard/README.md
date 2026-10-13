@@ -20,8 +20,8 @@ In the project's git repository (the one with `project-manager.toml`):
   - done or dropped: note, runs, files changed, the output of its last run
 - **Overview**: running task, decisions waiting on you, cost, open and on-hold milestones with progress, queue head; without milestones a welcome screen with one button
 - **Queue**: as `pm run` sees it; open tasks it leaves out and why
-- **Milestones**: cards with progress and the number of pending decisions its open tasks wait for, linked to exactly those (`#/decisions?milestone=N`)
-- **Milestone**, **plans**: plans by priority with their tasks; filters by status and kind; put a milestone on hold or resume it (its plans and open tasks show "on hold")
+- **Milestones**: cards by queue index, with progress and the number of pending decisions its open tasks wait for, linked to exactly those (`#/decisions?milestone=N`)
+- **Milestone**, **plans**: plans by priority with their tasks; filters by status and kind; change a milestone's queue index; put a milestone on hold or resume it (its plans and open tasks show "on hold")
 - **Task**: body, note, priority, decisions, rows it created, runs, the diff of its commit (syntax highlighted), worker log
 - **Decisions**: pending sign-offs and questions by milestone, the ones holding up the most important work first; closed ones: the decision log (as `pm decision list --answered`) or all; tags for one-offs, workers' own choices, superseded ones; a decision's page shows consequences and supersede links
 - **Since you looked**: rows changed since the commit you marked as seen (uncommitted ones included): decisions answered, choices workers recorded without asking, plan bodies as diffs, new and closed tasks, runs

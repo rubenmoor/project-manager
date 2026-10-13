@@ -46,7 +46,8 @@ def apply(project, op):
         return f"milestone {mid} added: {subject.strip()}", mid
     if kind == "milestone_edit":
         project.milestone_set(int(op["id"]), subject=text(op.get("subject"), "the subject", False),
-                              body=text(op.get("body"), "the body", False) if "body" in op else None)
+                              body=text(op.get("body"), "the body", False) if "body" in op else None,
+                              queue_index=(prio(op["queue_index"]) or 0) if "queue_index" in op else None)
         return f"milestone {op['id']} changed", None
     if kind == "milestone_hold":
         mid, hold = int(op["id"]), op.get("hold")

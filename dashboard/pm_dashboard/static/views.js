@@ -42,7 +42,7 @@ function RunningCard({ d }) {
 
 export function Overview({ d }) {
   if (!d.milestones.length) return html`<${Welcome} />`;
-  const open = d.milestones.filter((m) => m.status !== "implemented");
+  const open = d.milestones.filter((m) => m.status !== "implemented").sort((a, b) => a.queue_index - b.queue_index || a.id - b.id);
   const pending = d.decisions.filter((x) => x.status === "pending");
   const finished = d.runs.filter((r) => r.result !== "running");
   const today = day(new Date().toISOString());
@@ -87,7 +87,7 @@ function MilestoneCard({ d, m }) {
     <div class="row" style="justify-content:space-between"><a href=${`#/milestone/${m.id}`}><b><${Named} kind="milestone" r=${m} /></b></a>
       <${Pill} status=${m.status} /></div>
     <${Progress} ...${counts(tasks)} />
-    <div class="sub" style="margin-top:6px">${plans.length} plans · ${runs.length} runs · ${usd(d.cost(runs))} · created <${Time} ts=${m.created_at} /></div>
+    <div class="sub" style="margin-top:6px"><span title="queue index: tasks of lower ones are worked first">queue ${m.queue_index}</span> · ${plans.length} plans · ${runs.length} runs · ${usd(d.cost(runs))} · created <${Time} ts=${m.created_at} /></div>
     ${m.status !== "implemented" ? (() => {
       const n = d.milestoneDecisions(m).length;
       return html`<div class="sub" style="margin-top:4px">${n ? html`<a class="tag signoff" href=${`#/decisions?milestone=${m.id}`}
@@ -114,7 +114,7 @@ export function Queue({ d }) {
   const out = d.tasks.filter((t) => t.status === "open" && !d.queuePos.has(t.id));
   return html`<h1>Queue</h1>
     <div class="sub">What <code>pm run</code> works next: open tasks of open milestones that no pending decision blocks,
-      highest priority first, then milestone, plan and task.</div>
+      by the milestone's queue index (lowest first), then highest priority first, then milestone, plan and task.</div>
     <${Banners} d=${d} />
     <h2>${d.queue.length} workable</h2>
     <${QueueTable} d=${d} ids=${d.queue} />
@@ -130,7 +130,7 @@ export function Queue({ d }) {
 
 export function Milestones({ d }) {
   const order = { open: 0, "on-hold": 1, implemented: 2 };
-  const ms = [...d.milestones].sort((a, b) => order[a.status] - order[b.status] || a.id - b.id);
+  const ms = [...d.milestones].sort((a, b) => order[a.status] - order[b.status] || a.queue_index - b.queue_index || a.id - b.id);
   if (!ms.length) return html`<${Welcome} />`;
   return html`<h1>Milestones</h1>
     <div class="cards" style="margin-top:12px">${ms.map((m) => html`<${MilestoneCard} d=${d} m=${m} />`)}</div>
@@ -168,7 +168,9 @@ export function Milestone({ d, id }) {
     && (kind === "all" || t.kind === kind));
   return html`<div class="crumbs"><a href="#/milestones">Milestones</a></div>
     <${Titled} kind="milestone" id=${m.id}><${EditableLine} text=${m.subject} save=${mDone ? null : saveMilestone(m.id, "subject")} /></${Titled}>
-    <div class="row sub"><${Pill} status=${m.status} /><span>created ${stamp(m.created_at)}</span>
+    <div class="row sub"><${Pill} status=${m.status} /><span title="tasks of lower queue indexes are worked first">queue index
+      <${PrioEdit} what="queue index" value=${m.queue_index} effective=${0} from="" save=${m.status === "implemented" ? null : saveMilestone(m.id, "queue_index")} /></span>
+      <span>created ${stamp(m.created_at)}</span>
       ${m.implemented_at ? html`<span>· implemented ${stamp(m.implemented_at)}</span>` : null}
       ${m.status !== "implemented" ? html`<${HoldButton} m=${m} />` : null}</div>
     ${d.held(m) ? html`<div class="hold-note">On hold: its plans and tasks stay out of the queue until it is resumed.</div>` : null}

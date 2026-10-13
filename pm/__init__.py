@@ -6,7 +6,8 @@ changed milestone queues the revision of its masterplan, a changed plan that of 
 tasks; implemented milestones, done plans and closed tasks can't be changed; a milestone whose tasks are all closed
 gets a last one, the post-milestone cleanup, before it is implemented; a milestone on hold keeps its tasks out of
 the queue until it is resumed. The queue (the `queue` view): open tasks of
-open milestones that no pending decision blocks, highest priority first, then by milestone, plan and task.
+open milestones that no pending decision blocks, by the milestone's queue index (lowest first), then highest priority
+first, then by milestone, plan and task.
 Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
 
     pm init | status | queue | show <task|d32|p3|m1> | validate | decide | run [--once] [--dry-run] | instructions
@@ -23,7 +24,7 @@ import argparse, collections, contextlib, datetime, fcntl, json, os, re, shlex, 
 from pathlib import Path
 
 
-VERSION = 11  # bump by one with every commit (AGENTS.md)
+VERSION = 12  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -48,12 +49,12 @@ PLANNING_KINDS = ("plan", "masterplan", "split")
 SIGNOFF_LEVELS = {"masterplans": "masterplan", "plans": "plan", "task-queue": "task-queue"}
 SIGNOFF_ANSWER = "approve"
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 # A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
 # run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
 # Columns and tables SCHEMA dropped are left behind, new ones get their defaults; so only renames, moved data and new
 # columns without a default need a step, else "".
-MIGRATIONS = {12: ""}
+MIGRATIONS = {12: "", 13: ""}
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -63,6 +64,7 @@ CREATE TABLE milestone (
     body           TEXT NOT NULL DEFAULT '',               -- Markdown
     created_at     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     implemented_at TEXT,
+    queue_index    INTEGER NOT NULL DEFAULT 0,             -- its tasks are queued lowest index first, then by priority
     CONSTRAINT "implemented_at is set exactly when implemented" CHECK ((status = 'implemented') = (implemented_at IS NOT NULL))
 ) STRICT;
 
@@ -167,7 +169,7 @@ JOIN milestone m ON m.id = p.milestone_id
 WHERE m.status = 'open' AND t.status = 'open'
   AND NOT EXISTS (SELECT 1 FROM task_decision td JOIN decision d ON d.id = td.decision_id
                   WHERE td.task_id = t.id AND d.status = 'pending')
-ORDER BY priority DESC, m.id, p.id, t.id;
+ORDER BY m.queue_index, priority DESC, m.id, p.id, t.id;
 """
 
 WORKER_PROMPT = """You are the worker for task {id}. Follow the project's own instructions for agents (AGENTS.md, \
@@ -186,7 +188,7 @@ plan already lists.
 Milestones, plans, tasks and decisions are in {db}; change them only with these commands (a text value - reads stdin):
   pm plan add <milestone id> "<subject>" < body.md     a task to split it into tasks is queued
   pm plan edit <plan id> [--subject …] [--body …] [--priority N]
-  pm plans list     plans with open tasks, highest priority first
+  pm plans list     plans with open tasks, by milestone queue index, then highest priority first
   pm milestone list     every milestone; pm milestone show <milestone id>
   pm task add <plan id> "<subject>" [--kind plan] [--priority N] < body.md     --kind plan: the task writes a plan
   pm task set <task id> [--subject …] [--body …] [--priority N]     an open task that isn't running
@@ -889,12 +891,12 @@ class Project:
             text = text.replace("{" + k + "}", str(v))
         return text.strip()
 
-    def milestone_add(self, subject, body=""):
+    def milestone_add(self, subject, body="", queue_index=0):
         """A new milestone with its first plan, the masterplan (a stub), and the task that writes it."""
         human_only("add or change milestones (raise a decision instead: pm decision add)")
         with self.connect(write=True) as db:
-            mid = db.execute("INSERT INTO milestone (subject, body) VALUES (?, ?)",
-                             (subject, (body or "").strip())).lastrowid
+            mid = db.execute("INSERT INTO milestone (subject, body, queue_index) VALUES (?, ?, ?)",
+                             (subject, (body or "").strip(), queue_index or 0)).lastrowid
             pid = db.execute("INSERT INTO plan (milestone_id, subject, priority, body, created_by_task) "
                              "VALUES (?, 'masterplan', ?, 'tbd.', ?)",
                              (mid, self.config["planning_priority"], creator())).lastrowid
@@ -905,7 +907,7 @@ class Project:
         return mid
 
     def milestone_set(self, mid, **fields):
-        """Set fields of a milestone (subject, status, body); None leaves a field as it is. A changed subject or body
+        """Set fields of a milestone (subject, status, body, queue_index); None leaves a field as it is. A changed subject or body
         queues the revision of the masterplan; refused once the milestone is implemented or every plan of it is done.
         Returns the queued tasks: [(id, subject)]."""
         human_only("add or change milestones (raise a decision instead: pm decision add)")
@@ -924,7 +926,7 @@ class Project:
                     db.execute("UPDATE milestone SET status = ?, implemented_at = CASE WHEN ? = 'implemented' "
                                "THEN coalesce(implemented_at, ?) END WHERE id = ?", (v, v, now(), mid))
                 elif v is not None:
-                    db.execute(f"UPDATE milestone SET {k} = ? WHERE id = ?", (v.strip(), mid))
+                    db.execute(f"UPDATE milestone SET {k} = ? WHERE id = ?", (v.strip() if isinstance(v, str) else v, mid))
             return [q for q in [self.queue_revision(db, master)] if q] if changed and master else []
 
     # --- plan tree ---------------------------------------------------------------------------
@@ -1093,20 +1095,21 @@ class Project:
                                "LEFT JOIN task t ON t.plan_id = p.id WHERE p.milestone_id = ? GROUP BY p.id ORDER BY p.id",
                                (mid,)).fetchall()
         implemented = f", implemented {stamp(m['implemented_at'])}" if m["implemented_at"] else ""
-        out = [f"# Milestone {mid}: {m['subject']} ({m['status']}, created {stamp(m['created_at'])}{implemented})", "",
+        out = [f"# Milestone {mid}: {m['subject']} ({m['status']}, queue index {m['queue_index']}, created {stamp(m['created_at'])}{implemented})", "",
                m["body"], ""]
         out += [f"- plan {x['id']}: {x['subject']} ({x['open'] or 0} of {x['n']} task(s) open)" for x in plans]
         return "\n".join(out).rstrip() + "\n"
 
     def milestones(self):
-        """`pm milestone list`: every milestone, one per line: id, status, closed/all tasks, subject."""
-        rows = self.rows("SELECT m.id, m.status, m.subject, count(t.id) AS n, coalesce(sum(t.status <> 'open'), 0) AS closed "
+        """`pm milestone list`: every milestone, one per line: id, queue index, status, closed/all tasks, subject;
+        by queue index."""
+        rows = self.rows("SELECT m.id, m.queue_index, m.status, m.subject, count(t.id) AS n, coalesce(sum(t.status <> 'open'), 0) AS closed "
                          "FROM milestone m LEFT JOIN plan p ON p.milestone_id = m.id LEFT JOIN task t ON t.plan_id = p.id "
-                         "GROUP BY m.id ORDER BY m.id")
+                         "GROUP BY m.id ORDER BY m.queue_index, m.id")
         if not rows:
             return "No milestones (`pm milestone add` starts one).\n"
-        return "\n".join(["  id  status       tasks    subject"] + [
-            f"{m['id']:4d}  {m['status']:<11}  {str(m['closed']) + '/' + str(m['n']):<7}  {m['subject']}"
+        return "\n".join(["  id  queue  status       tasks    subject"] + [
+            f"{m['id']:4d}  {m['queue_index']:5d}  {m['status']:<11}  {str(m['closed']) + '/' + str(m['n']):<7}  {m['subject']}"
             for m in rows]) + "\n"
 
     def show(self, tid):
@@ -1169,12 +1172,13 @@ class Project:
     # --- run ---------------------------------------------------------------------------------
 
     def plans(self):
-        """[(priority, plan id, subject)] of plans with an open task in an open milestone, highest priority first."""
+        """[(priority, plan id, subject)] of plans with an open task in an open milestone, by the milestone's queue
+        index, then highest priority first."""
         return [tuple(r.values()) for r in self.rows(
             "SELECT coalesce(p.priority, 0) AS priority, p.id, p.subject FROM plan p "
             "JOIN milestone m ON m.id = p.milestone_id WHERE m.status = 'open' "
             "AND EXISTS (SELECT 1 FROM task t WHERE t.plan_id = p.id AND t.status = 'open') "
-            "ORDER BY priority DESC, m.id, p.id")]
+            "ORDER BY m.queue_index, priority DESC, m.id, p.id")]
 
     def priority_prompts(self):
         return [text for k in PRIORITY_KEYS if (text := self.prompt(k))]
@@ -1620,7 +1624,7 @@ class Project:
             self.say(f"Running: task {r['task_id']} (run {r['id']}, pid {r['pid']}) since {stamp(r['started_at'])}, "
                      f"{duration(seconds(r['started_at'], None))}")
         for m in self.rows(
-                "SELECT m.id, m.subject, m.status, m.created_at, "
+                "SELECT m.id, m.subject, m.status, m.created_at, m.queue_index, "
                 "(SELECT count(*) FROM plan p WHERE p.milestone_id = m.id) AS plans, "
                 "(SELECT count(*) FROM task t JOIN plan p ON p.id = t.plan_id WHERE p.milestone_id = m.id) AS tasks, "
                 "(SELECT count(*) FROM task t JOIN plan p ON p.id = t.plan_id "
@@ -1631,9 +1635,9 @@ class Project:
                 "WHERE p.milestone_id = m.id AND r.result = 'failed') AS failed, "
                 "(SELECT total(r.cost_usd) FROM run r JOIN task t ON t.id = r.task_id JOIN plan p ON p.id = t.plan_id "
                 "WHERE p.milestone_id = m.id) AS cost "
-                "FROM milestone m WHERE m.status <> 'implemented' ORDER BY m.id"):
+                "FROM milestone m WHERE m.status <> 'implemented' ORDER BY m.queue_index, m.id"):
             held = ", on hold" if m["status"] == "on-hold" else ""
-            self.say(f"Milestone {m['id']}: {m['subject']} (created {stamp(m['created_at'])}{held}): {m['plans']} plan(s), "
+            self.say(f"Milestone {m['id']}: {m['subject']} (queue index {m['queue_index']}, created {stamp(m['created_at'])}{held}): {m['plans']} plan(s), "
                      f"{m['closed']}/{m['tasks']} tasks closed, {m['runs']} run(s) ({m['failed']} failed), "
                      f"${m['cost']:.2f}")
         self.print_queue(limit=10)
@@ -1720,15 +1724,17 @@ def main(argv=None):
     ma = ms.add_parser("add", help="new open milestone; prints its id. Without a subject: write it in your editor "
                        "(first line: subject, the rest: body); with a subject: the body is read from stdin")
     ma.add_argument("subject", nargs="?")
+    ma.add_argument("--queue", type=int, default=0, help="queue index: tasks of lower ones are worked first (default 0)")
     mset = ms.add_parser("set", help="set milestone fields; a new subject or body queues the revision of the masterplan")
     mset.add_argument("milestone", type=int)
     mset.add_argument("--subject")
     mset.add_argument("--status", choices=MILESTONE_STATES)
     mset.add_argument("--body", type=text_arg)
+    mset.add_argument("--queue", type=int, help="queue index: tasks of lower ones are worked first")
     for name, text in [("hold", "put a milestone on hold: its plans and tasks leave the queue; a running task finishes"),
                        ("resume", "resume a milestone on hold: its tasks are queued again")]:
         ms.add_parser(name, help=text).add_argument("milestone", type=int)
-    ms.add_parser("list", help="every milestone, one per line: id, status, closed/all tasks, subject")
+    ms.add_parser("list", help="every milestone, one per line: id, queue index, status, closed/all tasks, subject")
     ms.add_parser("show", help="one milestone: body, plans with their open tasks (also `pm show m1`)").add_argument(
         "milestone", type=int)
 
@@ -1744,8 +1750,8 @@ def main(argv=None):
     pe.add_argument("--subject")
     pe.add_argument("--body", type=text_arg)
     pe.add_argument("--priority", type=lambda v: v if v == "none" else int(v), help="integer, or none for 0")
-    p.add_parser("list", help="plans with open tasks in open milestones, one per line: priority, id, subject; highest "
-                  "priority first")
+    p.add_parser("list", help="plans with open tasks in open milestones, one per line: priority, id, subject; by the "
+                  "milestone's queue index, then highest priority first")
 
     t = sub.add_parser("task", help="add or change tasks").add_subparsers(dest="action", required=True)
     a = t.add_parser("add", help="new task; prints its id")
@@ -1866,7 +1872,7 @@ def main(argv=None):
                 if not (entry := pm.subject_and_body("milestone", args.subject)):
                     print("pm: aborted, no milestone added")
                     return 1
-                mid = pm.milestone_add(*entry)
+                mid = pm.milestone_add(*entry, args.queue)
                 print(mid)
                 msg = f"milestone {mid} added: {entry[0]}"
             elif args.action in ("hold", "resume"):
@@ -1877,7 +1883,7 @@ def main(argv=None):
                 msg = f"milestone {args.milestone} " + ("on hold" if args.action == "hold" else "resumed")
             else:
                 print_queued(pm.milestone_set(args.milestone, subject=args.subject, status=args.status,
-                                              body=args.body))
+                                              body=args.body, queue_index=args.queue))
                 msg = f"milestone {args.milestone} changed"
         elif args.cmd in ("plan", "plans"):
             if args.action == "list":
