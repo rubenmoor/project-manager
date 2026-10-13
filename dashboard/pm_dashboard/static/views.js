@@ -130,10 +130,14 @@ export function Queue({ d }) {
 
 export function Milestones({ d }) {
   const order = { open: 0, "on-hold": 1, implemented: 2 };
-  const ms = [...d.milestones].sort((a, b) => order[a.status] - order[b.status] || a.queue_index - b.queue_index || a.id - b.id);
+  const ms = [...d.milestones].sort((a, b) => a.queue_index - b.queue_index || order[a.status] - order[b.status] || a.id - b.id);
   if (!ms.length) return html`<${Welcome} />`;
+  const groups = new Map();
+  for (const m of ms) groups.set(m.queue_index, [...(groups.get(m.queue_index) || []), m]);
   return html`<h1>Milestones</h1>
-    <div class="cards" style="margin-top:12px">${ms.map((m) => html`<${MilestoneCard} d=${d} m=${m} />`)}</div>
+    <div class="sub">Grouped by queue index: tasks of a lower one are worked first.</div>
+    ${[...groups].map(([q, xs]) => html`<h2>Queue index ${q}</h2>
+      <div class="cards">${xs.map((m) => html`<${MilestoneCard} d=${d} m=${m} />`)}</div>`)}
     <div style="margin-top:16px"><${AddButton} kind="milestone" /></div>`;
 }
 
