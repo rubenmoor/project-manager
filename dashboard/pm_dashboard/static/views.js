@@ -212,7 +212,7 @@ export function Plan({ d, id }) {
     <div style="margin-top:12px"><${EditableBody} text=${p.body} save=${planSave(d, p.id, "body")} /></div>
     <div class="sub" style="margin-top:4px">${d.planDone.has(p.id)
       ? "Done: no open task, nor in the plans below it. It can't be changed; add a new plan instead."
-      : html`A new subject or body queues "create tasks for plan ${p.id}" again and the revision of the plans below it.`}</div>
+      : html`A new subject or body queues "create tasks for plan ${p.id}: ${p.subject}" again and the revision of the plans below it.`}</div>
     <h2>Tasks</h2>
     <div class="tablewrap">${tasks.length ? html`<${TaskRows} d=${d} tasks=${tasks} />` : html`<div class="empty" style="padding:10px 12px">No tasks yet.</div>`}</div>
     ${d.planDone.has(p.id) ? null : html`<div style="margin-top:12px"><${AddButton} kind="task" parent=${p.id} /></div>`}`;

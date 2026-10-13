@@ -13,15 +13,15 @@
 
 ## Model
 
-- **Milestone:** subject, body (Markdown), status `open` | `on-hold` | `implemented`, queue index (default 0; its tasks are queued lowest index first, before priority), created date. `pm milestone add` also creates its first plan, the **masterplan** (body "tbd."), and the task "write the masterplan". Once a milestone has no open task, `pm run` queues the task "post-milestone cleanup" in its first plan (body: `cleanup_prompt` in project-manager.toml); when that is closed too, the milestone becomes `implemented`. Changing its subject or body queues "revise the masterplan" in the masterplan, unless a masterplan task is open; refused once the milestone is implemented or every plan of it is done: add a new milestone. On hold (`pm milestone hold`): its plans and tasks stay out of the queue until `pm milestone resume`; a running task finishes. Only the human adds or changes milestones: `pm milestone add|set|hold|resume` is refused in a worker (`PM_TASK` set).
-- **Plan:** belongs to a milestone; subject, body (required), priority (optional; the masterplan: `planning_priority`, 1000). Adding a plan, or changing its subject or body, queues the task "create tasks for plan N" (priority `planning_priority`, 1000), unless one is waiting (a running one doesn't count: it may have read the old text). The same holds for the revision tasks below.
-- **Plan tree:** a plan's parent is the plan of the task that wrote it (same milestone), else the masterplan. Changing a plan's subject or body also queues "revise plan M" in each child plan that isn't done (an open one gets the new parent text).
+- **Milestone:** subject, body (Markdown), status `open` | `on-hold` | `implemented`, queue index (default 0; its tasks are queued lowest index first, before priority), created date. `pm milestone add` also creates its first plan, the **masterplan** (body "tbd."), and the task "write the masterplan of milestone N: …". Once a milestone has no open task, `pm run` queues the task "post-milestone cleanup of milestone N: …" in its first plan (body: `cleanup_prompt` in project-manager.toml); when that is closed too, the milestone becomes `implemented`. Changing its subject or body queues "revise the masterplan of milestone N: …" in the masterplan, unless a masterplan task is open; refused once the milestone is implemented or every plan of it is done: add a new milestone. On hold (`pm milestone hold`): its plans and tasks stay out of the queue until `pm milestone resume`; a running task finishes. Only the human adds or changes milestones: `pm milestone add|set|hold|resume` is refused in a worker (`PM_TASK` set).
+- **Plan:** belongs to a milestone; subject, body (required), priority (optional; the masterplan: `planning_priority`, 1000). Adding a plan, or changing its subject or body, queues the task "create tasks for plan N: …" (priority `planning_priority`, 1000), unless one is waiting (it gets the new subject and body; a running one doesn't count: it may have read the old text). The same holds for the revision tasks below.
+- **Plan tree:** a plan's parent is the plan of the task that wrote it (same milestone), else the masterplan. Changing a plan's subject or body also queues "revise plan M: …" in each child plan that isn't done (an open one gets the new parent text).
 - **Done plan:** has tasks, none open, and every child plan is done; the masterplan is done when every plan of its milestone is. A done plan can't be changed and takes no new tasks: add a new plan. A closed (done or dropped) task can't be changed.
 - **Task:** belongs to a plan; subject, body (required while open), kind, status `open` | `done` | `dropped`, note (done: date and files or commit; dropped: the reason), priority (optional; default: the plan's, else 0).
 - **Task kind:**
   - `work` (default): anything else
   - `plan`: writes a plan (`pm task add … --kind plan`)
-  - made by pm only: `masterplan` ("write the masterplan", "revise the masterplan"), `split` ("create tasks for plan N"), `cleanup` ("post-milestone cleanup"); "revise plan N" is a `plan` task
+  - made by pm only: `masterplan` ("write the masterplan of milestone N: …", "revise the masterplan of milestone N: …"), `split` ("create tasks for plan N: …"), `cleanup` ("post-milestone cleanup of milestone N: …"); "revise plan N: …" is a `plan` task
   - `plan`, `masterplan`, `split`: priority `planning_priority` (1000) unless given
   - checked by `pm run` when done: `plan` and `masterplan` must add or change a plan (except "revise …", which may leave it as it is), `split` must leave its plan with tasks; otherwise the task is committed and the run stops
 - **Decision:** subject (the question), body (context), options (the recommended one first), status `pending` | `answered` | `irrelevant`. A task linked to a pending decision waits. When the human answers, the task becomes workable again and its worker sees the answer in `pm show`. When a decision is marked irrelevant, the open tasks waiting for it are dropped.
@@ -31,6 +31,7 @@
   - consequences: what changed because of the answer, appended by the tasks that implement it
   - supersede links: a newer answer replaces an older one, wholly or partly (with a note)
   - cite a decision in code, prompts and docs as `decision 32: <subject>`; `pm show d32` finds it
+- **References:** refer to a milestone, plan, task or decision always by id and full subject, e.g. `plan 2: Backend endpoint`. Plain in a subject (`pm task add 2 "Fix the encoding of plan 2: Backend endpoint"`), in backticks in a body, note or decision text. pm's own tasks and sign-offs follow it; renaming a milestone, plan or task updates its references in open tasks that aren't running and in pending decisions.
 - **Sign-off:** a decision pm makes, per `signoff` in project-manager.toml, before a plan is split into tasks or before work tasks run; its only answer is approve. Shown as `Decision 4 (answered, sign-off): …`. Not for agents to create or answer.
 - **Recorded by pm, not set by you:** `created_at` everywhere, `retired_at` of tasks, `implemented_at`, `closed_at`; `created_by_task` (your task, when you create a plan, task or decision as a worker); one **run** per worker run, with result, time, tokens and cost.
 - **Queue:** open tasks of open milestones that no pending decision blocks; by the milestone's queue index (lowest first), then highest priority first, then by milestone, plan and task id. `pm run` takes the first one.
@@ -52,8 +53,8 @@ pm validate      # check tasks.sql; exit 1 with the problems
 
 ```
 Queue (3):
-   +1000  task 1: write the masterplan
-   +1000  task 3: create tasks for plan 2
+   +1000  task 1: write the masterplan of milestone 1: CSV export
+   +1000  task 3: create tasks for plan 2: Backend endpoint
     +700  task 4: stream one table as CSV
 ```
 
@@ -93,7 +94,7 @@ Users ask for their data outside the app; support exports it by hand today.
 ## Done when
 - Covered by tests, including an account with no data.
 EOF
-# prints the milestone id, e.g. 1; also creates plan "masterplan" and the task "write the masterplan"
+# prints the milestone id, e.g. 1; also creates plan "masterplan" and the task "write the masterplan of milestone 1: …"
 
 pm milestone set 1 --subject "CSV export"
 pm milestone set 1 --body - <<'EOF'
@@ -115,7 +116,7 @@ pm plan add 1 "Backend endpoint" <<'EOF'
 - Files: `app/api/export.py` (new), `app/api/routes.py`.
 - Columns named as in the API, not the database.
 EOF
-# prints the plan id, e.g. 2, and queues "create tasks for plan 2"
+# prints the plan id, e.g. 2, and queues "create tasks for plan 2: Backend endpoint"
 
 pm plan add 1 "UI button" --priority 400 <<'EOF'
 …
@@ -132,7 +133,7 @@ pm plan edit 2 --priority 910    # its tasks without their own priority move up
 pm plan edit 2 --priority none   # back to 0
 ```
 
-A new subject or body queues "create tasks for plan N" again, unless one is waiting, and "revise plan M" in each child plan that isn't done; it prints what it queued. A priority change queues nothing. A done plan refuses every edit.
+A new subject or body queues "create tasks for plan N: …" again, unless one is waiting (it gets the new subject), and "revise plan M: …" in each child plan that isn't done; it prints what it queued. A priority change queues nothing. A done plan refuses every edit.
 
 ## Tasks
 
@@ -263,15 +264,15 @@ Agents don't start `pm run`: a worker is already one task of a run.
 
 ## Recipes
 
-**Write the masterplan** (task "write the masterplan" of plan P): read the milestone (`pm show <task>`) and the code. Write the plan with `pm plan edit P --body -`, divided into parts, and state there that the masterplan's own tasks are not implementation work: each writes the plan for one part. That edit queues "create tasks for plan P". Finish with `pm task done`.
+**Write the masterplan** (task "write the masterplan of milestone M: …" in plan P): read the milestone (`pm show <task>`) and the code. Write the plan with `pm plan edit P --body -`, divided into parts, and state there that the masterplan's own tasks are not implementation work: each writes the plan for one part. That edit queues "create tasks for plan P: …". Finish with `pm task done`.
 
-**Revise a plan** (task "revise the masterplan" or "revise plan P"): the milestone or the parent plan (quoted in the task body) changed. If plan P no longer fits, rewrite it with `pm plan edit P --body -`; that queues "create tasks for plan P" and the revisions below it. If it still fits, change nothing. Then close your task.
+**Revise a plan** (task "revise the masterplan of milestone M: …" or "revise plan P: …"): the milestone or the parent plan (quoted in the task body) changed. If plan P no longer fits, rewrite it with `pm plan edit P --body -`; that queues "create tasks for plan P: …" and the revisions below it. If it still fits, change nothing. Then close your task.
 
-**Split a plan into tasks** (task "create tasks for plan P"): if P already has tasks, leave the done and dropped ones as they are, drop open ones that no longer fit (`pm task drop`), and add only what the plan asks beyond them. Add one `pm task add P "<subject>"` per task, in the order they should run; for the masterplan, its tasks write plans: `--kind plan`. Priorities: see "Priorities". Raise a decision for each question only the human can answer, and link the tasks that wait for it. Then `pm task done <your task> "<date>, tasks …"`.
+**Split a plan into tasks** (task "create tasks for plan P: …"): if P already has tasks, leave the done and dropped ones as they are, drop open ones that no longer fit (`pm task drop`), and add only what the plan asks beyond them. Add one `pm task add P "<subject>"` per task, in the order they should run; for the masterplan, its tasks write plans: `--kind plan`. Priorities: see "Priorities". Raise a decision for each question only the human can answer, and link the tasks that wait for it. Then `pm task done <your task> "<date>, tasks …"`.
 
 **Write a part's plan** (a task of the masterplan): `pm plan list` first, then `pm plan add <milestone> "<part subject>" --priority N` with the full body, N by "Priorities". That queues its "create tasks" task. Then close your task.
 
-**Post-milestone cleanup** (task "post-milestone cleanup"): work through its body for the whole project, not just this milestone. For another milestone that needs a change, or a pending decision that seems obsolete, say so in a new decision for the human. Then close your task.
+**Post-milestone cleanup** (task "post-milestone cleanup of milestone M: …"): work through its body for the whole project, not just this milestone. For another milestone that needs a change, or a pending decision that seems obsolete, say so in a new decision for the human. Then close your task.
 
 **Your task needs an answer first:** add the decision, `pm task-pending-decision <your task> <decision>`, stage what's done, stop. `pm run` reports the task as blocked and goes on with the next.
 

@@ -22,39 +22,44 @@ log_dir = "pm-logs"
 # Editor for `pm milestone add`. Empty: the editor git uses.
 editor = ""
 
+# In the prompts below, {milestone}, {plan} and {parent_plan} are replaced by the item's id and subject in backticks,
+# e.g. `plan 12: Export endpoint`; the *_id placeholders by the bare id.
+
 # The task `pm milestone add` queues in the milestone's first plan (body "tbd.").
-# {milestone_id}, {milestone_subject} and {plan_id} are replaced.
+# {milestone}, {plan}, {milestone_id}, {milestone_subject} and {plan_id} are replaced.
 masterplan_prompt = '''
-Write plan {plan_id}, the masterplan of this milestone: expand on everything that needs to be done to achieve it,
+Write {plan}, the masterplan of {milestone}: expand on everything that needs to be done to achieve it,
 divided into parts. State in the masterplan that its own tasks are not implementation work: each of them writes the
 plan for one part.
 '''
 
-# The task `pm plan add` and `pm plan edit` queue. {plan_id} and {plan_subject} are replaced.
+# The task `pm plan add` and `pm plan edit` queue. {plan}, {plan_id} and {plan_subject} are replaced.
 plan_tasks_prompt = '''
-Split plan {plan_id} into tasks and identify all decisions that need to be made. If the plan already has tasks, its
+Split {plan} into tasks and identify all decisions that need to be made. If the plan already has tasks, its
 done and dropped ones stay as they are (pm refuses to change them): drop the open ones that no longer fit and add
 tasks for what the plan asks beyond them. A task that writes a plan gets `--kind plan`.
 '''
 
 # The task a changed milestone queues in its masterplan (pm refuses the change once every plan of the milestone is
-# done). {plan_id} is replaced.
+# done). {milestone}, {plan} and {plan_id} are replaced.
 revise_masterplan_prompt = '''
-The milestone changed. Bring plan {plan_id}, the masterplan, in line with it (`pm plan edit {plan_id} --body -`), or
+{milestone} changed. Bring {plan}, the masterplan, in line with it (`pm plan edit {plan_id} --body -`), or
 leave it as it is if it still fits. An edit queues the revision of the plans below it and of its own open tasks.
 '''
 
 # The task a changed plan queues in each plan below it that isn't done (a plan is done when none of its tasks is open
-# and the plans below it are done). {plan_id} and {parent_plan_id} are replaced; the parent plan follows.
+# and the plans below it are done). {plan}, {parent_plan}, {plan_id} and {parent_plan_id} are replaced; the parent
+# plan follows.
 revise_plan_prompt = '''
-Plan {parent_plan_id}, the plan above plan {plan_id}, changed; it is quoted below. Bring plan {plan_id} in line with it
+{parent_plan}, the plan above {plan}, changed; it is quoted below. Bring {plan} in line with it
 (`pm plan edit {plan_id} --body -`), or leave it as it is if it still fits. An edit queues the revision of the plans
 below it and of its own open tasks; its done and dropped tasks stay as they are.
 '''
 
-# The task "post-milestone cleanup", queued in a milestone's first plan once all its other tasks are closed; the
-# milestone is implemented when it is closed too.
+# The task "post-milestone cleanup of milestone N: …", queued in a milestone's first plan once all its other tasks are
+# closed; the milestone is implemented when it is closed too. {milestone} is replaced.
 cleanup_prompt = '''
+After {milestone}, for the whole project:
 * rewrite top-level .md files to reflect the current state of the project
 * remove files that have become redundant
 * suggest entirely new files, if necessary
@@ -64,7 +69,7 @@ cleanup_prompt = '''
 '''
 
 # Priority of the planning work: the masterplan `pm milestone add` creates (its tasks write the plans) and every task
-# "create tasks for plan N". Above every other plan, so all plans and their tasks exist before implementation starts;
+# "create tasks for plan N: …". Above every other plan, so all plans and their tasks exist before implementation starts;
 # within one milestone queue index: a higher index waits, planning included.
 planning_priority = 1000
 

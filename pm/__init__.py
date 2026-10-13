@@ -24,7 +24,7 @@ import argparse, collections, contextlib, datetime, fcntl, json, os, re, shlex, 
 from pathlib import Path
 
 
-VERSION = 14  # bump by one with every commit (AGENTS.md)
+VERSION = 15  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -35,14 +35,16 @@ EPILOG = "Agents (LLMs): read `pm instructions` first, the full reference with e
 PROMPT_KEYS = ("masterplan_prompt", "plan_tasks_prompt", "revise_masterplan_prompt", "revise_plan_prompt",
                "cleanup_prompt")
 PRIORITY_KEYS = ("plan_priority_prompt", "task_priority_prompt")
-CLEANUP_SUBJECT = "post-milestone cleanup"
-PLAN_TASKS_SUBJECT = "create tasks for plan {}"
-REVISE_MASTERPLAN_SUBJECT = "revise the masterplan"
-REVISE_PLAN_SUBJECT = "revise plan {}"
+# Items are referred to by id and full subject, `ref()`: plain in a subject, in backticks in a body.
+CLEANUP_SUBJECT = "post-milestone cleanup of {}"
+PLAN_TASKS_SUBJECT = "create tasks for {}"
+WRITE_MASTERPLAN_SUBJECT = "write the masterplan of {}"
+REVISE_MASTERPLAN_SUBJECT = "revise the masterplan of {}"
+REVISE_PLAN_SUBJECT = "revise {}"
 # Dedupes queued planning tasks: a running one may have read the old text already, so it doesn't count.
 NOT_RUNNING = "AND id NOT IN (SELECT task_id FROM run WHERE result = 'running')"
 MILESTONE_STATES = ("open", "on-hold", "implemented")
-# work: the default; plan: writes a plan; masterplan, split ("create tasks for plan N"), cleanup: made by pm only
+# work: the default; plan: writes a plan; masterplan, split ("create tasks for plan N: …"), cleanup: made by pm only
 TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup")
 PLANNING_KINDS = ("plan", "masterplan", "split")
 # `signoff` in project-manager.toml → decision.signoff; a sign-off's only answer is SIGNOFF_ANSWER
@@ -180,6 +182,9 @@ Before you start, look up what the project decided about what task {id} touches 
 `pm decision list --answered --grep <word> [--grep <word> …]`. Those answers are binding, unless a newer one \
 supersedes them; follow them, and cite one where you rely on it, as `decision <id>: <subject>`.
 
+Refer to a milestone, plan, task or decision by id and full subject, `plan 12: <subject>`: plain in a subject, \
+in backticks in a body, a note or a decision's text.
+
 Work you find beyond task {id} (a bug, a missing test, a part the plan forgot, cleanup your change makes necessary) \
 is a follow-up task, not part of yours: `pm task add <plan id> "<subject>" < body.md`, in the plan it belongs to \
 (usually task {id}'s, above), with a body that lets another worker do it without your context; don't add one the \
@@ -257,6 +262,16 @@ class FormatError(Exception):
 
 def now():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def ref(kind, id, subject, md=False):
+    """An item as `<kind> <id>: <subject>`; md: in backticks, for a body."""
+    text = f"{kind} {id}: {subject}"
+    return f"`{text}`" if md else text
+
+
+def is_revise_plan(subject, pid):
+    return subject == f"revise plan {pid}" or subject.startswith(f"revise plan {pid}: ")
 
 
 def creator():
@@ -558,9 +573,12 @@ class Project:
                                   "WHERE p.milestone_id = ? AND t.kind = 'cleanup'", (mid,)).fetchone()
                 pid = db.execute("SELECT min(id) FROM plan WHERE milestone_id = ?", (mid,)).fetchone()[0]
                 if pid is not None and not done:
+                    m = self.get(db, "milestone", mid)
                     db.execute("INSERT INTO task (plan_id, subject, kind, body, created_by_task) "
-                               "VALUES (?, ?, 'cleanup', ?, ?)", (pid, CLEANUP_SUBJECT, self.prompt("cleanup_prompt"),
-                                                                 creator()))
+                               "VALUES (?, ?, 'cleanup', ?, ?)",
+                               (pid, CLEANUP_SUBJECT.format(ref("milestone", mid, m["subject"])),
+                                self.prompt("cleanup_prompt", milestone=ref("milestone", mid, m["subject"], True)),
+                                creator()))
                     cleanup.append(mid)
                 else:
                     db.execute("UPDATE milestone SET status = 'implemented', implemented_at = ? WHERE id = ?",
@@ -817,8 +835,9 @@ class Project:
             else:
                 p = self.get(db, "plan", t["plan_id"])
                 tids = [tid]
-                subject = (f"Sign off the masterplan of milestone {p['milestone_id']}" if level == "masterplan"
-                           else f"Sign off plan {p['id']}: {p['subject']}")
+                m = self.get(db, "milestone", p["milestone_id"])
+                subject = (f"Sign off the masterplan of {ref('milestone', m['id'], m['subject'])}"
+                           if level == "masterplan" else f"Sign off {ref('plan', p['id'], p['subject'])}")
             if did is None:
                 did = db.execute("INSERT INTO decision (subject, options, signoff) VALUES (?, ?, ?)",
                                  (subject, json.dumps([SIGNOFF_ANSWER]), level)).lastrowid
@@ -901,8 +920,11 @@ class Project:
                              "VALUES (?, 'masterplan', ?, 'tbd.', ?)",
                              (mid, self.config["planning_priority"], creator())).lastrowid
             db.execute("INSERT INTO task (plan_id, subject, kind, body, created_by_task) "
-                       "VALUES (?, 'write the masterplan', 'masterplan', ?, ?)",
-                       (pid, self.prompt("masterplan_prompt", milestone_id=mid, milestone_subject=subject, plan_id=pid),
+                       "VALUES (?, ?, 'masterplan', ?, ?)",
+                       (pid, WRITE_MASTERPLAN_SUBJECT.format(ref("milestone", mid, subject)),
+                        self.prompt("masterplan_prompt", milestone_id=mid, milestone_subject=subject, plan_id=pid,
+                                    milestone=ref("milestone", mid, subject, True),
+                                    plan=ref("plan", pid, "masterplan", True)),
                         creator()))
         return mid
 
@@ -927,10 +949,12 @@ class Project:
                                "THEN coalesce(implemented_at, ?) END WHERE id = ?", (v, v, now(), mid))
                 elif v is not None:
                     db.execute(f"UPDATE milestone SET {k} = ? WHERE id = ?", (v.strip() if isinstance(v, str) else v, mid))
+            if fields.get("subject") is not None:
+                self.rename_refs(db, "milestone", mid, m["subject"], fields["subject"].strip())
             return [q for q in [self.queue_revision(db, master)] if q] if changed and master else []
 
     # --- plan tree ---------------------------------------------------------------------------
-    # The masterplan is the plan with the task "write the masterplan". A plan's parent: the plan of the task that wrote
+    # The masterplan is the plan with the task "write the masterplan of …". A plan's parent: the plan of the task that wrote
     # it, if in the same milestone; else the masterplan. Done: has tasks, none open, and every child plan is done.
 
     @staticmethod
@@ -965,24 +989,42 @@ class Project:
             raise FormatError(f"plan {pid} is done (no open task, nor in the plans below it) and can't be changed; "
                               f"add a new plan instead: pm plan add {mid}")
 
+    @staticmethod
+    def rename_refs(db, kind, rid, old, new):
+        """A renamed item: its references in open tasks that aren't running and in pending decisions follow."""
+        old, new = ref(kind, rid, old), ref(kind, rid, new)
+        if old == new:
+            return
+        db.execute("UPDATE task SET subject = replace(subject, ?1, ?2), body = replace(body, ?1, ?2) "
+                   "WHERE status = 'open' " + NOT_RUNNING, (old, new))
+        db.execute("UPDATE decision SET subject = replace(subject, ?1, ?2), body = replace(body, ?1, ?2) "
+                   "WHERE status = 'pending'", (old, new))
+
     def queue_revision(self, db, pid, parent=None):
         """Queue the task that brings plan pid in line with its changed milestone (the masterplan) or parent plan,
         unless pid is done. A waiting one gets the new parent text. Returns (id, subject) of a new task, else None."""
         if self.plan_done(db, pid):
             return None
+        p = self.get(db, "plan", pid)
         if parent is None:
-            subject, body = REVISE_MASTERPLAN_SUBJECT, self.prompt("revise_masterplan_prompt", plan_id=pid)
+            m = self.get(db, "milestone", p["milestone_id"])
+            subject = REVISE_MASTERPLAN_SUBJECT.format(ref("milestone", m["id"], m["subject"]))
+            body = self.prompt("revise_masterplan_prompt", plan_id=pid, plan=ref("plan", pid, p["subject"], True),
+                               milestone=ref("milestone", m["id"], m["subject"], True))
             if db.execute("SELECT 1 FROM task WHERE plan_id = ? AND kind = 'masterplan' AND status = 'open' "
                           + NOT_RUNNING, (pid,)).fetchone():
                 return None
         else:
             q = self.get(db, "plan", parent)
-            subject = REVISE_PLAN_SUBJECT.format(pid)
-            body = (self.prompt("revise_plan_prompt", plan_id=pid, parent_plan_id=parent)
+            subject = REVISE_PLAN_SUBJECT.format(ref("plan", pid, p["subject"]))
+            body = (self.prompt("revise_plan_prompt", plan_id=pid, parent_plan_id=parent,
+                                plan=ref("plan", pid, p["subject"], True),
+                                parent_plan=ref("plan", parent, q["subject"], True))
                     + f"\n\n# Plan {parent}: {q['subject']}\n\n{q['body']}")
-            if old := db.execute("SELECT id FROM task WHERE plan_id = ? AND subject = ? AND status = 'open' "
-                                 + NOT_RUNNING, (pid, subject)).fetchone():
-                db.execute("UPDATE task SET body = ? WHERE id = ?", (body, old[0]))
+            if old := [r for r in db.execute("SELECT id, subject FROM task WHERE plan_id = ? AND kind = 'plan' "
+                                             "AND status = 'open' " + NOT_RUNNING, (pid,)).fetchall()
+                       if is_revise_plan(r[1], pid)]:
+                db.execute("UPDATE task SET subject = ?, body = ? WHERE id = ?", (subject, body, old[0][0]))
                 return None
         tid = db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task) "
                          "VALUES (?, ?, ?, ?, ?, ?)", (pid, subject, "plan" if parent else "masterplan",
@@ -992,15 +1034,16 @@ class Project:
     def queue_plan_tasks(self, db, pid):
         """Queue the task that splits plan pid into tasks, unless one is waiting. Returns (id, subject) or None."""
         p = self.get(db, "plan", pid)
-        if db.execute("SELECT 1 FROM task WHERE plan_id = ? AND kind = 'split' AND status = 'open' " + NOT_RUNNING,
-                      (pid,)).fetchone():
+        subject = PLAN_TASKS_SUBJECT.format(ref("plan", pid, p["subject"]))
+        body = self.prompt("plan_tasks_prompt", plan_id=pid, plan_subject=p["subject"],
+                           plan=ref("plan", pid, p["subject"], True))
+        if old := db.execute("SELECT id FROM task WHERE plan_id = ? AND kind = 'split' AND status = 'open' "
+                             + NOT_RUNNING, (pid,)).fetchone():
+            db.execute("UPDATE task SET subject = ?, body = ? WHERE id = ?", (subject, body, old[0]))
             return None
-        subject = PLAN_TASKS_SUBJECT.format(pid)
         return db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task) "
                           "VALUES (?, ?, 'split', ?, ?, ?)",
-                          (pid, subject, self.config["planning_priority"],
-                           self.prompt("plan_tasks_prompt", plan_id=pid, plan_subject=p["subject"]), creator())
-                          ).lastrowid, subject
+                          (pid, subject, self.config["planning_priority"], body, creator())).lastrowid, subject
 
     def plan_add(self, mid, subject, body, prio=None):
         with self.connect(write=True) as db:
@@ -1023,6 +1066,8 @@ class Project:
                 if v is not None and v.strip() != p[k]:
                     db.execute(f"UPDATE plan SET {k} = ? WHERE id = ?", (v.strip(), pid))
                     changed = True
+            if subject is not None:
+                self.rename_refs(db, "plan", pid, p["subject"], subject.strip())
             if not changed:
                 return []
             queued = [self.queue_plan_tasks(db, pid)] + [self.queue_revision(db, c, pid) for c in self.child_plans(db, pid)]
@@ -1053,6 +1098,8 @@ class Project:
                                (v, v, now(), tid))
                 else:
                     db.execute(f"UPDATE task SET {k} = ? WHERE id = ?", (v, tid))
+            if fields.get("subject") is not None:
+                self.rename_refs(db, "task", tid, t["subject"], fields["subject"])
 
     def task_pending_decision(self, tid, did):
         with self.connect(write=True) as db:
@@ -1507,7 +1554,7 @@ class Project:
 
     def planning_missing(self, t, before):
         """What a done task of a planning kind failed to do, or None."""
-        revision = t["subject"] in (REVISE_MASTERPLAN_SUBJECT, REVISE_PLAN_SUBJECT.format(t["plan_id"]))
+        revision = t["subject"].startswith("revise the masterplan") or is_revise_plan(t["subject"], t["plan_id"])
         if t["kind"] in ("plan", "masterplan") and not revision and self.planning_snapshot() == before:
             return "added or changed no plan"
         if t["kind"] == "split" and not self.rows("SELECT 1 FROM task WHERE plan_id = ? AND kind IN ('work', 'plan')",
@@ -1523,7 +1570,7 @@ class Project:
 
     def close_and_commit(self):
         closed, cleanup = self.close_milestones()
-        done = [f"milestone {mid}: {CLEANUP_SUBJECT} queued" for mid in cleanup] + \
+        done = [f"milestone {mid}: post-milestone cleanup queued" for mid in cleanup] + \
                [f"milestone {mid} implemented" for mid in closed]
         for line in done:
             self.say(line)
