@@ -64,7 +64,8 @@ cleanup_prompt = '''
 '''
 
 # Priority of the planning work: the masterplan `pm milestone add` creates (its tasks write the plans) and every task
-# "create tasks for plan N". Above every other plan, so all plans and their tasks exist before implementation starts.
+# "create tasks for plan N". Above every other plan, so all plans and their tasks exist before implementation starts;
+# within one milestone queue index: a higher index waits, planning included.
 planning_priority = 1000
 
 # Decisions: workers create pending decisions for questions only you can answer, and the tasks that depend on them

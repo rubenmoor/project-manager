@@ -75,7 +75,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 
 **Priorities.** Set by workers, following rules in project-manager.toml:
 
-- `planning_priority` (1000): planning tasks (kinds `masterplan`, `split`, `plan`) run first, so all plans and tasks exist before implementation starts. After a planning task, `pm run` checks it changed a plan (`plan`, `masterplan`; a "revise …" task may leave it as it is) or left its plan with tasks (`split`), and stops otherwise.
+- `planning_priority` (1000): planning tasks (kinds `masterplan`, `split`, `plan`) run first within a milestone queue index, so all plans and tasks exist before implementation starts; milestones with a higher queue index wait, planning included. After a planning task, `pm run` checks it changed a plan (`plan`, `masterplan`; a "revise …" task may leave it as it is) or left its plan with tasks (`split`), and stops otherwise.
 - `plan_priority_prompt`: a new plan's priority by what it affects (database schema 900 … media and assets 200), adjusted after `pm plans list` when it must run before or after another plan. Appended to every worker's prompt.
 - `task_priority_prompt`: a task gets its own priority only for a good reason, the plan's ± a multiple of 10. Appended to every worker's prompt.
 - Both are also printed at the end of `pm instructions`; empty turns one off.
