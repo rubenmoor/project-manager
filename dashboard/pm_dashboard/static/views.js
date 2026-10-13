@@ -441,6 +441,14 @@ export function Runs({ d }) {
   const byKind = KINDS.map((k) => ({ label: k, value: d.cost(finished.filter((r) => kindOf(r) === k)) })).filter((x) => x.value > 0);
   const byMilestone = d.milestones.map((m) => ({ label: `m${m.id} ` + (m.subject.length > 16 ? m.subject.slice(0, 15) + "…" : m.subject),
     value: d.cost(d.milestoneTasks(m).flatMap(d.taskRuns)) })).filter((x) => x.value > 0);
+  const closed = d.tasks.filter((t) => t.status !== "open").map(d.taskRuns).filter((rs) => rs.length).map(d.cost).sort((a, b) => a - b);
+  const edges = [0.1, 0.25, 0.5, 1, 2, 5, 10, 20];
+  const byCost = [0, ...edges].map((lo, i) => {
+    const hi = edges[i], cs = closed.filter((c) => c >= lo && (hi === undefined || c < hi));
+    return { label: hi === undefined ? `≥ ${usd(lo)}` : `${usd(lo)}–${usd(hi)}`, short: hi === undefined ? `${usd(lo)}+` : `<${usd(hi)}`,
+      value: cs.length, extra: `${usd(cs.reduce((s, c) => s + c, 0))} in total` };
+  });
+  const median = closed.length ? (closed[(closed.length - 1) >> 1] + closed[closed.length >> 1]) / 2 : 0;
   const tok = finished.reduce((s, r) => s + d.tokens(r), 0);
   const cacheRead = finished.reduce((s, r) => s + (r.cache_read_tokens || 0), 0);
   const secs = finished.reduce((s, r) => s + seconds(r.started_at, r.ended_at), 0);
@@ -458,6 +466,9 @@ export function Runs({ d }) {
       <div class="card"><b>Cost per task kind</b><${Bars} data=${byKind} fmt=${usd} horizontal /></div>
       <div class="card"><b>Cost per milestone</b><${Bars} data=${byMilestone} fmt=${usd} horizontal /></div>
     </div>
+    <div class="card" style="margin-top:12px"><b>Tasks per cost bracket</b>
+      <span class="muted"> · ${closed.length} done or dropped tasks with runs, cost over all their runs${closed.length ? `, median ${usd(median)}` : ""}</span>
+      <${Bars} data=${closed.length ? byCost : []} fmt=${(n) => (Number.isInteger(n) ? String(n) : "")} /></div>
     <h2>All runs</h2>
     <${Chips} value=${res} set=${setRes} options=${[["all", "all"], ...["running", "done", "blocked", "failed", "limit"].map((k) => [k, k])]} />
     <${RunsTable} d=${d} runs=${shown} showTask />`;
