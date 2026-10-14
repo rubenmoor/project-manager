@@ -142,7 +142,7 @@ export function PrioEdit({ value, effective, from, save, disabled, what = "prior
   if (editing) return html`<span class="prio-edit"><input ref=${autofocus} value=${value ?? ""} placeholder=${String(effective)}
     onKeyDown=${(e) => { if (e.key === "Enter" || e.key === "Escape") finish(e.target.value); }} onBlur=${(e) => finish(e.target.value)} />
     ${error ? html`<span class="err">${error}</span>` : null}</span>`;
-  const label = value != null ? html`${value}` : html`${effective}<span class="from"> ${from}</span>`;
+  const label = value != null ? html`${value}` : from === "plan" ? html`<span class="inherited">${effective}</span>` : html`${effective}<span class="from"> ${from}</span>`;
   if (!save || disabled) return html`<span class="prio" title=${disabled ? lockTitle : ""}>${label}</span>`;
   return html`<button class="prio prio-btn" title=${`change the ${what} (empty: ${what === "priority" ? "none" : "0"})`} onClick=${(e) => { e.preventDefault(); e.stopPropagation(); setEditing(true); }}>${label}</button>`;
 }

@@ -17,7 +17,7 @@ export const Kind = ({ kind }) => (kind && kind !== "work" ? html`<span class="t
 
 export function Prio({ p }) {
   return html`<span class="prio" title=${`priority ${p.value}, ${p.from === "task" ? "the task's own" : p.from === "plan" ? "from its plan" : "no priority set"}`}>
-    ${p.value}${p.from !== "task" ? html`<span class="from"> ${p.from === "plan" ? "plan" : "–"}</span>` : null}</span>`;
+    ${p.from === "plan" ? html`<span class="inherited">${p.value}</span>` : p.value}${p.from === "default" ? html`<span class="from"> –</span>` : null}</span>`;
 }
 
 // The id prefix shown before every task, plan and milestone subject: t12, p3, m1.

@@ -141,6 +141,7 @@ h3 { font-size: 14px; margin: 16px 0 6px; font-weight: 600; }
 .tag.signoff { background: var(--warning-wash); color: var(--ink); }
 .prio { font-family: var(--mono); font-size: 12px; color: var(--ink-2); white-space: nowrap; }
 .prio .from { color: var(--muted); }
+.prio .inherited { font-style: italic; }
 @keyframes pulse { 50% { opacity: 0.25; } }
 
 /* tables */
