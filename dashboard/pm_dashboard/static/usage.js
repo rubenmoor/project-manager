@@ -32,9 +32,11 @@ function Window({ d, label, w, span }) {
   const runs = d.runs.filter((r) => r.started_at && new Date(r.started_at) >= start);
   const n = runs.reduce((s, r) => s + d.tokens(r), 0);
   const pct = live && w.utilization != null ? Math.round(w.utilization * 100) : null;
-  return html`<span class="usage-win" title=${live ? `resets ${new Date(end).toLocaleString()}` : "reset since the last worker run; usage unknown"}>
+  const elapsed = Math.round(Math.min(1, Math.max(0, (now - start) / span)) * 100);
+  const ahead = pct != null && pct > elapsed;
+  return html`<span class="usage-win" title=${live ? `${elapsed} % of the window passed · resets ${new Date(end).toLocaleString()}\n${ahead ? "used faster than time passes: runs out before the reset" : "used slower than time passes: budget left at the reset"}` : "reset since the last worker run; usage unknown"}>
     <b>${label}</b>
-    ${pct != null ? html`<span class=${"meter" + (pct >= 90 ? " bad" : pct >= 75 ? " warn" : "")}><span style=${`width:${Math.min(100, pct)}%`}></span></span>
+    ${pct != null ? html`<span class=${"meter" + (ahead ? " ahead" : "")}><span style=${`width:${Math.min(100, pct)}%`}></span><i style=${`left:${elapsed}%`}></i></span>
       <span class="num">${pct} %</span><span class="muted">· resets ${resets(end)}</span>`
       : html`<span class="muted">${end ? "reset since" : "limit unknown"}</span>`}
     <span class="muted">· pm workers ${tokens(n) || "0"} tokens${runs.length ? `, ${usd(d.cost(runs))}` : ""}</span></span>`;
