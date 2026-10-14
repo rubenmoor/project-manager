@@ -13,7 +13,7 @@ In the project's git repository (the one with `project-manager.toml`):
 
 ## Views
 
-- **Live** (home while pm runs): left, one timeline: queue above (next nearest), the running task between two rules, done and dropped tasks below (newest first); a click (or `j`/`k`) selects a task (outline); right, the selected task's task page (below), with a link to it
+- **Live** (home while pm runs): left, one timeline: queue above (next nearest), the running task between two rules, done and dropped tasks below (newest first); a click selects a task (outline); right, the selected task's task page (below), with a link to it
   - failed last run: a red "failed" pill in the queue; with no worker running, "pm run stopped: task N failed" and the likely cause
 - **Overview**: running task, decisions waiting on you, cost, open and on-hold milestones with progress, queue head; without milestones a welcome screen with one button
 - **Queue**: as `pm run` sees it; open tasks it leaves out and why
@@ -30,13 +30,13 @@ In the project's git repository (the one with `project-manager.toml`):
 - Milestone implemented: a message with fireworks (no sound), shown once the tab is visible again; stays until "Yay!"; remembered per project in the browser
 - Notifications (`notify` in the top bar): a new pending decision, a failed run, `pm run` stopped or done
 - Ids: every task, plan and milestone shown with its id first (`t12`, `p3`, `m1`), as workers and Claude refer to them
-- Keys: `g` then `l o q m d s r` to go; `/` search (a number finds that id); `i` edit; Esc save
+- Search: a number finds that id
 
 ## Editing
 
 Text is edited in place, through pm's own methods; each change is a commit (`pm: … (dashboard)`).
 
-- Subjects and bodies of milestones, plans and tasks: rendered; `i`, Enter or a click shows the Markdown source (CodeMirror, marked "Markdown"); Esc or leaving it saves
+- Subjects and bodies of milestones, plans and tasks: rendered; Enter or a click shows the Markdown source (CodeMirror, marked "Markdown"); Esc or leaving it saves
 - Priorities: click the number; empty clears it
 - Tasks: done or drop with a note; add milestones (with a queue index, default 0) and tasks (plans come from workers)
 - Pending decisions, on their page, as `pm decision answer|approve|irrelevant`: pick an option or write the answer (Markdown, edited like a body; Esc renders it), one-off, supersedes; Answer or Ctrl-Enter. Sign-offs: Approve. Irrelevant: a reason; drops the open tasks waiting for it. Drafts survive navigating away (session storage)

@@ -1,4 +1,4 @@
-// Edit in place: a text shows rendered; `i`, Enter or a click shows its source (CodeMirror, monospace);
+// Edit in place: a text shows rendered; Enter or a click shows its source (CodeMirror, monospace);
 // Esc or leaving it saves and renders it again.
 import { html, useState, useEffect, useRef } from "/vendor/preact-htm.js";
 import {
@@ -71,18 +71,11 @@ export function CodeEditor({ value, onDone, onChange, autofocus = true, ph = "" 
   return html`<div class="cm-wrap"><span class="md-badge">Markdown</span><div class="cm-box" ref=${box}></div></div>`;
 }
 
-// Starts editing on `i` / Enter / click (not on a link), or on the "pm-edit" event (the global `i` key).
+// Starts editing on Enter on the focused element, or a click (not on a link).
 export function useEditTrigger(start, disabled) {
   const ref = useRef(null);
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const go = () => !disabled && start();
-    el.addEventListener("pm-edit", go);
-    return () => el.removeEventListener("pm-edit", go);
-  });
   const onKeyDown = (e) => {
-    if (!disabled && (e.key === "i" || e.key === "Enter") && !e.metaKey && !e.ctrlKey && !e.altKey) { e.preventDefault(); start(); }
+    if (!disabled && e.key === "Enter" && e.target === e.currentTarget && !e.metaKey && !e.ctrlKey && !e.altKey) { e.preventDefault(); start(); }
   };
   const onClick = (e) => { if (!disabled && !e.target.closest("a") && !getSelection().toString()) start(); };
   return { ref, onKeyDown, onClick };
@@ -153,12 +146,3 @@ export function PrioEdit({ value, effective, from, save, disabled, what = "prior
   if (!save || disabled) return html`<span class="prio" title=${disabled ? lockTitle : ""}>${label}</span>`;
   return html`<button class="prio prio-btn" title=${`change the ${what} (empty: ${what === "priority" ? "none" : "0"})`} onClick=${(e) => { e.preventDefault(); e.stopPropagation(); setEditing(true); }}>${label}</button>`;
 }
-
-// Global `i`: edit the focused editable, else the first one on the page.
-addEventListener("keydown", (e) => {
-  if (e.key !== "i" || e.metaKey || e.ctrlKey || e.altKey) return;
-  const a = document.activeElement;
-  if (a && (/INPUT|TEXTAREA|SELECT/.test(a.tagName) || a.isContentEditable || a.closest(".editable"))) return;
-  const el = document.querySelector(".main .card.editable:not(.locked)") || document.querySelector(".main .editable:not(.locked)");
-  if (el) { e.preventDefault(); el.dispatchEvent(new Event("pm-edit")); }
-});

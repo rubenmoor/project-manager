@@ -1,5 +1,5 @@
 // Resolving a pending decision on its page, as `pm decision answer|approve|irrelevant`: the answer or reason is a
-// Markdown draft (rendered; `i` or a click: source; Esc: rendered again), sent with a button or Ctrl-Enter.
+// Markdown draft (rendered; a click: source; Esc: rendered again), sent with a button or Ctrl-Enter.
 import { html, useState, useRef, useEffect } from "/vendor/preact-htm.js";
 import { CodeEditor, post, useEditTrigger } from "/editor.js";
 import { Markdown } from "/ui.js";

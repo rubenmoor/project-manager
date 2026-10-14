@@ -143,11 +143,11 @@ export function Milestones({ d }) {
   for (const m of ms) groups.set(m.queue_index, [...(groups.get(m.queue_index) || []), m]);
   return html`<h1>Milestones</h1>
     <div class="sub">Grouped by queue index: tasks of a lower one are worked first.</div>
+    <div style="margin-top:16px"><${AddButton} kind="milestone" /></div>
     <div class="ms-cols">
       <div>${[...groups].map(([q, xs]) => html`<h2>Queue index ${q}</h2>
           <div class="cards">${xs.map((m) => html`<${MilestoneCard} d=${d} m=${m} />`)}</div>`)}
-        ${ms.length ? null : html`<div class="empty" style="margin-top:16px">No open milestone.</div>`}
-        <div style="margin-top:16px"><${AddButton} kind="milestone" /></div></div>
+        ${ms.length ? null : html`<div class="empty" style="margin-top:16px">No open milestone.</div>`}</div>
       <div class="ms-done"><h2>Completed (${done.length})</h2>
         ${done.length ? html`<div class="cards one">${done.map((m) => html`<${MilestoneCard} d=${d} m=${m} />`)}</div>`
           : html`<div class="empty">None yet.</div>`}</div>

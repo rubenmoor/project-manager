@@ -45,21 +45,14 @@ function useState2() {
   return { state, log, online };
 }
 
-const NAV = [["live", "Live", "l"], ["overview", "Overview", "o"], ["queue", "Queue", "q"], ["milestones", "Milestones", "m"],
-  ["decisions", "Decisions", "d"], ["since", "Since you looked", "s"], ["runs", "Runs", "r"]];
+const NAV = [["live", "Live"], ["overview", "Overview"], ["queue", "Queue"], ["milestones", "Milestones"],
+  ["decisions", "Decisions"], ["since", "Since you looked"], ["runs", "Runs"]];
 const SECTION = { added: "milestones", milestone: "milestones", plan: "milestones", task: "milestones", decision: "decisions" };
 
 function Search({ d }) {
   const [q, setQ] = useState("");
   const [sel, setSel] = useState(0);
   const input = useRef(null);
-  useEffect(() => {
-    const k = (e) => {
-      if (e.key === "/" && !/INPUT|TEXTAREA/.test(document.activeElement.tagName)) { e.preventDefault(); input.current.focus(); }
-    };
-    addEventListener("keydown", k);
-    return () => removeEventListener("keydown", k);
-  }, []);
   const hits = useMemo(() => {
     const s = q.trim().toLowerCase();
     if (!s || !d) return [];
@@ -78,7 +71,7 @@ function Search({ d }) {
     else if (e.key === "Escape") { setQ(""); input.current.blur(); }
   };
   return html`<div class="search">
-    <input ref=${input} placeholder="Search  /" value=${q} onInput=${(e) => { setQ(e.target.value); setSel(0); }} onKeyDown=${key} />
+    <input ref=${input} placeholder="Search" value=${q} onInput=${(e) => { setQ(e.target.value); setSel(0); }} onKeyDown=${key} />
     ${hits.length ? html`<div class="results">${hits.map((h, i) => html`<a href=${`#/${h[0]}/${h[1].id}`} class=${i === sel ? "sel" : ""}
       onMouseDown=${(e) => { e.preventDefault(); go(h); }}><span class="tag">${h[0]} ${h[1].id}</span><span>${h[1].subject}</span></a>`)}</div>` : null}
   </div>`;
@@ -102,16 +95,7 @@ function App() {
   useEffect(() => {
     const f = () => { setR(route()); scrollTo(0, 0); };
     addEventListener("hashchange", f);
-    let g = false;
-    const k = (e) => {
-      if (/INPUT|TEXTAREA/.test(document.activeElement.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
-      if (e.key === "g") { g = true; setTimeout(() => (g = false), 800); return; }
-      const n = g && NAV.find((x) => x[2] === e.key);
-      if (n) location.hash = `#/${n[0]}`;
-      g = false;
-    };
-    addEventListener("keydown", k);
-    return () => { removeEventListener("hashchange", f); removeEventListener("keydown", k); };
+    return () => removeEventListener("hashchange", f);
   }, []);
   const shown = state && (state.tables ? state : state.last_good);
   const d = useMemo(() => (shown ? index({ ...shown, __log: log }) : null), [shown, log]);
@@ -149,8 +133,7 @@ function App() {
     <nav class="nav">${NAV.map(([k, label]) => html`<a href=${`#/${k}`} class=${page === k ? "on" : ""}>
       <span>${label}</span>${k === "decisions" && pending ? html`<span class="tag">${pending}</span>` : null}
       ${k === "since" && nSince ? html`<span class="tag new">${nSince}</span>` : null}
-      ${k === "live" && d && d.running ? html`<span class="livedot" title="a worker is running"></span>` : null}</a>`)}
-      <div class="keys">g + l o q m d s r: go to<br />/ search · i edit · Esc save</div></nav>
+      ${k === "live" && d && d.running ? html`<span class="livedot" title="a worker is running"></span>` : null}</a>`)}</nav>
     <main class=${"main" + (page === "live" ? " full" : "")}>
       ${state && state.error ? html`<div class="banner error"><b>Can't read the database.</b> <pre>${state.error}</pre>
         ${state.last_good ? html`<div class="muted">Showing the last state that could be read.</div>` : null}</div>` : null}

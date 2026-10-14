@@ -1,6 +1,5 @@
 // The run view: left, one timeline (queue above, highest priority nearest; the running task between two rules; retired
-// tasks below, newest first); right, the selected task as on its task page. A click selects (outline); j/k move the
-// selection.
+// tasks below, newest first); right, the selected task as on its task page. A click selects (outline).
 import { html, useState, useEffect, useRef, useLayoutEffect } from "/vendor/preact-htm.js";
 import { Pill, Kind, Prio, Elapsed, Time, Named } from "/ui.js";
 import { Task } from "/views.js";
@@ -45,7 +44,6 @@ export function Live({ d }) {
     : null;
   const [picked, setPicked] = useState(null);
   const sel = picked != null && d.task.get(picked) ? picked : current ? current.id : lastRun ? lastRun.task_id : null;
-  const order = [...queue.map((t) => t.id), ...(current ? [current.id] : []), ...retired.map((t) => t.id)];
   const scroller = useRef(null), card = useRef(null), top = useRef(null), bottom = useRef(null);
   const H = useHeight(scroller), cardH = useHeight(card), topH = useHeight(top), bottomH = useHeight(bottom);
   // Room so the current task can reach both the top and the bottom of the column.
@@ -57,21 +55,6 @@ export function Live({ d }) {
     centred.current = key;
     scroller.current.scrollTop = card.current.offsetTop - scroller.current.offsetTop - (H - cardH) / 2;
   }, [H, cardH, current && current.id]);
-  useEffect(() => {
-    const k = (e) => {
-      const a = document.activeElement;
-      if (/INPUT|TEXTAREA|SELECT/.test(a.tagName) || a.isContentEditable || e.metaKey || e.ctrlKey || e.altKey) return;
-      if (e.key !== "j" && e.key !== "k") return;
-      const i = order.indexOf(sel);
-      const next = order[Math.max(0, Math.min(order.length - 1, i + (e.key === "j" ? 1 : -1)))];
-      if (next == null) return;
-      setPicked(next);
-      const el = scroller.current.querySelector(`[data-task="${next}"]`);
-      if (el) el.scrollIntoView({ block: "nearest" });
-    };
-    addEventListener("keydown", k);
-    return () => removeEventListener("keydown", k);
-  }, [sel, order.join()]);
   const selTask = sel != null ? d.task.get(sel) : null;
   return html`<div class="live">
     <div class="tl" ref=${scroller}>
