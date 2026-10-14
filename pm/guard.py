@@ -1,6 +1,9 @@
 """Claude Code hooks for pm workers; `pm run` passes them with `--settings` ("{settings}" in the worker command).
     PreToolUse (Bash): blocks commands that stop processes by pattern (`pkill -f`, `killall`, `kill -1`), nested ones
-        (`bash -c '…'`, `nix develop -c …`) included: the worker's own process can match the pattern.
+        (`bash -c '…'`, `nix develop -c …`) included: the worker's own process can match the pattern. And commands
+        that read or search the database file (PM_DB): reading it (`cat`, `grep`, `sed` … naming it), `grep -r`,
+        `git grep` and `rg --no-ignore` without excluding it; rg and Claude Code's Grep skip it via .ignore, and the
+        settings deny Read of it. It is megabytes of SQL; workers query it with pm.
     Stop: once, keeps the worker going while its task (PM_TASK) is still open and waits for no decision, or while a
         background task runs: `claude -p` ends with the turn, and nothing wakes it later."""
 import json, os, re, sys
@@ -8,6 +11,32 @@ from pathlib import Path
 
 KILL_BY_PATTERN = re.compile(r"\bpkill\b[^;&|\n]*\s(-\w*f\b|--full\b)|\bkillall\b|\bkill\s+(--?\w*\s+)*-1\b")
 KILL_REASON = "pm: stop processes by PID (kill $!) or a pidfile; pkill -f, killall and kill -1 can match this worker"
+READERS = {"cat", "head", "tail", "less", "more", "grep", "egrep", "fgrep", "rg", "ag", "awk", "gawk", "sed", "bat",
+           "nl", "cut", "sort", "strings", "sqlite3"}
+SEGMENTS = re.compile(r"[;&|\n()`]+|\$\(")
+EXCLUDED = re.compile(r"--exclude|:!|:\^|:\(exclude\)|-g\s*['\"]?!|--glob[= ]['\"]?!")
+
+
+def db_reason(command, db):
+    """Why the Bash command reads or searches the database file db (a file name), or None."""
+    for seg in SEGMENTS.split(command):
+        words = [w.strip("'\"") for w in seg.split()]
+        while words and re.fullmatch(r"\w+=\S*|sudo|command|env|xargs|nice|time", words[0]):
+            words.pop(0)
+        if not words:
+            continue
+        cmd, args, named = os.path.basename(words[0]), words[1:], db in seg
+        excluded = named and EXCLUDED.search(seg)
+        if cmd in READERS and named and not excluded:
+            return f"reads {db}"
+        if cmd in ("grep", "egrep", "fgrep") and not excluded and any(
+                re.fullmatch(r"-[A-Za-z]*[rR][A-Za-z]*|--recursive|--dereference-recursive", a) for a in args):
+            return f"grep -r searches {db}; use rg or the Grep tool, which skip it"
+        if cmd == "rg" and not excluded and any(re.fullmatch(r"-u+|--no-ignore(-dot)?|--no-ignore-files", a) for a in args):
+            return f"rg without ignore files searches {db}; add -g '!{db}'"
+        if cmd == "git" and "grep" in args[:3] and not excluded:
+            return f"git grep searches {db}; use rg or the Grep tool, which skip it, or add ':!{db}'"
+    return None
 
 
 def task_unfinished(tid):
@@ -56,8 +85,13 @@ def main():
         return 0
     if e.get("hook_event_name") == "Stop":
         return stop(e)
-    if KILL_BY_PATTERN.search(str((e.get("tool_input") or {}).get("command") or "")):
+    command = str((e.get("tool_input") or {}).get("command") or "")
+    if KILL_BY_PATTERN.search(command):
         print(KILL_REASON, file=sys.stderr)
+        return 2
+    if why := db_reason(command, os.path.basename(os.environ.get("PM_DB", "tasks.sql"))):
+        print(f"pm: {why}. It is pm's database: query it with pm (`pm show <id>`, `pm queue`, "
+              f"`pm decision list --answered`), not by reading the file", file=sys.stderr)
         return 2
     return 0
 

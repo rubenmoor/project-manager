@@ -5,8 +5,9 @@ database = "tasks.sql"
 
 # Command that works one task. The worker prompt goes to its stdin; an argument containing "{prompt}" gets it
 # instead, but then the prompt is in the command line, where `pkill -f <word in the task>` matches the worker itself.
-# "{settings}" is replaced by claude settings (JSON): hooks that block `pkill -f`, `killall` and `kill -1`, and that keep
-# the worker going once if it stops with its task still open; no background tasks (`claude -p` ends with the turn, and
+# "{settings}" is replaced by claude settings (JSON): hooks that block `pkill -f`, `killall` and `kill -1` and reading or
+# grepping the database file, and that keep the worker going once if it stops with its task still open; Read (and so
+# Grep) of the database denied; no background tasks (`claude -p` ends with the turn, and
 # a background job with it), Bash commands up to 60 minutes in the foreground instead.
 # With claude's JSON output (--output-format stream-json --verbose), pm shows it readably and records model, turns,
 # tokens and cost per run.

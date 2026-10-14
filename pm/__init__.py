@@ -24,12 +24,17 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 27  # bump by one with every commit (AGENTS.md)
+VERSION = 28  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
 GUARD = Path(__file__).parent / "guard.py"
 # In {settings}: `claude -p` ends with the turn, so a background job dies unwatched; long checks run in the foreground.
+# Loose objects (MB) that make pm pack them: each commit adds a full copy of the database; git's own `gc --auto` waits
+# for ~6700 objects, gigabytes at a few MB per copy.
+REPACK_LOOSE_MB = 50
+REPACK = ("import fcntl, subprocess, sys\nf = open(sys.argv[1], 'w')\ntry:\n    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+          "except OSError:\n    sys.exit()\nsubprocess.run(['git', 'repack', '-d', '-q'])")
 WORKER_ENV = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1", "BASH_MAX_TIMEOUT_MS": "3600000"}
 EPILOG = "Agents (LLMs): read `pm instructions` first, the full reference with examples for every command."
 PROMPT_KEYS = ("masterplan_prompt", "plan_tasks_prompt", "revise_masterplan_prompt", "revise_plan_prompt",
@@ -349,6 +354,7 @@ def init(root, out=sys.stdout):
         return
     path.write_text(CONFIG_TEMPLATE, encoding="utf-8")
     pm = Project(root, out=out)
+    pm.ignore_db()
     try:
         pm.git("add", "--", CONFIG_FILE)
         pm.git("commit", "-q", "-m", "pm: init", "--", CONFIG_FILE)
@@ -535,6 +541,7 @@ class Project:
                 except BaseException:
                     self.forget()
                     raise
+                self.cache = (self.file_key(), con)
 
     def forget(self):
         if self.cache:
@@ -622,6 +629,7 @@ class Project:
         try:
             self.git("add", "--", self.db)
             self.git("commit", "-q", "-m", f"pm: {message}", "--", self.db)
+            self.gc()
             return True
         except subprocess.CalledProcessError as e:
             self.say(f"pm: committing {self.db} failed: {e.stderr.strip()}")
@@ -659,6 +667,31 @@ class Project:
 
     def git(self, *args):
         return subprocess.run(["git", *args], cwd=self.root, capture_output=True, text=True, check=True).stdout
+
+    def gc(self):
+        """Packs loose objects, in the background, once they exceed REPACK_LOOSE_MB: packed, a copy of the database
+        is a delta to the one before."""
+        try:
+            info = dict(l.split(": ", 1) for l in self.git("count-objects", "-v").splitlines())
+            if int(info["size"]) > REPACK_LOOSE_MB * 1024:
+                subprocess.Popen([sys.executable, "-I", "-c", REPACK, str(self.git_dir / "pm-repack.lock")],
+                                 cwd=self.root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                 stderr=subprocess.DEVNULL, start_new_session=True)
+        except (subprocess.CalledProcessError, OSError, KeyError, ValueError):
+            pass
+
+    def ignore_db(self):
+        """`/<database>` in .ignore, committed: ripgrep (and Claude Code's Grep) skip it in searches."""
+        path, line = self.root / ".ignore", f"/{self.db}"
+        text = path.read_text(encoding="utf-8") if path.exists() else ""
+        if line in text.splitlines():
+            return
+        path.write_text(text + ("" if not text or text.endswith("\n") else "\n") + line + "\n", encoding="utf-8")
+        try:
+            self.git("add", "--", ".ignore")
+            self.git("commit", "-q", "-m", f"pm: .ignore {self.db}, so searches skip it", "--", ".ignore")
+        except subprocess.CalledProcessError as e:
+            self.say(f"pm: committing .ignore failed: {e.stderr.strip()}")
 
     def dirty(self):
         """Changes besides the database (pm commits that itself)."""
@@ -1400,7 +1433,7 @@ class Project:
         prompt = WORKER_PROMPT.format(id=tid, db=self.db, show=show)
         hook = {"type": "command", "command": shlex.join([sys.executable, str(GUARD)])}
         settings = json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [hook]}], "Stop": [{"hooks": [hook]}]},
-                               "env": WORKER_ENV})
+                               "permissions": {"deny": [f"Read(/{self.db_path.resolve()})"]}, "env": WORKER_ENV})
         w = self.config["worker"]
         cmd = [a.replace("{prompt}", prompt).replace("{settings}", settings) for a in w]
         return cmd, None if any("{prompt}" in a for a in w) else prompt
@@ -1433,7 +1466,7 @@ class Project:
         old = {sig: signal.signal(sig, stop) for sig in (signal.SIGTERM, signal.SIGHUP)}
         try:
             with open(log, "w", encoding="utf-8", errors="replace") as f, subprocess.Popen(
-                    cmd, cwd=self.root, env=os.environ | {"PM_WORKER": "1", "PM_TASK": str(tid)},
+                    cmd, cwd=self.root, env=os.environ | {"PM_WORKER": "1", "PM_TASK": str(tid), "PM_DB": self.db},
                     stdin=subprocess.DEVNULL if prompt is None else subprocess.PIPE, stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1,
                     start_new_session=True) as proc:
@@ -1698,6 +1731,7 @@ class Project:
         self.record_run(rid, code, info, "failed", summary)
         try:
             self.git("commit", "-q", "-m", f"pm: task {tid} failed", "--", self.db)
+            self.gc()
         except subprocess.CalledProcessError as e:
             summary += f"\ncommitting {self.db} failed: {e.stderr.strip()}"
         if shown := info.get("shown"):
@@ -1782,6 +1816,7 @@ class Project:
         self.git("add", "--", self.db)
         if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=self.root).returncode:
             self.git("commit", "-q", "-m", f"task {tid}: {subject}", "-m", body)
+            self.gc()
 
     def close_and_commit(self):
         closed, cleanup = self.close_milestones()
@@ -1806,6 +1841,7 @@ class Project:
             if dry_run:
                 return self.work_queue(once, dry_run)
             with self.run_lock():
+                self.ignore_db()
                 return self.work_queue(once, dry_run)
         finally:
             for sig, handler in old.items():
