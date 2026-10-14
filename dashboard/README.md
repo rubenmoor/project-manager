@@ -9,7 +9,7 @@ In the project's git repository (the one with `project-manager.toml`):
 - `nix run github:<you>/pm#dashboard`, or `nix run .#dashboard` in this repository
 - `pipx install .` (pm) then `pipx inject pm ./dashboard --include-apps`
 - from a checkout: `PYTHONPATH=<repo>:<repo>/dashboard python3 -m pm_dashboard`
-- options: `--root <repo>`, `--port 8642`; serves `http://127.0.0.1:8642/` only
+- options: `--root <repo>`, `--port 8642`; serves `http://127.0.0.1:8642/` only; port taken: tries the next, up to 20, prints the URL used
 
 ## Views
 

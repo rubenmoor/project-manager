@@ -12,7 +12,7 @@ Serves the browser client (static/) and a JSON API on 127.0.0.1:
     /api/usage           the account's usage limits, from the newest rate_limit_event in the worker logs
     POST /api/edit       {"op": …}: add or change milestones, plans, tasks, resolve decisions through pm (edit.py)
 """
-import argparse, datetime, json, mimetypes, subprocess, sys, threading, time
+import argparse, datetime, errno, json, mimetypes, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -316,14 +316,21 @@ def main(argv=None):
     watcher.state = read_state(project)
     threading.Thread(target=watcher.loop, daemon=True).start()
     Handler.watcher = watcher
-    Handler.allowed_hosts = {f"{h}:{args.port}" for h in ("127.0.0.1", "localhost")}
-    try:
-        server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    except OSError as e:
-        print(f"pm-dashboard: port {args.port}: {e.strerror}")
+    server = None
+    for port in range(args.port, args.port + 20):
+        try:
+            server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+            break
+        except OSError as e:
+            if e.errno != errno.EADDRINUSE:
+                print(f"pm-dashboard: port {port}: {e.strerror}")
+                return 1
+    if not server:
+        print(f"pm-dashboard: ports {args.port}-{port} are all in use")
         return 1
+    Handler.allowed_hosts = {f"{h}:{port}" for h in ("127.0.0.1", "localhost")}
     server.daemon_threads = True
-    print(f"pm-dashboard: {root} on http://127.0.0.1:{args.port}/ (Ctrl-C stops)", flush=True)
+    print(f"pm-dashboard: {root} on http://127.0.0.1:{port}/ (Ctrl-C stops)", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
