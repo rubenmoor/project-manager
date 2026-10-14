@@ -64,11 +64,12 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 
 **Queue** (the `queue` view): open tasks of open milestones (not on hold) that no pending decision blocks, by the milestone's queue index (lowest first), then by priority (task's, else plan's, else 0; highest first), then milestone, plan and task id.
 
-**Sign-offs.** `signoff` in project-manager.toml, empty by default: then only the decisions workers raise stop the run. Each value makes `pm run` wait for your approval before the next task of a kind runs:
+**Sign-offs.** `signoff` in project-manager.toml, `["web"]` by default: then only the decisions workers raise and web access stop the run. Each value makes `pm run` wait for your approval before the next task of a kind runs:
 
 - `"masterplans"`: "create tasks for plan N: …" of a masterplan waits for "Sign off the masterplan of milestone M: …"
 - `"plans"`: "create tasks for plan N: …" of every other plan waits for "Sign off plan N: …"
 - `"task-queue"`: work tasks wait for "Sign off the task queue", one decision for all work tasks without a sign-off; asked when the first of them heads the queue, i.e. after all planning work; work tasks added later need a new one
+- `"web"`: a task marked web waits for "Grant task N: … web access (WebSearch, WebFetch)"; without `"web"` in the list, marked tasks get the tools unasked
 - pm creates the decision when such a task heads the queue; `pm run` never asks, it goes on with the unblocked tasks and stops when the queue is empty
 - the only answer is approve (`pm decide`: `a`, or `pm decision approve <id>`); leave it pending to change plans or tasks first; `pm decision list` shows the plan or the waiting tasks as they are then
 - no `x` (irrelevant) for sign-offs
@@ -91,11 +92,11 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 | `run [--once] [--dry-run]` | Work the queue until it is empty, a worker fails, or the tree has uncommitted changes |
 | `stop` | Have the running `pm run` stop after its current task (SIGUSR1; same as one Ctrl-C) |
 | `milestone add`, `plan add <milestone>`, `task add <plan>` | In your editor (as `git commit`): first line subject, rest body (Markdown); quit unsaved or save empty to abort |
-| `milestone add <subject>`, `plan add <milestone> <subject>`, `task add <plan> <subject>` | Non-interactive: the body from stdin. `plan add` and `task add` also take `--priority`; `task add` `--kind plan` |
+| `milestone add <subject>`, `plan add <milestone> <subject>`, `task add <plan> <subject>` | Non-interactive: the body from stdin. `plan add` and `task add` also take `--priority`; `task add` `--kind plan`, `--web` |
 | `milestone add … --queue <N>`, `milestone set <milestone>` | `--queue <N>`: queue index, lowest first (default 0); `set` also `--subject`, `--status`, `--body`. `milestone add\|set\|hold\|resume` is refused in a worker |
 | `milestone hold <milestone>`, `milestone resume <milestone>` | Keep its plans and tasks out of the queue (a running task finishes), and back |
 | `plan edit <plan>` | `--subject`, `--body`, `--priority <N\|none>` |
-| `task set <task>` | `--subject`, `--body`, `--priority <N\|none>`; open tasks that aren't running |
+| `task set <task>` | `--subject`, `--body`, `--priority <N\|none>`, `--web`/`--no-web`; open tasks that aren't running |
 | `task done\|drop <task> <note>`, `task priority <task> <N\|none>` | Close a task, set its priority |
 | `decision add <subject>` | `--body`, `--option` (recommended first) |
 | `decide` | Answer pending decisions one by one in the terminal (number, text, `s` skip, `x <reason>` irrelevant; sign-offs: `a` approve, `s` skip) |
@@ -114,7 +115,7 @@ Global: `--root <repo>`. A text value `-` reads stdin.
 
 ## Workers
 
-Each task runs the configured `worker` command (default: `claude -p` with `Bash Read Edit Write Glob Grep` allowed). The prompt (`WORKER_PROMPT` in `pm/__init__.py`) holds the task with its plan and milestone, and the `pm` commands the worker may use: `plan add`, `plan edit`, `task add`, `task set`, `decision add`, `task-pending-decision`, `task done|drop`. It points the worker to `pm instructions` for examples of every command. Agents outside `pm run`, e.g. a Claude session asked to plan work, should run `pm instructions` too: say so in the project's `AGENTS.md` or `CLAUDE.md`. The prompt also has every worker look up the answered decisions on what its task touches first (`pm decision list --answered --grep …`). A project's `AGENTS.md`, for example:
+Each task runs the configured `worker` command (default: `claude -p` with `Bash Read Edit Write Glob Grep` allowed). Web access only per task: a task marked web (`--web`) gets `WebSearch` and `WebFetch` in `{settings}`, after its sign-off (`"web"` in `signoff`). The prompt (`WORKER_PROMPT` in `pm/__init__.py`) holds the task with its plan and milestone, and the `pm` commands the worker may use: `plan add`, `plan edit`, `task add`, `task set`, `decision add`, `task-pending-decision`, `task done|drop`. It points the worker to `pm instructions` for examples of every command. Agents outside `pm run`, e.g. a Claude session asked to plan work, should run `pm instructions` too: say so in the project's `AGENTS.md` or `CLAUDE.md`. The prompt also has every worker look up the answered decisions on what its task touches first (`pm decision list --answered --grep …`). A project's `AGENTS.md`, for example:
 
 ```markdown
 - Work is planned with pm: run `pm instructions` first.

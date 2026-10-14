@@ -32,7 +32,7 @@
   - supersede links: a newer answer replaces an older one, wholly or partly (with a note)
   - cite a decision in code, prompts and docs as `decision 32: <subject>`; `pm show d32` finds it
 - **References:** refer to a milestone, plan, task or decision always by id and full subject, e.g. `plan 2: Backend endpoint`. Plain in a subject (`pm task add 2 "Fix the encoding of plan 2: Backend endpoint"`), in backticks in a body, note or decision text. pm's own tasks and sign-offs follow it; renaming a milestone, plan or task updates its references in open tasks that aren't running and in pending decisions.
-- **Sign-off:** a decision pm makes, per `signoff` in project-manager.toml, before a plan is split into tasks or before work tasks run; its only answer is approve. Shown as `Decision 4 (answered, sign-off): …`. Not for agents to create or answer.
+- **Sign-off:** a decision pm makes, per `signoff` in project-manager.toml, before a plan is split into tasks, before work tasks run, or before a task marked web gets web access; its only answer is approve. Shown as `Decision 4 (answered, sign-off): …`. Not for agents to create or answer.
 - **Recorded by pm, not set by you:** `created_at` everywhere, `retired_at` of tasks, `implemented_at`, `closed_at`; `created_by_task` (your task, when you create a plan, task or decision as a worker); one **run** per worker run, with result, time, tokens and cost.
 - **Queue:** open tasks of open milestones that no pending decision blocks; by the milestone's queue index (lowest first), then highest priority first, then by milestone, plan and task id. `pm run` takes the first one.
 
@@ -166,6 +166,8 @@ pm task set 6 --priority 710   # also: none
 ```
 
 `pm task set` changes an open task that isn't running; a closed or running task can't be changed: add a new task instead.
+
+**Web access:** workers have no WebSearch or WebFetch, except for a task marked web: `pm task add … --web`, `pm task set <task> --web` (`--no-web` to unmark). Mark only the task that needs it, e.g. "verify the sourced figures". Its worker gets both tools once the human approves the sign-off pm then asks for (if `"web"` is in `signoff`). Your own task needs the web: `pm task set <your task> --web`, then end without `pm task done`; the next run has the tools. Don't ask for web access with a decision, and don't edit settings to grant it.
 
 A task should fit one worker run: one change you can describe, check and commit.
 

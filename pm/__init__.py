@@ -24,7 +24,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 31  # bump by one with every commit (AGENTS.md)
+VERSION = 32  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -53,13 +53,15 @@ NOT_RUNNING = "AND id NOT IN (SELECT task_id FROM run WHERE result = 'running')"
 TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup", "revise")
 PLANNING_KINDS = ("plan", "masterplan", "split")
 # `signoff` in project-manager.toml → decision.signoff; a sign-off's only answer is SIGNOFF_ANSWER
-SIGNOFF_LEVELS = {"masterplans": "masterplan", "plans": "plan", "task-queue": "task-queue"}
+SIGNOFF_LEVELS = {"masterplans": "masterplan", "plans": "plan", "task-queue": "task-queue", "web": "web"}
+# A task marked web gets these, once signed off (or if "web" isn't in `signoff`)
+WEB_TOOLS = ["WebSearch", "WebFetch"]
 SIGNOFF_ANSWER = "approve"
 # The decision log: answered lasting questions that nothing fully supersedes.
 IN_LOG = ("status = 'answered' AND signoff IS NULL AND kind = 'rule' AND id NOT IN (SELECT superseded_id FROM "
           "decision_supersedes s JOIN decision n ON n.id = s.decision_id WHERE s.note = '' AND n.status = 'answered')")
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 # A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
 # run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
 # Columns and tables SCHEMA dropped are left behind, new ones get their defaults; so only renames, moved data and new
@@ -71,7 +73,7 @@ def revise_kind(con):
                 "AND (subject LIKE 'revise the masterplan of %' OR subject LIKE 'revise plan %')")
 
 
-MIGRATIONS = {12: "", 13: "", 14: revise_kind}
+MIGRATIONS = {12: "", 13: "", 14: revise_kind, 15: ""}
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -107,6 +109,7 @@ CREATE TABLE task (
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     retired_at      TEXT,                                  -- done or dropped
     created_by_task INTEGER REFERENCES task (id),
+    web             INTEGER NOT NULL DEFAULT 0 CHECK (web IN (0, 1)),  -- 1: its worker gets WebSearch and WebFetch
     CONSTRAINT "an open task needs a body" CHECK (status <> 'open' OR trim(body) <> ''),
     CONSTRAINT "retired_at is set exactly when done or dropped" CHECK ((status = 'open') = (retired_at IS NULL))
 ) STRICT;
@@ -122,7 +125,7 @@ CREATE TABLE decision (
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     closed_at       TEXT,
     created_by_task INTEGER REFERENCES task (id),
-    signoff         TEXT CHECK (signoff IN ('masterplan', 'plan', 'task-queue')),  -- made by pm; NULL: a question
+    signoff         TEXT CHECK (signoff IN ('masterplan', 'plan', 'task-queue', 'web')),  -- made by pm; NULL: a question
     kind            TEXT NOT NULL DEFAULT 'rule' CHECK (kind IN ('rule', 'once')),  -- once: a go-ahead, not in the log
     decided_by_task INTEGER REFERENCES task (id),          -- a worker's own choice (`pm decision record`); NULL: the human
     consequences    TEXT NOT NULL DEFAULT '',              -- what changed because of the answer; appended
@@ -210,8 +213,10 @@ Milestones, plans, tasks and decisions are in {db}; change them only with these 
   pm plan edit <plan id> [--subject …] [--body …] [--priority N]
   pm plans list     plans with open tasks, by milestone queue index, then highest priority first
   pm milestone list     every milestone; pm milestone show <milestone id>
-  pm task add <plan id> "<subject>" [--kind plan] [--priority N] < body.md     --kind plan: the task writes a plan
-  pm task set <task id> [--subject …] [--body …] [--priority N]     an open task that isn't running
+  pm task add <plan id> "<subject>" [--kind plan] [--priority N] [--web] < body.md     --kind plan: the task writes a plan;
+      --web: its worker gets WebSearch and WebFetch (after the human's sign-off)
+  pm task set <task id> [--subject …] [--body …] [--priority N] [--web|--no-web]     an open task that isn't
+      running
   pm decision add "<subject>" [--body "<text>"] [--option "<recommended>"] [--option …]   prints its id
   pm task-pending-decision <task id> <decision id>     the task waits until the human answers
   pm decision list --answered [--grep <word> …]     the decision log: what was decided about X
@@ -969,14 +974,18 @@ class Project:
 
     # --- sign-offs ---------------------------------------------------------------------------
 
-    def signoff_level(self, db, t):
-        """The sign-off task t needs under `signoff` in project-manager.toml, or None."""
+    def signoff_levels(self, db, t):
+        """The sign-offs task t needs under `signoff` in project-manager.toml."""
         if t["kind"] == "split":
             master = db.execute("SELECT 1 FROM task WHERE plan_id = ? AND kind = 'masterplan'", (t["plan_id"],))
-            level = "masterplan" if master.fetchone() else "plan"
+            levels = ["masterplan" if master.fetchone() else "plan"]
         else:
-            level = "task-queue" if t["kind"] == "work" else None
-        return level if level in [SIGNOFF_LEVELS[x] for x in self.config["signoff"]] else None
+            levels = ["task-queue"] if t["kind"] == "work" else []
+        levels += ["web"] * bool(t["web"])
+        return [x for x in levels if x in [SIGNOFF_LEVELS[c] for c in self.config["signoff"]]]
+
+    def missing_signoff(self, db, t):
+        return next((x for x in self.signoff_levels(db, t) if not self.signed_off(db, t["id"], x)), None)
 
     @staticmethod
     def signed_off(db, tid, level):
@@ -986,15 +995,20 @@ class Project:
     def needs_signoff(self, tid):
         """The sign-off task tid needs and doesn't have yet, or None."""
         with self.connect() as db:
-            level = self.signoff_level(db, self.get(db, "task", tid))
-            return level if level and not self.signed_off(db, tid, level) else None
+            return self.missing_signoff(db, self.get(db, "task", tid))
+
+    def web_granted(self, tid):
+        """Task tid is marked web and needs no web sign-off, or has it."""
+        with self.connect() as db:
+            t = self.get(db, "task", tid)
+            return bool(t["web"]) and ("web" not in self.signoff_levels(db, t) or bool(self.signed_off(db, tid, "web")))
 
     def request_signoff(self, tid):
-        """Make task tid wait for its sign-off. Plan or masterplan: a new decision. Task queue: the pending one, else a
-        new one, for every open work task of open milestones without a sign-off. Returns the decision id."""
+        """Make task tid wait for its next sign-off. Plan, masterplan or web: a new decision. Task queue: the pending
+        one, else a new one, for every open work task of open milestones without a sign-off. Returns the decision id."""
         with self.connect(write=True) as db:
             t = self.get(db, "task", tid)
-            level = self.signoff_level(db, t)
+            level = self.missing_signoff(db, t)
             did = None
             if level == "task-queue":
                 did = db.execute("SELECT min(id) FROM decision WHERE signoff = 'task-queue' AND status = 'pending'"
@@ -1004,6 +1018,9 @@ class Project:
                     "WHERE m.status = 'open' AND t.status = 'open' AND t.kind = 'work' ORDER BY t.id").fetchall()
                         if not self.signed_off(db, r[0], level)]
                 subject = "Sign off the task queue"
+            elif level == "web":
+                tids = [tid]
+                subject = f"Grant {ref('task', tid, t['subject'])} web access (WebSearch, WebFetch)"
             else:
                 p = self.get(db, "plan", t["plan_id"])
                 tids = [tid]
@@ -1019,11 +1036,13 @@ class Project:
 
     def signoff_view(self, did, level):
         """What a pending sign-off approves, as it is now: the plan, or the waiting tasks by plan."""
-        ts = self.rows("SELECT t.id, t.subject, p.id AS plan_id, p.subject AS plan_subject, p.body AS plan_body "
+        ts = self.rows("SELECT t.id, t.subject, t.body, p.id AS plan_id, p.subject AS plan_subject, p.body AS plan_body "
                        "FROM task_decision td JOIN task t ON t.id = td.task_id JOIN plan p ON p.id = t.plan_id "
                        "WHERE td.decision_id = ? AND t.status = 'open' ORDER BY p.id, t.id", did)
         if not ts:
             return "No open task waits for it."
+        if level == "web":
+            return "\n\n".join(f"# Task {t['id']}: {t['subject']}\n\n{t['body']}" for t in ts)
         if level != "task-queue":
             return "\n\n".join(f"# Plan {t['plan_id']}: {t['plan_subject']}\n\n{t['plan_body']}" for t in ts)
         out, plan = [], None
@@ -1275,17 +1294,18 @@ class Project:
             queued = [self.queue_plan_tasks(db, pid)] + [self.queue_revision(db, c, pid) for c in self.child_plans(db, pid)]
             return [q for q in queued if q]
 
-    def task_add(self, pid, subject, body, prio=None, kind="work"):
+    def task_add(self, pid, subject, body, prio=None, kind="work", web=False):
         """A new task; a plan-writing one gets planning_priority unless prio is given."""
         if prio is None and kind in PLANNING_KINDS:
             prio = self.config["planning_priority"]
         with self.connect(write=True) as db:
             self.check_plan_open(db, pid)
-            return db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task) "
-                              "VALUES (?, ?, ?, ?, ?, ?)", (pid, subject, kind, prio, body.strip(), creator())).lastrowid
+            return db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task, web) "
+                              "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                              (pid, subject, kind, prio, body.strip(), creator(), int(web))).lastrowid
 
     def task_set(self, tid, **fields):
-        """Set fields of an open task (status, note, priority, subject, body); a value None clears it. A running task:
+        """Set fields of an open task (status, note, priority, subject, body, web); a value None clears it. A running task:
         only its own worker changes it, and not its subject or body."""
         with self.connect(write=True) as db:
             if (t := self.get(db, "task", tid))["status"] != "open":
@@ -1390,7 +1410,8 @@ class Project:
         out += [f"- task {x['id']} [{x['status']}{'' if x['kind'] == 'work' else ', ' + x['kind']}] {x['subject']}"
                 + (" ← this task" if x["id"] == tid else "") for x in siblings] + [""]
         retired = f", retired {stamp(t['retired_at'])}" if t["retired_at"] else ""
-        out += [f"# Task {tid}: {t['subject']} ({t['status']}, kind {t['kind']}, priority {prio}, "
+        web = (", web access" if self.web_granted(tid) else ", web: needs sign-off") if t["web"] else ""
+        out += [f"# Task {tid}: {t['subject']} ({t['status']}, kind {t['kind']}, priority {prio}{web}, "
                 f"created {stamp(t['created_at'])}{retired}{by(t)})", ""]
         if t["note"]:
             out.append(f"note: {t['note']}")
@@ -1439,8 +1460,11 @@ class Project:
         show = "\n".join([self.show(tid), self.earlier_failure(tid), *self.priority_prompts()]).rstrip() + "\n"
         prompt = WORKER_PROMPT.format(id=tid, db=self.db, show=show)
         hook = {"type": "command", "command": shlex.join([sys.executable, str(GUARD)])}
+        permissions = {"deny": [f"Read(/{self.db_path.resolve()})"]}
+        if self.web_granted(tid):
+            permissions["allow"] = WEB_TOOLS
         settings = json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [hook]}], "Stop": [{"hooks": [hook]}]},
-                               "permissions": {"deny": [f"Read(/{self.db_path.resolve()})"]}, "env": WORKER_ENV})
+                               "permissions": permissions, "env": WORKER_ENV})
         w = self.config["worker"]
         cmd = [a.replace("{prompt}", prompt).replace("{settings}", settings) for a in w]
         return cmd, None if any("{prompt}" in a for a in w) else prompt
@@ -2094,15 +2118,18 @@ def main(argv=None):
     a.add_argument("subject", nargs="?", help="then the body (Markdown) is read from stdin; without: editor")
     a.add_argument("--priority", type=int, help="default: the plan's; for --kind plan: planning_priority")
     a.add_argument("--kind", choices=("work", "plan"), default="work", help="plan: the task writes a plan")
+    a.add_argument("--web", action="store_true", help="its worker gets WebSearch and WebFetch (sign-off: web)")
     for verb, text in [("done", "note: date, files or commit"), ("drop", "reason")]:
         x = t.add_parser(verb)
         x.add_argument("task", type=int)
         x.add_argument("note", help=text)
-    ts = t.add_parser("set", help="change an open task that isn't running: subject, body, priority")
+    ts = t.add_parser("set", help="change an open task that isn't running: subject, body, priority, web")
     ts.add_argument("task", type=int)
     ts.add_argument("--subject")
     ts.add_argument("--body", type=text_arg)
     ts.add_argument("--priority", type=prio_arg, default=argparse.SUPPRESS, help="integer, or none for the plan's")
+    ts.add_argument("--web", action=argparse.BooleanOptionalAction, default=argparse.SUPPRESS,
+                    help="its worker gets WebSearch and WebFetch (sign-off: web)")
     tp = t.add_parser("priority", help="integer, or none for the plan's")
     tp.add_argument("task", type=int)
     tp.add_argument("priority", type=prio_arg)
@@ -2240,7 +2267,7 @@ def main(argv=None):
                 if not (entry := pm.subject_and_body("task", args.subject)):
                     print("pm: aborted, no task added")
                     return 1
-                tid = pm.task_add(args.plan, *entry, args.priority, args.kind)
+                tid = pm.task_add(args.plan, *entry, args.priority, args.kind, args.web)
                 print(tid)
                 msg = f"task {tid} added: {entry[0]}"
             elif args.action in ("done", "drop"):
@@ -2250,8 +2277,10 @@ def main(argv=None):
                 fields = {k: v.strip() for k in ("subject", "body") if (v := getattr(args, k)) is not None}
                 if "priority" in args:
                     fields["priority"] = args.priority
+                if "web" in args:
+                    fields["web"] = int(args.web)
                 if not fields:
-                    raise FormatError("nothing to change: --subject, --body or --priority")
+                    raise FormatError("nothing to change: --subject, --body, --priority or --web")
                 if fields.get("subject") == "":
                     raise FormatError("the subject can't be empty")
                 pm.task_set(args.task, **fields)
