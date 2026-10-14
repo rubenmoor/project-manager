@@ -57,8 +57,10 @@ function Detail({ d, e }) {
 }
 
 export function Affected({ d, t, rows }) {
+  if (rows === undefined) return html`<h3>Affected</h3><div class="muted">Restart pm-dashboard to see the rows this commit changed.</div>`;
   const list = effects(rows, t.id);
-  if (!list.length) return null;
+  if (!list.length) return html`<h3>Affected</h3><div class="muted">${rows ? "Nothing else: in tasks.sql the commit changed only this task and its runs."
+    : "Nothing: the commit didn't change tasks.sql."}</div>`;
   const made = list.filter((e) => e.k === "task" && e.how === "created").length;
   return html`<h3>Affected${made ? html` <span class="muted">· ${made} task${made > 1 ? "s" : ""} created</span>` : null}</h3>
     <ul class="plain affected">${list.map((e) => {
