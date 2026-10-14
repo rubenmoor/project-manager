@@ -1,5 +1,5 @@
 // What a task's commit did to tasks.sql, one line per row it touched: tasks created first, then tasks, plans, decisions
-// and milestones changed. The task itself is left out; its outcome card shows it.
+// and milestones changed. The task itself is left out; the task view around it shows it.
 import { html } from "/vendor/preact-htm.js";
 import { Named, Kind } from "/ui.js";
 
@@ -57,12 +57,12 @@ function Detail({ d, e }) {
 }
 
 export function Affected({ d, t, rows }) {
-  if (rows === undefined) return html`<h3>Affected</h3><div class="muted">Restart pm-dashboard to see the rows this commit changed.</div>`;
+  if (rows === undefined) return html`<h2>Affected</h2><div class="muted">Restart pm-dashboard to see the rows this commit changed.</div>`;
   const list = effects(rows, t.id);
-  if (!list.length) return html`<h3>Affected</h3><div class="muted">${rows ? "Nothing else: in tasks.sql the commit changed only this task and its runs."
+  if (!list.length) return html`<h2>Affected</h2><div class="muted">${rows ? "Nothing else: in tasks.sql the commit changed only this task and its runs."
     : "Nothing: the commit didn't change tasks.sql."}</div>`;
   const made = list.filter((e) => e.k === "task" && e.how === "created").length;
-  return html`<h3>Affected${made ? html` <span class="muted">· ${made} task${made > 1 ? "s" : ""} created</span>` : null}</h3>
+  return html`<h2>Affected${made ? html` <span class="muted">· ${made} task${made > 1 ? "s" : ""} created</span>` : null}</h2>
     <ul class="plain affected">${list.map((e) => {
       const live = d[e.k].get(e.r.id);
       const r = e.r.subject ? e.r : live || { id: e.r.id, subject: "" };

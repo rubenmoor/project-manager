@@ -13,17 +13,16 @@ In the project's git repository (the one with `project-manager.toml`):
 
 ## Views
 
-- **Live** (home while pm runs): left, one timeline: queue above (next nearest), the running task between two rules, done and dropped tasks below (newest first); a click (or `j`/`k`) selects a task (outline); right, the selected task, with a link to its page:
-  - running: its output, live
-  - open: queue position or what blocks it, body, decisions, earlier runs; after a failed run: pm's summary and the run's output
+- **Live** (home while pm runs): left, one timeline: queue above (next nearest), the running task between two rules, done and dropped tasks below (newest first); a click (or `j`/`k`) selects a task (outline); right, the selected task's task page (below), with a link to it
   - failed last run: a red "failed" pill in the queue; with no worker running, "pm run stopped: task N failed" and the likely cause
-  - done or dropped: note, rows its commit touched (tasks created first; tasks, plans, decisions, milestones: new, edited, done, dropped, answered, waits for …; each styled by kind), runs, files changed, the full diff, the output of its last run
-  - diffs and outputs start hidden; "show" shows them in full, no inner scroll box
 - **Overview**: running task, decisions waiting on you, cost, open and on-hold milestones with progress, queue head; without milestones a welcome screen with one button
 - **Queue**: as `pm run` sees it; open tasks it leaves out and why
 - **Milestones**: cards grouped by queue index (lowest first), with progress and the number of pending decisions its open tasks wait for, linked to exactly those (`#/decisions?milestone=N`)
 - **Milestone**, **plans**: plans by priority with their tasks; filters by status and kind; change a milestone's queue index; put a milestone on hold or resume it (its plans and open tasks show "on hold")
-- **Task**: body, note, priority, decisions, rows it created, runs, the diff of its commit (syntax highlighted), worker log; both hidden until "show" (the log open via `?log`)
+- **Task**: queue position or what blocks it, body, note, priority, decisions; after a failed run: pm's summary
+  - done or dropped: rows its commit touched (Affected: tasks created first; tasks, plans, decisions, milestones: new, edited, done, dropped, answered, waits for …; each styled by kind; says why when empty), files changed, the full diff (syntax highlighted)
+  - runs, worker log (live while it runs, following its end)
+  - diff and log start hidden; "show" shows them in full, no inner scroll box (the log open via `?log`)
 - **Decisions**: pending sign-offs and questions by milestone, the ones holding up the most important work first; closed ones: the decision log (as `pm decision list --answered`) or all; tags for one-offs, workers' own choices, superseded ones; a decision's page shows consequences and supersede links; a pending one is resolved there (below)
 - **Since you looked**: rows changed since the commit you marked as seen (uncommitted ones included): decisions answered, choices workers recorded without asking, plan bodies as diffs, new and closed tasks, runs
 - **Runs**: cost per day, per task kind, per milestone; done and dropped tasks per cost bracket (total over their runs); every run

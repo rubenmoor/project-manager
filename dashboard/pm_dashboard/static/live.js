@@ -1,12 +1,10 @@
 // The run view: left, one timeline (queue above, highest priority nearest; the running task between two rules; retired
-// tasks below, newest first); right, the selected task: the running one's output, an open one's details, a retired
-// one's outcome. A click selects (outline); j/k move the selection.
+// tasks below, newest first); right, the selected task as on its task page. A click selects (outline); j/k move the
+// selection.
 import { html, useState, useEffect, useRef, useLayoutEffect } from "/vendor/preact-htm.js";
-import { Pill, Kind, Prio, Elapsed, Time, Markdown, Ref, Named, NamedLink, Fold } from "/ui.js";
-import { TaskDiff } from "/diff.js";
-import { Log } from "/views.js";
-import { Affected } from "/affected.js";
-import { usd, stamp, duration, seconds, tokens } from "/data.js";
+import { Pill, Kind, Prio, Elapsed, Time, Named } from "/ui.js";
+import { Task } from "/views.js";
+import { usd } from "/data.js";
 
 function useHeight(ref) {
   const [h, setH] = useState(0);
@@ -22,80 +20,6 @@ function useHeight(ref) {
 function Item({ id, sel, select, cls = "", children }) {
   return html`<div class=${`tl-item ${cls}${sel === id ? " sel" : ""}`} role="button" tabindex="0" data-task=${id}
     onClick=${() => select(id)} onKeyDown=${(e) => e.key === "Enter" && select(id)}>${children}</div>`;
-}
-
-const crumbs = (d, t) => {
-  const m = d.milestoneOfTask(t);
-  return html`<div class="tl-detail-parents">
-    <span class="muted">milestone</span><${NamedLink} kind="milestone" r=${m} />
-    <span class="muted">plan</span><${NamedLink} kind="plan" r=${d.plan.get(t.plan_id)} /></div>`;
-};
-
-function Runs({ d, runs }) {
-  if (!runs.length) return null;
-  return html`<h3>Runs</h3><table class="compact"><tbody>${[...runs].reverse().map((r) => html`<tr>
-    <td><${Pill} status=${r.result} /></td><td class="num">${stamp(r.started_at)}</td>
-    <td class="num r"><${Elapsed} start=${r.started_at} end=${r.ended_at} /></td>
-    <td class="num r">${r.turns != null ? `${r.turns} turns` : ""}</td><td class="num r">${tokens(d.tokens(r))}</td>
-    <td class="num r">${usd(r.cost_usd)}</td></tr>
-    ${r.reason ? html`<tr><td></td><td colspan="5" class="muted reason">${r.reason.split("\n")[0].slice(0, 200)}</td></tr>` : null}`)}</tbody></table>`;
-}
-
-function Files({ d, t }) {
-  const [c, setC] = useState(null);
-  useEffect(() => {
-    let gone = false;
-    setC(null);
-    fetch(`/api/task/${t.id}/commit`).then((r) => r.json()).then((j) => !gone && setC(j));
-    return () => { gone = true; };
-  }, [t.id, t.retired_at]);
-  if (!c) return null;
-  if (!c.commit) return html`<h3>Changes</h3><div class="muted">No commit by <code>pm run</code>.</div>`;
-  return html`<${Affected} d=${d} t=${t} rows=${c.rows} />
-    <h3>Changes <span class="muted mono">${c.commit.slice(0, 7)}</span></h3>
-    <table class="compact"><tbody>${c.files.map((f) => html`<tr><td class="mono">${f.file}</td>
-      <td class="num r plus">${f.added != null ? `+${f.added}` : ""}</td><td class="num r minus">${f.deleted != null ? `−${f.deleted}` : "bin"}</td></tr>`)}</tbody></table>
-    <${Fold} key=${"diff" + t.id} head=${html`<h3>Full diff</h3>`}><${TaskDiff} task=${t} version=${t.retired_at} /></${Fold}>`;
-}
-
-function Detail({ d, t, running }) {
-  const runs = d.taskRuns(t);
-  const qi = running ? -1 : d.queue.filter((id) => !d.running || id !== d.running.task_id).indexOf(t.id);
-  const why = d.excluded(t);
-  const decs = d.decisionsOf.get(t.id) || [];
-  const last = runs.filter((r) => r.ended_at).pop();
-  const head = html`<div class="live-head">
-    ${crumbs(d, t)}
-    <div class="row"><span class="grow tl-detail-subject"><${Named} kind="task" r=${t} /></span>
-      <a class="btn" href=${`#/task/${t.id}`}>Task page →</a></div>
-    <div class="row sub">${running ? html`<${Pill} status="running" />` : html`<${Pill} status=${d.taskState(t)} />`}<${Kind} kind=${t.kind} />
-      <span>task ${t.id} · priority <${Prio} p=${d.prio(t)} /></span>
-      ${running ? html`<span>· <${Elapsed} start=${d.running.started_at} /></span>` : null}
-      ${qi >= 0 ? html`<span>· ${qi === 0 ? "next in the queue" : `#${qi + 1} in the queue`}</span>` : null}</div></div>`;
-  const body = html`<div class="card live-body"><${Markdown} text=${t.body} /></div>`;
-  if (running) return html`${head}${body}<div class="live-detail">
-    <${Fold} key=${"log" + t.id} head=${html`<h3>Output (live)</h3>`}><${Log} d=${d} t=${t} live /></${Fold}></div>`;
-  const fail = last && last.result === "failed" ? last : null;
-  if (t.status === "open") return html`${head}<div class="live-detail">
-    ${fail ? html`<div class="banner error"><b>Run ${fail.id} failed</b> <span class="muted">${stamp(fail.ended_at)}</span><pre>${fail.reason || ""}</pre></div>` : null}
-    ${why ? html`<div class="banner warn">${typeof why === "string" ? `Not queued: ${why}.` : html`Waits for ${why.map((x, i) => html`${i ? ", " : ""}<a href=${`#/decision/${x.id}`}>decision ${x.id}: ${x.subject}</a>`)}.`}</div>` : null}
-    ${body}
-    ${decs.length ? html`<h3>Decisions</h3><ul class="plain">${decs.map((x) => html`<li><${Pill} status=${x.status} /> <a href=${`#/decision/${x.id}`}>${x.subject}</a></li>`)}</ul>` : null}
-    <div class="muted" style="margin-top:10px">created ${stamp(t.created_at)}${t.created_by_task != null ? html` by <a href=${`#/task/${t.created_by_task}`}>task ${t.created_by_task}</a>` : ""}</div>
-    <${Runs} d=${d} runs=${runs} />
-    ${fail ? html`<${Fold} key=${"log" + t.id} head=${html`<h3>Output of the failed run</h3>`}><${Log} d=${d} t=${t} live=${false} run=${fail.id} /></${Fold}>` : null}
-  </div>`;
-  const total = runs.reduce((s, r) => s + seconds(r.started_at, r.ended_at), 0);
-  return html`${head}<div class="live-detail">
-    ${body}
-    <div class="card outcome"><div class="row"><b>${t.status === "done" ? "Done" : "Dropped"}</b>
-      <span class="muted">${stamp(t.retired_at)} · <${Time} ts=${t.retired_at} /></span>
-      ${runs.length ? html`<span class="muted">· ${runs.length} run${runs.length > 1 ? "s" : ""}, ${duration(total)}, ${usd(d.cost(runs))}</span>` : null}</div>
-      ${t.note ? html`<div class="note">${t.note}</div>` : null}</div>
-    <${Files} d=${d} t=${t} />
-    <${Runs} d=${d} runs=${runs} />
-    ${last ? html`<${Fold} key=${"log" + t.id} head=${html`<h3>Output of the last run</h3>`}><${Log} d=${d} t=${t} live=${false} /></${Fold}>` : null}
-  </div>`;
 }
 
 export function Live({ d }) {
@@ -135,7 +59,8 @@ export function Live({ d }) {
   }, [H, cardH, current && current.id]);
   useEffect(() => {
     const k = (e) => {
-      if (/INPUT|TEXTAREA/.test(document.activeElement.tagName) || e.metaKey || e.ctrlKey || e.altKey) return;
+      const a = document.activeElement;
+      if (/INPUT|TEXTAREA|SELECT/.test(a.tagName) || a.isContentEditable || e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key !== "j" && e.key !== "k") return;
       const i = order.indexOf(sel);
       const next = order[Math.max(0, Math.min(order.length - 1, i + (e.key === "j" ? 1 : -1)))];
@@ -176,7 +101,7 @@ export function Live({ d }) {
         })}</div>
       <div style=${`height:${padBottom}px`}></div>
     </div>
-    <div class="live-out">${selTask ? html`<${Detail} d=${d} t=${selTask} running=${current && current.id === selTask.id} />`
+    <div class="live-out">${selTask ? html`<${Task} key=${selTask.id} d=${d} id=${selTask.id} embedded />`
       : html`<div class="empty">No run yet. Select a task on the left.</div>`}</div>
   </div>`;
 }

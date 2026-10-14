@@ -3,7 +3,8 @@ import { Markdown, Pill, Kind, Prio, TaskLink, Id, Ref, Named, NamedLink, Titled
 import { usd, tokens, stamp, duration, seconds, day } from "/data.js";
 import { EditableBody, EditableLine, PrioEdit, post, autofocus } from "/editor.js";
 import { AddButton, Welcome } from "/add.js";
-import { TaskDiff } from "/diff.js";
+import { TaskDiff, useCommit } from "/diff.js";
+import { Affected } from "/affected.js";
 import { Resolve } from "/resolve.js";
 
 const runningId = (d) => d.running && d.running.task_id;
@@ -288,7 +289,20 @@ export function Log({ d, t, live, run = null }) {
     ${lines.map((l) => html`<div class=${l.startsWith("  → ") ? "tool" : /^\[\w+: \d+ turns/.test(l) ? "res" : ""}>${l || " "}</div>`)}</div>`;
 }
 
-export function Task({ d, id, query }) {
+// The commit pm made for a closed task: the rows it touched in tasks.sql, its files, the full diff (hidden until shown).
+function Commit({ d, t }) {
+  const c = useCommit(t, t.retired_at);
+  if (!c) return html`<h2>Changes</h2><div class="empty">Loading the commit…</div>`;
+  if (!c.commit) return html`<h2>Affected</h2><div class="muted">Nothing: no commit by <code>pm run</code> for this task.</div>`;
+  return html`<${Affected} d=${d} t=${t} rows=${c.rows} />
+    <h2>Changes <span class="muted mono">${c.commit.slice(0, 7)}</span></h2>
+    <table class="compact"><tbody>${c.files.map((f) => html`<tr><td class="mono">${f.file}</td>
+      <td class="num r plus">${f.added != null ? `+${f.added}` : ""}</td><td class="num r minus">${f.deleted != null ? `−${f.deleted}` : "bin"}</td></tr>`)}</tbody></table>
+    <${Fold} key=${"diff" + t.id} head=${html`<h2>Full diff</h2>`}><${TaskDiff} task=${t} c=${c} /></${Fold}>`;
+}
+
+// The task page; the live page shows the same for its selected task (`embedded`: with a link to this page).
+export function Task({ d, id, query, embedded = false }) {
   const t = d.task.get(id);
   if (!t) return html`<div class="empty">No task ${id}.</div>`;
   const p = d.plan.get(t.plan_id), m = d.milestone.get(p.milestone_id);
@@ -298,27 +312,34 @@ export function Task({ d, id, query }) {
   const created = d.createdBy.get(t.id) || [];
   const pos = d.queuePos.get(t.id);
   const why = d.excluded(t);
-  return html`<div class="crumbs"><a href="#/milestones">Milestones</a> › <${NamedLink} kind="milestone" r=${m} /> › <${NamedLink} kind="plan" r=${p} /></div>
+  const last = runs.filter((r) => r.ended_at).pop();
+  const fail = t.status === "open" && last && last.result === "failed" ? last : null;
+  return html`<div class="crumbs row"><span class="grow"><a href="#/milestones">Milestones</a> › <${NamedLink} kind="milestone" r=${m} /> › <${NamedLink} kind="plan" r=${p} /></span>
+      ${embedded ? html`<a class="btn" href=${`#/task/${t.id}`}>Task page →</a>` : null}</div>
     <${Titled} kind="task" id=${t.id}><${EditableLine} text=${t.subject} save=${t.status === "open" ? saveTask(t.id, "subject") : null} disabled=${running} /></${Titled}>
     <div class="row sub">${running ? html`<${Pill} status="running" />` : html`<${Pill} status=${d.taskState(t)} />`}<${Kind} kind=${t.kind} />
       <span>priority <${TaskPrio} d=${d} t=${t} /></span>
-      ${pos != null ? html`<span>· #${pos + 1} in the queue</span>` : null}
+      ${running ? html`<span>· <${Elapsed} start=${d.running.started_at} /></span>` : null}
+      ${pos != null && !running ? html`<span>· ${pos === 0 ? "next in the queue" : `#${pos + 1} in the queue`}</span>` : null}
       ${why && typeof why === "string" ? html`<span>· not queued: ${why}</span>` : null}</div>
     <dl class="meta">
       <dt>created</dt><dd>${stamp(t.created_at)}${t.created_by_task != null ? html` by <a href=${`#/task/${t.created_by_task}`}>task ${t.created_by_task}</a>` : " by the human or pm"}</dd>
-      ${t.retired_at ? html`<dt>${t.status}</dt><dd>${stamp(t.retired_at)}</dd>` : null}
+      ${t.retired_at ? html`<dt>${t.status}</dt><dd>${stamp(t.retired_at)} · <${Time} ts=${t.retired_at} /></dd>` : null}
       ${t.note ? html`<dt>note</dt><dd>${t.note}</dd>` : null}
+      ${runs.length ? html`<dt>runs</dt><dd>${runs.length}, ${duration(runs.reduce((s, r) => s + seconds(r.started_at, r.ended_at), 0))}, ${usd(d.cost(runs))}</dd>` : null}
     </dl>
     ${running ? html`<div class="banner warn">A worker is on this task: it can't be changed until the run ends.</div>` : null}
+    ${fail ? html`<div class="banner error"><b>Run ${fail.id} failed</b> <span class="muted">${stamp(fail.ended_at)}</span><pre>${fail.reason || ""}</pre></div>` : null}
+    ${why && typeof why !== "string" ? html`<div class="banner warn">Waits for ${why.map((x, i) => html`${i ? ", " : ""}<a href=${`#/decision/${x.id}`}>decision ${x.id}: ${x.subject}</a>`)}.</div>` : null}
     <${EditableBody} text=${t.body} save=${t.status === "open" ? saveTask(t.id, "body") : null} disabled=${running} />
     ${t.status === "open" && !running ? html`<${CloseTask} t=${t} />` : null}
     ${decs.length ? html`<h2>Decisions</h2><ul>${decs.map((x) => html`<li><a href=${`#/decision/${x.id}`}>${x.subject}</a> <${Pill} status=${x.status} />
       ${x.signoff ? html` <span class="tag signoff">sign-off: ${x.signoff}</span>` : null}</li>`)}</ul>` : null}
-    ${created.length ? html`<h2>Created by this task</h2><ul>${created.map(([k, r]) => html`<li>${k} ${k === "decision" ? html`<a href=${`#/${k}/${r.id}`}>${r.subject}</a>` : html`<${NamedLink} kind=${k} r=${r} />`}</li>`)}</ul>` : null}
+    ${created.length && t.status === "open" ? html`<h2>Created by this task</h2><ul>${created.map(([k, r]) => html`<li>${k} ${k === "decision" ? html`<a href=${`#/${k}/${r.id}`}>${r.subject}</a>` : html`<${NamedLink} kind=${k} r=${r} />`}</li>`)}</ul>` : null}
+    ${t.status !== "open" ? html`<${Commit} d=${d} t=${t} />` : null}
     <h2>Runs (${runs.length}${runs.length ? `, ${usd(d.cost(runs))}` : ""})</h2>
     <${RunsTable} d=${d} runs=${runs} />
-    ${t.status !== "open" || runs.length ? html`<${Fold} key=${"diff" + t.id} head=${html`<h2>Changes</h2>`}><${TaskDiff} task=${t} version=${t.retired_at} /></${Fold}>` : null}
-    <${Fold} key=${"log" + t.id} head=${html`<h2>Worker log${running ? " (live)" : ""}</h2>`} open=${query === "log"}><${Log} d=${d} t=${t} live=${running} /></${Fold}>`;
+    ${runs.length ? html`<${Fold} key=${"log" + t.id} head=${html`<h2>Worker log${running ? " (live)" : fail ? ` (failed run ${fail.id})` : ""}</h2>`} open=${query === "log"}><${Log} d=${d} t=${t} live=${running} /></${Fold}>` : null}`;
 }
 
 function HoldButton({ m }) {

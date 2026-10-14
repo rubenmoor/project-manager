@@ -22,15 +22,21 @@ const dark = () => {
   return t ? t === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
 };
 
-export function TaskDiff({ task, version }) {
+// The task's commit as /api/task/<id>/commit answers it; null while loading.
+export function useCommit(task, version) {
   const [c, setC] = useState(null);
-  const [side, setSide] = useState(false);
-  const box = useRef(null);
   useEffect(() => {
     let gone = false;
+    setC(null);
     fetch(`/api/task/${task.id}/commit`).then((r) => r.json()).then((j) => !gone && setC(j));
     return () => { gone = true; };
   }, [task.id, version]);
+  return c;
+}
+
+export function TaskDiff({ task, c }) {
+  const [side, setSide] = useState(false);
+  const box = useRef(null);
   useEffect(() => {
     if (!c || !c.patch || !box.current) return;
     loadDiff2html().then((UI) => {
