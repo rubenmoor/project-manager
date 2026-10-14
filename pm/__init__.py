@@ -24,7 +24,7 @@ import argparse, collections, contextlib, datetime, fcntl, json, os, re, shlex, 
 from pathlib import Path
 
 
-VERSION = 20  # bump by one with every commit (AGENTS.md)
+VERSION = 21  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -43,7 +43,6 @@ REVISE_MASTERPLAN_SUBJECT = "revise the masterplan of {}"
 REVISE_PLAN_SUBJECT = "revise {}"
 # Dedupes queued planning tasks: a running one may have read the old text already, so it doesn't count.
 NOT_RUNNING = "AND id NOT IN (SELECT task_id FROM run WHERE result = 'running')"
-MILESTONE_STATES = ("open", "on-hold", "implemented")
 # work: the default; plan: writes a plan; masterplan, split ("create tasks for plan N: …"), cleanup: made by pm only
 TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup")
 PLANNING_KINDS = ("plan", "masterplan", "split")
@@ -319,6 +318,14 @@ def exit_text(code):
     """"killed by SIGTERM (exit 143)", "exit 1"."""
     sig = exit_signal(code)
     return f"killed by {sig.name} (exit {code})" if sig else f"exit {code}"
+
+
+def tail_lines(path, n, chunk=1 << 16):
+    """The last n lines of a file, read from its end."""
+    with open(path, "rb") as f:
+        f.seek(0, os.SEEK_END)
+        f.seek(max(0, f.tell() - chunk))
+        return f.read().decode("utf-8", errors="replace").splitlines()[-n:]
 
 
 def init(root, out=sys.stdout):
@@ -941,8 +948,14 @@ class Project:
                 why = "implemented" if m["status"] == "implemented" else "done: every plan of it is done"
                 raise FormatError(f"milestone {mid} is {why}; its subject and body can't be changed. "
                                   f"Add a new milestone instead: pm milestone add")
-            if fields.get("status") == "on-hold" and m["status"] == "implemented":
-                raise FormatError(f"milestone {mid} is implemented; it can't be put on hold")
+            status = fields.get("status")
+            if status is not None and status != m["status"]:
+                if m["status"] == "implemented":
+                    raise FormatError(f"milestone {mid} is implemented; its status can't change. "
+                                      f"Add a new milestone instead: pm milestone add")
+                if status not in ("open", "on-hold"):
+                    raise FormatError(f"a milestone is implemented by pm, once its tasks are closed; "
+                                      f"set open or on-hold")
             for k, v in fields.items():
                 if k == "status" and v is not None:
                     db.execute("UPDATE milestone SET status = ?, implemented_at = CASE WHEN ? = 'implemented' "
@@ -1326,15 +1339,19 @@ class Project:
             info.update(session_id=e.get("session_id"), turns=e.get("num_turns"), cost_usd=e.get("total_cost_usd"),
                         input_tokens=u.get("input_tokens"), output_tokens=u.get("output_tokens"),
                         cache_read_tokens=u.get("cache_read_input_tokens"),
-                        cache_creation_tokens=u.get("cache_creation_input_tokens"), result=e.get("result"))
+                        cache_creation_tokens=u.get("cache_creation_input_tokens"), result=e.get("result"),
+                        is_error=bool(e.get("is_error")) or e.get("subtype", "success") != "success")
             cost = f", ${e['total_cost_usd']:.2f}" if e.get("total_cost_usd") is not None else ""
             return f"[{e.get('subtype', 'result')}: {e.get('num_turns')} turns{cost}]\n"
         return None
 
     @staticmethod
-    def limit_line(log, info):
-        """The usage-limit message: the worker's result, or one of the log's last 5 lines; None if there is none."""
-        tail = log.read_text(encoding="utf-8", errors="replace").splitlines()[-5:]
+    def limit_line(log, code, info):
+        """The usage-limit message of a failed run (exit code or an error result): the worker's result, or one of the
+        log's last 5 lines; None if there is none. A run that succeeded may talk about rate limits; it hit none."""
+        if code == 0 and not info.get("is_error"):
+            return None
+        tail = tail_lines(log, 5)
         for l in [info.get("result") or ""] + list(reversed(tail)):
             if any(w in l.lower() for w in LIMIT_WORDS) and "resets " in l.lower():
                 return l
@@ -1395,7 +1412,7 @@ class Project:
             except KeyboardInterrupt as e:
                 self.failed(tid, rid, f"interrupted ({e.args[0] if e.args else 'Ctrl-C'})", None, info, started, log)
                 raise
-            limit = self.limit_line(log, info)
+            limit = self.limit_line(log, code, info)
             if not limit:
                 break
             reset = limit_reset(limit)
@@ -1410,8 +1427,16 @@ class Project:
             if self.stopping:
                 return "limit", "stopped while waiting for the usage limit's reset"
         if errors := self.validate():
-            return "failed", "the database is no longer valid, the run is not recorded:\n  " + "\n  ".join(errors)
-        if code != 0:
+            msg = "the database is no longer valid:\n  " + "\n  ".join(errors)
+            try:
+                self.record_run(rid, code, info, "failed", msg)
+            except FormatError:
+                msg += "\nthe run is not recorded"
+            if stash := self.stash_leftovers(f"pm: task {tid} run {rid} failed"):
+                msg += "\n" + stash
+            return "failed", msg
+        left = self.unstaged()
+        if code != 0 and (left or self.task_status(tid) == "open"):
             return self.failed(tid, rid, exit_text(code), code, info, started, log)
         with self.connect() as db:
             t = self.get(db, "task", tid)
@@ -1419,7 +1444,8 @@ class Project:
                 "SELECT d.id FROM task_decision td JOIN decision d ON d.id = td.decision_id "
                 "WHERE td.task_id = ? AND d.status = 'pending' ORDER BY d.id", (tid,))]
         if t["status"] != "open":
-            result = "done", t["status"] + (f": {t['note']}" if t["note"] else "")
+            result = "done", t["status"] + (f": {t['note']}" if t["note"] else "") + (
+                f" ({exit_text(code)} after closing it, everything staged)" if code else "")
         elif blocked:
             result = "blocked", "waits for decision(s) " + ", ".join(blocked)
         else:
@@ -1428,7 +1454,7 @@ class Project:
                                + (f"; its last message: {info['last_text'].splitlines()[-1][:200]}"
                                   if info.get("last_text") else ""))
         problem = None
-        if left := [l for l in self.git("status", "--porcelain").splitlines() if l[1] != " " and l[3:] != self.db]:
+        if left:
             problem = "the worker left changes that are not staged:\n" + "\n".join(left)
         elif t["status"] == "done" and (missing := self.planning_missing(t, before)):
             problem = f"task {tid} is done, but it {missing}"
@@ -1442,6 +1468,14 @@ class Project:
         if t["status"] != "open" and (dropped := self.drop_task_stashes(tid)):
             self.say(f"dropped the stash(es) of task {tid}'s failed runs: {', '.join(dropped)}")
         return ("failed", f"committed task {tid}; {problem}") if problem else result
+
+    def unstaged(self):
+        """`git status` lines of changes not staged (untracked included), the database aside."""
+        return [l for l in self.git("status", "--porcelain").splitlines() if l[1] != " " and l[3:] != self.db]
+
+    def task_status(self, tid):
+        with self.connect() as db:
+            return self.get(db, "task", tid)["status"]
 
     def run_log(self, tid, rid):
         """The run's log, task-<id>-run-<run>.log; task-<id>.log links to the task's latest."""
@@ -1476,6 +1510,10 @@ class Project:
             lines.append(f"likely cause: {cause}")
         if stash := self.stash_leftovers(f"pm: task {tid} run {rid} failed"):
             lines.append(stash)
+        with self.connect(write=True) as db:
+            if self.get(db, "task", tid)["status"] == "done":
+                db.execute("UPDATE task SET status = 'open', note = NULL, retired_at = NULL WHERE id = ?", (tid,))
+                lines.append(f"task {tid} was marked done in this run; reopened, so its work isn't lost")
         if log:
             lines.append(f"log: {log}")
         summary = "\n".join(lines)
@@ -1775,7 +1813,7 @@ def main(argv=None):
     mset = ms.add_parser("set", help="set milestone fields; a new subject or body queues the revision of the masterplan")
     mset.add_argument("milestone", type=int)
     mset.add_argument("--subject")
-    mset.add_argument("--status", choices=MILESTONE_STATES)
+    mset.add_argument("--status", choices=("open", "on-hold"))
     mset.add_argument("--body", type=text_arg)
     mset.add_argument("--queue", type=int, help="queue index: tasks of lower ones are worked first")
     for name, text in [("hold", "put a milestone on hold: its plans and tasks leave the queue; a running task finishes"),

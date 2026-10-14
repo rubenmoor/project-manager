@@ -100,7 +100,7 @@ pm milestone set 1 --subject "CSV export"
 pm milestone set 1 --body - <<'EOF'
 New body, replacing the old one.
 EOF
-pm milestone set 1 --status implemented     # or open, on-hold
+pm milestone set 1 --status on-hold         # or open; pm marks it implemented itself
 pm milestone hold 1                         # its tasks leave the queue
 pm milestone resume 1
 ```
