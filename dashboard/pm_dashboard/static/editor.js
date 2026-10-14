@@ -88,26 +88,33 @@ export function useEditTrigger(start, disabled) {
   return { ref, onKeyDown, onClick };
 }
 
+// Saves with the text editing started from (`base`): the server refuses the save if the row changed since.
 function useSave(text, save) {
   const [editing, setEditing] = useState(false);
   const [shown, setShown] = useState(null);       // saved text until the new state arrives
   const [error, setError] = useState(null);
+  const base = useRef(null), busy = useRef(false);
   useEffect(() => setShown(null), [text]);
+  const start = () => { base.current = shown ?? text; setEditing(true); };
   const finish = async (v) => {
-    if (v === (shown ?? text)) { setEditing(false); setError(null); return; }
+    if (busy.current) return;
+    if (v === base.current) { setEditing(false); setError(null); return; }
+    busy.current = true;
     try {
-      await save(v);
+      await save(v, base.current);
+      base.current = v;                 // a late blur finishes again: nothing to save
       setShown(v); setEditing(false); setError(null);
     } catch (e) { setError(e.message); }
+    finally { busy.current = false; }
   };
-  return { editing, setEditing, shown: shown ?? text, error, finish };
+  return { editing, start, shown: shown ?? text, error, finish };
 }
 
 const lockTitle = "the running task can't be changed until its run ends";
 
 export function EditableBody({ text, save, disabled = false, empty = "No body.", ph = "Markdown" }) {
   const s = useSave(text, save);
-  const t = useEditTrigger(() => s.setEditing(true), disabled || !save);
+  const t = useEditTrigger(s.start, disabled || !save);
   if (s.editing) return html`<div class="editing">
     <${CodeEditor} value=${s.shown} onDone=${s.finish} ph=${ph} />
     <div class="edit-hint">${s.error ? html`<span class="err">${s.error}</span>` : "Markdown supported · Esc or click outside: save · Ctrl-Z: undo"}</div></div>`;
@@ -117,7 +124,7 @@ export function EditableBody({ text, save, disabled = false, empty = "No body.",
 
 export function EditableLine({ text, save, disabled = false, tag = "h1" }) {
   const s = useSave(text, save);
-  const t = useEditTrigger(() => s.setEditing(true), disabled || !save);
+  const t = useEditTrigger(s.start, disabled || !save);
   if (s.editing) {
     const key = (e) => { if (e.key === "Escape" || e.key === "Enter") { e.preventDefault(); s.finish(e.target.value.trim()); } };
     return html`<div class="editing"><input class=${"line-edit " + tag} ref=${autofocus} value=${s.shown} onKeyDown=${key}

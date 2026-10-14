@@ -7,10 +7,12 @@ import { TaskDiff } from "/diff.js";
 import { Resolve } from "/resolve.js";
 
 const runningId = (d) => d.running && d.running.task_id;
-const saveTask = (id, field) => (v) => post({ op: "task_edit", id, [field]: v });
-const savePlan = (id, field) => (v) => post({ op: "plan_edit", id, [field]: v });
+// A text edit sends the text it started from as `base`: the server refuses it if the row changed meanwhile.
+const saver = (op) => (id, field) => (v, base) => post({ op, id, [field]: v, ...(base != null ? { base: { [field]: base } } : {}) });
+const saveTask = saver("task_edit");
+const savePlan = saver("plan_edit");
 const planSave = (d, id, field) => (d.planDone.has(id) ? null : savePlan(id, field));
-const saveMilestone = (id, field) => (v) => post({ op: "milestone_edit", id, [field]: v });
+const saveMilestone = saver("milestone_edit");
 
 function TaskPrio({ d, t }) {
   const p = d.prio(t);
@@ -18,7 +20,7 @@ function TaskPrio({ d, t }) {
     save=${t.status === "open" ? saveTask(t.id, "priority") : null} disabled=${runningId(d) === t.id} />`;
 }
 
-const KINDS = ["work", "plan", "masterplan", "split", "cleanup"];
+const KINDS = ["work", "plan", "masterplan", "split", "cleanup", "revise"];
 
 function Banners({ d }) {
   const s = d.state;
@@ -237,27 +239,45 @@ function RunsTable({ d, runs, showTask = false }) {
 // A failed run's reason is pm's summary: show it whole; others: the first line.
 export const reasonText = (r) => r.result === "failed" ? r.reason : r.reason.split("\n")[0].slice(0, 200);
 
+const MAX_LINES = 5000;
+
+// One fetch at a time: a size change while one is out fetches again when it returns, from where it ended.
 export function Log({ d, t, live, full = false, run = null }) {
   const [lines, setLines] = useState(null);
-  const next = useRef(0);
+  const [cut, setCut] = useState(0);
+  const f = useRef({ gen: 0, next: 0, busy: false, again: false });
   const box = useRef(null);
   const size = live && d.state.__log && d.state.__log.task === t.id ? d.state.__log.size : null;
-  useEffect(() => { next.current = 0; setLines(null); }, [t.id, run]);
+  useEffect(() => { f.current = { gen: f.current.gen + 1, next: 0, busy: false, again: false }; setLines(null); setCut(0); }, [t.id, run]);
   useEffect(() => {
-    let gone = false;
-    fetch(`/api/log/${t.id}?from=${next.current}${run != null ? `&run=${run}` : ""}`).then((r) => r.json()).then((j) => {
-      if (gone) return;
-      const stick = box.current && box.current.scrollHeight - box.current.scrollTop - box.current.clientHeight < 40;
-      if (j.next < next.current) return;
-      next.current = j.next;
-      setLines((old) => (old || []).concat(j.lines));
-      if (stick || !box.current) requestAnimationFrame(() => box.current && (box.current.scrollTop = box.current.scrollHeight));
-    });
-    return () => { gone = true; };
+    const s = f.current;
+    if (s.busy) { s.again = true; return; }
+    const load = () => {
+      const gen = s.gen;
+      s.busy = true;
+      fetch(`/api/log/${t.id}?from=${s.next}${run != null ? `&run=${run}` : ""}`).then((r) => r.json()).then((j) => {
+        if (f.current.gen !== gen) return;
+        const stick = box.current && box.current.scrollHeight - box.current.scrollTop - box.current.clientHeight < 40;
+        s.next = j.next;
+        setLines((old) => {
+          const all = (old || []).concat(j.lines);
+          if (all.length <= MAX_LINES) return all;
+          setCut((c) => c + all.length - MAX_LINES);
+          return all.slice(-MAX_LINES);
+        });
+        if (stick || !box.current) requestAnimationFrame(() => box.current && (box.current.scrollTop = box.current.scrollHeight));
+      }).catch(() => {}).finally(() => {
+        if (f.current.gen !== gen) return;
+        s.busy = false;
+        if (s.again) { s.again = false; load(); }
+      });
+    };
+    load();
   }, [t.id, size, run]);
   if (lines === null) return html`<div class="empty">Loading the log…</div>`;
   if (!lines.length) return html`<div class="empty">No log for this task.</div>`;
-  return html`<div class=${"log" + (full ? " full" : "")} ref=${box}>${lines.map((l) => html`<div class=${l.startsWith("  → ") ? "tool" : /^\[\w+: \d+ turns/.test(l) ? "res" : ""}>${l || " "}</div>`)}</div>`;
+  return html`<div class=${"log" + (full ? " full" : "")} ref=${box}>${cut ? html`<div class="muted">… ${cut} earlier lines</div>` : null}
+    ${lines.map((l) => html`<div class=${l.startsWith("  → ") ? "tool" : /^\[\w+: \d+ turns/.test(l) ? "res" : ""}>${l || " "}</div>`)}</div>`;
 }
 
 export function Task({ d, id, query }) {

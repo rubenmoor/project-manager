@@ -12,7 +12,7 @@ Serves the browser client (static/) and a JSON API on 127.0.0.1:
     /api/usage           the account's usage limits, from the newest rate_limit_event in the worker logs
     POST /api/edit       {"op": …}: add or change milestones, plans, tasks, resolve decisions through pm (edit.py)
 """
-import argparse, datetime, json, mimetypes, os, subprocess, sys, threading, time
+import argparse, datetime, json, mimetypes, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -42,9 +42,10 @@ class Watcher:
         self.last_good = None
         self.sig = None
         self.alive = None                       # the pid of `pm run`, while it lives
+        self.since_cache = (None, None)         # ((commit, sig), /api/since's answer)
 
     def signature(self):
-        git = Path(self.project.git("rev-parse", "--absolute-git-dir").strip())
+        git = self.project.git_dir
         out = []
         for p in (self.project.db_path, git / "HEAD", git / "index", git / "logs" / "HEAD"):
             try:
@@ -54,8 +55,8 @@ class Watcher:
                 out.append(None)
         return out
 
-    def running_log(self):
-        runs = (self.state or {}).get("tables", {}).get("run", [])
+    def running_log(self, state):
+        runs = (state or {}).get("tables", {}).get("run", [])
         r = next((r for r in runs if r["result"] == "running"), None)
         if r is None:
             return None
@@ -64,40 +65,31 @@ class Watcher:
         except FileNotFoundError:
             return r["task_id"], 0
 
-    def pm_run(self):
-        """The pid of the `pm run` that made the latest run, if it still lives: between tasks it commits, picks the
-        next task or waits for a usage limit's reset."""
-        runs = (self.state or {}).get("tables", {}).get("run", [])
-        pid = max(runs, key=lambda r: r["id"])["pid"] if runs else None
-        if not pid:
-            return None
-        try:
-            os.kill(pid, 0)
-        except ProcessLookupError:
-            return None
-        except PermissionError:
-            pass
-        return pid
+    def since(self, commit):
+        """/api/since, computed again only when tasks.sql or git changed."""
+        key = (commit, self.sig)
+        if self.since_cache[0] != key:
+            self.since_cache = (key, edit.since(self.project, commit))
+        return self.since_cache[1]
 
     def loop(self):
         while True:
             try:
                 sig = self.signature()
                 changed = sig != self.sig
-                if changed:
-                    self.sig = sig
-                    self.state = read_state(self.project, self.last_good)
-                    if "error" not in self.state:
-                        self.last_good = self.state
-                log, alive = self.running_log(), self.pm_run()
-                self.state["pm_run"] = alive
+                state = read_state(self.project, self.last_good) if changed else self.state
+                log, alive = self.running_log(state), self.project.run_pid()
                 if changed or log != self.log or alive != self.alive:
-                    self.log, self.alive = log, alive
+                    state = state | {"pm_run": alive}      # a new dict: handlers may be serializing the old one
+                    if "error" not in state:
+                        self.last_good = state
+                    self.state, self.sig, self.log, self.alive = state, sig, log, alive
                     with self.cond:
                         self.version += 1
                         self.cond.notify_all()
             except Exception as e:  # keep watching whatever happens; the error shows in the client
                 self.state = {"error": f"pm-dashboard: {e}", "last_good": self.last_good}
+                self.sig = None                         # read again next time
             time.sleep(POLL)
 
 
@@ -113,11 +105,16 @@ def read_state(project, last_good=None):
         with project.connect() as db:
             tables = {t: [dict(r) for r in db.execute(f"SELECT * FROM {t} ORDER BY rowid")] for t in TABLES}
             queue = [r["task_id"] for r in db.execute("SELECT task_id FROM queue")]
+            in_log = project.log_ids(db)
+        plan_prio = {p["id"]: p["priority"] for p in tables["plan"]}
+        for t in tables["task"]:
+            t["effective_priority"] = t["priority"] if t["priority"] is not None else plan_prio[t["plan_id"]] or 0
         for d in tables["decision"]:
             d["options"] = json.loads(d["options"])
+            d["in_log"] = d["id"] in in_log
             if d.get("signoff") and d["status"] == "pending":
                 d["signoff_view"] = project.signoff_view(d["id"], d["signoff"])
-        head_signoff = project.needs_signoff(queue[0]) if queue and hasattr(project, "needs_signoff") else None
+        head_signoff = project.needs_signoff(queue[0]) if queue else None
         done_plans = project.done_plans()
         errors = project.validate()
     except pm.FormatError as e:
@@ -213,9 +210,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(403, {"error": "unknown host or origin"})
         if self.path != "/api/edit" or not (self.headers.get("Content-Type") or "").startswith("application/json"):
             return self.send(404, {"error": "not found"})
-        n = int(self.headers.get("Content-Length") or 0)
-        if n > 1_000_000:
-            return self.send(413, {"error": "too large"})
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = -1
+        if not 0 <= n <= 1_000_000:
+            return self.send(413 if n > 0 else 400, {"error": "bad or too large Content-Length"})
         try:
             op = json.loads(self.rfile.read(n))
             if not isinstance(op, dict):
@@ -241,7 +241,7 @@ class Handler(BaseHTTPRequestHandler):
             commit = query.get("commit", [""])[0]
             if not commit.isalnum():
                 return self.send(400, {"error": "bad commit"})
-            return self.send(200, edit.since(w.project, commit))
+            return self.send(200, w.since(commit))
         if path.startswith("/api/task/") and path.endswith("/commit"):
             try:
                 tid = int(path.split("/")[3])

@@ -21,7 +21,7 @@
 - **Task kind:**
   - `work` (default): anything else
   - `plan`: writes a plan (`pm task add … --kind plan`)
-  - made by pm only: `masterplan` ("write the masterplan of milestone N: …", "revise the masterplan of milestone N: …"), `split` ("create tasks for plan N: …"), `cleanup` ("post-milestone cleanup of milestone N: …"); "revise plan N: …" is a `plan` task
+  - made by pm only: `masterplan` ("write the masterplan of milestone N: …"), `split` ("create tasks for plan N: …"), `cleanup` ("post-milestone cleanup of milestone N: …"), `revise` ("revise the masterplan of milestone N: …", "revise plan N: …")
   - `plan`, `masterplan`, `split`: priority `planning_priority` (1000) unless given
   - checked by `pm run` when done: `plan` and `masterplan` must add or change a plan (except "revise …", which may leave it as it is), `split` must leave its plan with tasks; otherwise the task is committed and the run stops
 - **Decision:** subject (the question), body (context), options (the recommended one first), status `pending` | `answered` | `irrelevant`. A task linked to a pending decision waits. When the human answers, the task becomes workable again and its worker sees the answer in `pm show`. When a decision is marked irrelevant, the open tasks waiting for it are dropped.

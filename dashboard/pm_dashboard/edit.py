@@ -1,7 +1,7 @@
 """Writes through pm's own methods, and reads of tasks.sql history from git.
 
-Rules for writes while a worker runs: the running task can't be changed; everything else can, and is committed with
-the running task (pm commits tasks.sql with it), not on its own."""
+pm's rules apply: while a worker runs, its task can't be changed, and other changes are committed with that task.
+A text edit carries the text it started from ("base"); it is refused if the row changed since."""
 import json, sqlite3, subprocess, time
 
 import pm
@@ -13,9 +13,7 @@ class EditError(Exception):
     pass
 
 
-def running_task(project):
-    rows = project.rows("SELECT task_id FROM run WHERE result = 'running'")
-    return rows[0]["task_id"] if rows else None
+TABLES = {"task_edit": "task", "plan_edit": "plan", "milestone_edit": "milestone"}
 
 
 def text(v, what, required=True):
@@ -37,9 +35,11 @@ def prio(v):
 def apply(project, op):
     """Run one edit; returns (message for the commit, the new row's id or None)."""
     kind = op.get("op")
-    running = running_task(project)
-    if kind in ("task_edit", "task_close") and op.get("id") == running:
-        raise EditError(f"task {running} is running; it can't be changed until its run ends")
+    if kind in TABLES and isinstance(base := op.get("base"), dict):
+        row = project.rows(f"SELECT * FROM {TABLES[kind]} WHERE id = ?", int(op["id"]))
+        if row and (changed := [f for f, v in base.items() if f in ("subject", "body") and row[0][f] != v]):
+            raise EditError(f"the {' and '.join(changed)} changed since you started editing (a worker or another "
+                            f"window); copy your text, then edit the new version")
     if kind == "milestone_add":
         subject = text(op.get("subject"), "the subject")
         mid = project.milestone_add(subject.strip(), text(op.get("body", ""), "the body", False) or "")
@@ -53,9 +53,7 @@ def apply(project, op):
         mid, hold = int(op["id"]), op.get("hold")
         if not isinstance(hold, bool):
             raise EditError("hold must be true or false")
-        if not hold and project.rows("SELECT 1 FROM milestone WHERE id = ? AND status <> 'on-hold'", mid):
-            raise EditError(f"milestone {mid} is not on hold")
-        project.milestone_set(mid, status="on-hold" if hold else "open")
+        project.milestone_hold(mid, hold)
         return f"milestone {mid} " + ("on hold" if hold else "resumed"), None
     if kind == "plan_add":
         subject = text(op.get("subject"), "the subject")
@@ -96,14 +94,10 @@ def apply(project, op):
         once, sup = op.get("once", False), op.get("supersedes", [])
         if not isinstance(once, bool) or not isinstance(sup, list) or not all(type(s) is int for s in sup):
             raise EditError("once must be true or false, supersedes a list of decision ids")
-        if project.rows("SELECT 1 FROM decision WHERE id = ? AND signoff IS NOT NULL", int(op["id"])):
-            raise EditError(f"decision {op['id']} is a sign-off: approve it")
         said = project.answer(int(op["id"]), text(op.get("answer"), "the answer").strip(), "once" if once else None, sup)
         return f"decision {op['id']} answered: {short(said)}", None
     if kind == "decision_approve":
-        if not project.rows("SELECT 1 FROM decision WHERE id = ? AND signoff IS NOT NULL", int(op["id"])):
-            raise EditError(f"decision {op['id']} is not a sign-off; answer it")
-        project.resolve(int(op["id"]), answer=pm.SIGNOFF_ANSWER)
+        project.approve(int(op["id"]))
         return f"decision {op['id']} approved", None
     if kind == "decision_irrelevant":
         reason = text(op.get("reason"), "the reason").strip()
@@ -127,9 +121,8 @@ def edit(project, op):
     except pm.FormatError as e:
         raise EditError(str(e)) from None
     for _ in range(10):                    # git may be busy with a commit of pm run (index.lock)
-        if running_task(project) is not None or not project.git("status", "--porcelain", "--", project.db).strip():
+        if project.commit_db(msg + " (dashboard)"):
             break
-        project.commit_db(msg + " (dashboard)")
         time.sleep(0.3)
     return {"ok": True, "id": rid, "message": msg}
 
@@ -138,14 +131,11 @@ def edit(project, op):
 
 def load(sql):
     """tasks.sql text as {table: {key: row}}."""
-    con = sqlite3.connect(":memory:")
+    con = pm.load_sql(sql)
     try:
-        con.row_factory = sqlite3.Row
-        con.executescript(f"BEGIN;\n{sql}\nCOMMIT;")
         out = {}
-        for (t,) in con.execute("SELECT name FROM sqlite_schema WHERE type = 'table'"):
-            info = con.execute(f"PRAGMA table_info({t})").fetchall()
-            key = [c[1] for c in sorted(info, key=lambda c: c[5]) if c[5]]
+        for (t,) in con.execute("SELECT name FROM sqlite_schema WHERE type = 'table'").fetchall():
+            key = pm.primary_key(con, t)
             out[t] = {"/".join(str(r[k]) for k in key): dict(r) for r in con.execute(f"SELECT * FROM {t}")}
         return out
     finally:
@@ -188,10 +178,12 @@ def since(project, commit):
 
 def task_commit(project, tid):
     """The commit `pm run` made for task tid ("task N: subject"), with its patch."""
-    out = project.git("log", "-1", "--format=%H%x00%cI%x00%s%x00%b", "-E", f"--grep=^task {int(tid)}: ").strip()
-    if not out:
+    # --grep matches any line of a message: keep the first commit whose subject is the task's
+    out = project.git("log", "-z", "--format=%H%x00%cI%x00%s%x00%b%x00", "-E", f"--grep=^task {int(tid)}: ").split("\0")
+    hits = [out[i:i + 4] for i in range(0, len(out) - 3, 5) if out[i + 2].startswith(f"task {int(tid)}: ")]
+    if not hits:
         return {"commit": None}
-    commit, date, subject, body = (out.split("\0") + [""] * 4)[:4]
+    commit, date, subject, body = [x.lstrip("\n") for x in hits[0]]
     patch = project.git("show", "--format=", "--patch", "-M", "--no-color", commit)
     stat = project.git("show", "--format=", "--numstat", "-M", commit)
     files = []

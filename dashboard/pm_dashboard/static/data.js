@@ -9,41 +9,32 @@ export function index(state) {
     running: t.run.find((r) => r.result === "running") || null,
     planDone: new Set(state.done_plans || []),
   };
-  const group = (rows, key) => {
+  // rows grouped by key(row): Map key → [value(row)]
+  const group = (rows, key, value = (r) => r) => {
     const m = new Map();
-    for (const r of rows) (m.get(r[key]) || m.set(r[key], []).get(r[key])).push(r);
+    for (const r of rows) {
+      const k = key(r);
+      (m.get(k) || m.set(k, []).get(k)).push(value(r));
+    }
     return m;
   };
-  d.plansOf = group(t.plan, "milestone_id");
-  d.tasksOf = group(t.task, "plan_id");
-  d.runsOf = group(t.run, "task_id");
-  d.decisionsOf = new Map();
-  d.tasksWaiting = new Map();
-  for (const l of t.task_decision) {
-    (d.decisionsOf.get(l.task_id) || d.decisionsOf.set(l.task_id, []).get(l.task_id)).push(d.decision.get(l.decision_id));
-    (d.tasksWaiting.get(l.decision_id) || d.tasksWaiting.set(l.decision_id, []).get(l.decision_id)).push(d.task.get(l.task_id));
-  }
+  d.plansOf = group(t.plan, (r) => r.milestone_id);
+  d.tasksOf = group(t.task, (r) => r.plan_id);
+  d.runsOf = group(t.run, (r) => r.task_id);
+  d.decisionsOf = group(t.task_decision, (l) => l.task_id, (l) => d.decision.get(l.decision_id));
+  d.tasksWaiting = group(t.task_decision, (l) => l.decision_id, (l) => d.task.get(l.task_id));
   // Supersede links: decision id → [{ id, note }] of the decisions it replaces, and of those replacing it.
-  d.supersedes = new Map();
-  d.supersededBy = new Map();
-  for (const l of t.decision_supersedes || []) {
-    (d.supersedes.get(l.decision_id) || d.supersedes.set(l.decision_id, []).get(l.decision_id)).push({ id: l.superseded_id, note: l.note });
-    (d.supersededBy.get(l.superseded_id) || d.supersededBy.set(l.superseded_id, []).get(l.superseded_id)).push({ id: l.decision_id, note: l.note });
-  }
-  // The decision log, as `pm decision list --answered`: answered lasting questions nothing fully supersedes.
-  d.inLog = (x) => x.status === "answered" && !x.signoff && x.kind !== "once"
-    && !(d.supersededBy.get(x.id) || []).some((s) => !s.note);
-  d.createdBy = new Map();
-  for (const [kind, rows] of [["plan", t.plan], ["task", t.task], ["decision", t.decision]])
-    for (const r of rows)
-      if (r.created_by_task != null)
-        (d.createdBy.get(r.created_by_task) || d.createdBy.set(r.created_by_task, []).get(r.created_by_task)).push([kind, r]);
+  const sup = t.decision_supersedes || [];
+  d.supersedes = group(sup, (l) => l.decision_id, (l) => ({ id: l.superseded_id, note: l.note }));
+  d.supersededBy = group(sup, (l) => l.superseded_id, (l) => ({ id: l.decision_id, note: l.note }));
+  // The decision log, as `pm decision list --answered` (pm decides: in_log).
+  d.inLog = (x) => !!x.in_log;
+  d.createdBy = group([["plan", t.plan], ["task", t.task], ["decision", t.decision]]
+    .flatMap(([kind, rows]) => rows.filter((r) => r.created_by_task != null).map((r) => [kind, r])), ([, r]) => r.created_by_task);
   d.milestoneOfTask = (task) => d.milestone.get(d.plan.get(task.plan_id).milestone_id);
-  d.prio = (task) => {
-    if (task.priority != null) return { value: task.priority, from: "task" };
-    const p = d.plan.get(task.plan_id);
-    return p.priority != null ? { value: p.priority, from: "plan" } : { value: 0, from: "default" };
-  };
+  // The priority pm queues the task by (effective_priority), and where it comes from.
+  d.prio = (task) => ({ value: task.effective_priority ?? 0,
+    from: task.priority != null ? "task" : d.plan.get(task.plan_id).priority != null ? "plan" : "default" });
   // Pending decisions an open task of milestone m waits for: the ones the milestone needs answered to finish.
   d.milestoneDecisions = (m) => d.decisions.filter((x) => x.status === "pending"
     && (d.tasksWaiting.get(x.id) || []).some((t) => t.status === "open" && d.milestoneOfTask(t).id === m.id));

@@ -19,12 +19,12 @@ Works on the git repository around the current directory. `pm init` writes the s
 template is the file of that name next to this one), and commits it; the first command that uses the database
 writes it. pm commits its own changes to tasks.sql; workers commit them with their work. Nothing is pushed.
 """
-import argparse, collections, contextlib, datetime, fcntl, json, os, re, shlex, signal, sqlite3, subprocess, sys, \
-    time, tomllib, zoneinfo
+import argparse, collections, contextlib, datetime, fcntl, functools, json, os, re, shlex, signal, sqlite3, \
+    subprocess, sys, threading, time, tomllib, zoneinfo
 from pathlib import Path
 
 
-VERSION = 22  # bump by one with every commit (AGENTS.md)
+VERSION = 23  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -43,19 +43,30 @@ REVISE_MASTERPLAN_SUBJECT = "revise the masterplan of {}"
 REVISE_PLAN_SUBJECT = "revise {}"
 # Dedupes queued planning tasks: a running one may have read the old text already, so it doesn't count.
 NOT_RUNNING = "AND id NOT IN (SELECT task_id FROM run WHERE result = 'running')"
-# work: the default; plan: writes a plan; masterplan, split ("create tasks for plan N: …"), cleanup: made by pm only
-TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup")
+# work: the default; plan: writes a plan; made by pm only: masterplan, split ("create tasks for plan N: …"), cleanup,
+# revise ("revise the masterplan of milestone N: …", "revise plan N: …")
+TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup", "revise")
 PLANNING_KINDS = ("plan", "masterplan", "split")
 # `signoff` in project-manager.toml → decision.signoff; a sign-off's only answer is SIGNOFF_ANSWER
 SIGNOFF_LEVELS = {"masterplans": "masterplan", "plans": "plan", "task-queue": "task-queue"}
 SIGNOFF_ANSWER = "approve"
+# The decision log: answered lasting questions that nothing fully supersedes.
+IN_LOG = ("status = 'answered' AND signoff IS NULL AND kind = 'rule' AND id NOT IN (SELECT superseded_id FROM "
+          "decision_supersedes s JOIN decision n ON n.id = s.decision_id WHERE s.note = '' AND n.status = 'answered')")
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 # A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
 # run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
 # Columns and tables SCHEMA dropped are left behind, new ones get their defaults; so only renames, moved data and new
 # columns without a default need a step, else "".
-MIGRATIONS = {12: "", 13: ""}
+def revise_kind(con):
+    """14 -> 15: revisions of plans, told apart by their subject before, get the kind revise."""
+    con.execute("PRAGMA ignore_check_constraints = ON")
+    con.execute("UPDATE task SET kind = 'revise' WHERE kind IN ('plan', 'masterplan') "
+                "AND (subject LIKE 'revise the masterplan of %' OR subject LIKE 'revise plan %')")
+
+
+MIGRATIONS = {12: "", 13: "", 14: revise_kind}
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -83,7 +94,7 @@ CREATE TABLE task (
     id              INTEGER PRIMARY KEY,
     plan_id         INTEGER NOT NULL REFERENCES plan (id),
     subject         TEXT NOT NULL CHECK (trim(subject) <> ''),
-    kind            TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'plan', 'masterplan', 'split', 'cleanup')),
+    kind            TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'plan', 'masterplan', 'split', 'cleanup', 'revise')),
     status          TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done', 'dropped')),
     priority        INTEGER,                               -- NULL: the plan's
     note            TEXT,                                  -- done: date, files; dropped: reason
@@ -263,14 +274,15 @@ def now():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def option_lines(options):
+    """A decision's options, numbered, the recommended one first."""
+    return [f"  {n}) {o}{'  (recommended)' if n == 1 else ''}" for n, o in enumerate(options, 1)]
+
+
 def ref(kind, id, subject, md=False):
     """An item as `<kind> <id>: <subject>`; md: in backticks, for a body."""
     text = f"{kind} {id}: {subject}"
     return f"`{text}`" if md else text
-
-
-def is_revise_plan(subject, pid):
-    return subject == f"revise plan {pid}" or subject.startswith(f"revise plan {pid}: ")
 
 
 def creator():
@@ -381,6 +393,11 @@ def load_config(root):
     return config
 
 
+def primary_key(con, table):
+    info = con.execute(f"PRAGMA table_info({table})").fetchall()
+    return [c[1] for c in sorted(info, key=lambda c: c[5]) if c[5]]
+
+
 def dump(con):
     """The database as SQL text: schema, then one INSERT per row, sorted by primary key."""
     out = [f"-- pm database. Change it with pm; after a hand edit run `pm validate`.",
@@ -391,14 +408,62 @@ def dump(con):
         if kind == "table":
             tables.append(name)
     for t in tables:
-        info = con.execute(f"PRAGMA table_info({t})").fetchall()
-        cols = [c[1] for c in info]
-        key = [c[1] for c in sorted(info, key=lambda c: c[5]) if c[5]]
+        cols = [c[1] for c in con.execute(f"PRAGMA table_info({t})")]
+        key = primary_key(con, t)
         rows = con.execute(f"SELECT {', '.join(f'quote({c})' for c in cols)} FROM {t} ORDER BY {', '.join(key)}")
         out += [f"INSERT INTO {t} ({', '.join(cols)}) VALUES ({', '.join(r)});" for r in rows]
         out.append("")
     return "\n".join(out).rstrip() + "\n"
 
+
+def running_run(db):
+    """The run row of the worker running now, or None."""
+    r = db.execute("SELECT * FROM run WHERE result = 'running'").fetchone()
+    return dict(r) if r else None
+
+
+def memory():
+    con = sqlite3.connect(":memory:", isolation_level=None, check_same_thread=False)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def allow_dump_sql(action, arg1, *_):
+    """Authorizer while a database file runs: no ATTACH (it writes files), no PRAGMA but user_version."""
+    if action in (sqlite3.SQLITE_ATTACH, sqlite3.SQLITE_DETACH) or (
+            action == sqlite3.SQLITE_PRAGMA and arg1 != "user_version"):
+        return sqlite3.SQLITE_DENY
+    return sqlite3.SQLITE_OK
+
+
+def load_sql(text):
+    """SQL text (a database file, or SCHEMA) in a new in-memory database, in one transaction."""
+    con = memory()
+    con.set_authorizer(allow_dump_sql)
+    try:
+        con.executescript(f"BEGIN;\n{text}\nCOMMIT;")
+    except BaseException:
+        con.close()
+        raise
+    con.set_authorizer(None)
+    return con
+
+
+@functools.cache
+def schema_sql():
+    con = load_sql(SCHEMA)
+    try:
+        return {(r[0], r[1]): r[2] for r in con.execute("SELECT type, name, sql FROM sqlite_schema WHERE sql IS NOT NULL")}
+    finally:
+        con.close()
+
+
+def schema_difference(con):
+    """How the schema of a loaded database file differs from SCHEMA, or None."""
+    have = {(r[0], r[1]): r[2] for r in con.execute("SELECT type, name, sql FROM sqlite_schema WHERE sql IS NOT NULL")}
+    want = schema_sql()
+    diff = sorted({k for k in have.keys() | want.keys() if have.get(k) != want.get(k)})
+    return "schema differs from pm's in " + ", ".join(f"{t} {n}" for t, n in diff) if diff else None
 
 
 class Project:
@@ -409,64 +474,106 @@ class Project:
         self.db_path = self.root / self.db
         self.out = out
         self.stopping = False       # `pm run` stops after the current task
+        self.cache = None           # (file_key(), the loaded database)
+        self.mutex = threading.RLock()
+        self.locked = False
 
     def say(self, *args):
         print(*args, file=self.out, flush=True)
 
     # --- database ----------------------------------------------------------------------------
 
+    @functools.cached_property
+    def git_dir(self):
+        return Path(self.git("rev-parse", "--absolute-git-dir").strip())
+
     @contextlib.contextmanager
     def lock(self):
         """Exclusive while one pm process changes the database."""
-        with open(Path(self.git("rev-parse", "--absolute-git-dir").strip()) / "pm.lock", "w") as f:
+        with open(self.git_dir / "pm.lock", "w") as f:
             fcntl.flock(f, fcntl.LOCK_EX)
-            yield
+            self.locked = True
+            try:
+                yield
+            finally:
+                self.locked = False
+
+    def file_key(self):
+        try:
+            st = self.db_path.stat()
+        except FileNotFoundError:
+            return None
+        return st.st_ino, st.st_mtime_ns, st.st_size
 
     @contextlib.contextmanager
     def connect(self, write=False):
-        """The database file loaded into memory, foreign keys on. write: one transaction under the lock, written
-        back to the file if it changed; nothing is written if the block raises. No file yet: written with the schema."""
-        with self.lock() if write else contextlib.nullcontext():
-            con = sqlite3.connect(":memory:", isolation_level=None)
-            try:
-                con.row_factory = sqlite3.Row
-                text = self.db_path.read_text(encoding="utf-8") if self.db_path.exists() else None
-                try:
-                    con.executescript(f"BEGIN;\n{text}\nCOMMIT;" if text is not None else
-                                      f"BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;")
-                except sqlite3.Error as e:
-                    raise FormatError(f"{self.db}: {e}") from None
-                version = con.execute("PRAGMA user_version").fetchone()[0]
-                if version != SCHEMA_VERSION:
-                    con = self.migrate(con, version)
-                    new = dump(con)
-                    with contextlib.nullcontext() if write else self.lock():
-                        if self.db_path.read_text(encoding="utf-8") != text:
-                            raise FormatError(f"{self.db} changed while migrating, try again")
-                        self.save(new)
-                        self.commit_db(f"{self.db}: schema {version} -> {SCHEMA_VERSION}")
-                    self.say(f"pm: migrated {self.db} from schema {version} to {SCHEMA_VERSION}")
-                    text = new
-                con.execute("PRAGMA foreign_keys = ON")
-                if text is None:
-                    text = dump(con)
-                    self.save(text)
-                if not write:
-                    yield con
-                    return
+        """The database file loaded into memory, foreign keys on; loaded once per process and again only when the
+        file changes. write: one transaction under the lock, written back to the file if it changed; rolled back and
+        nothing written if the block raises. No file yet: written with the schema."""
+        with self.mutex, self.lock() if write else contextlib.nullcontext():
+            con = self.loaded()
+            before = con.total_changes
+            if not con.in_transaction:          # else: nested in a write, which sees its own changes
+                con.execute(f"PRAGMA query_only = {'OFF' if write else 'ON'}")
+            if write:
                 con.execute("BEGIN")
+            try:
                 yield con
                 if con.in_transaction:
                     con.execute("COMMIT")
-                new = dump(con)
-                if new != text:
-                    self.save(new)
-            except sqlite3.IntegrityError as e:
-                raise FormatError(f"the change breaks the schema, nothing written: {e}") from None
-            except sqlite3.DatabaseError as e:
-                raise FormatError(f"{self.db}: {e}") from None
-            finally:
-                con.close()
+            except BaseException as e:
+                if con.in_transaction:
+                    con.execute("ROLLBACK")
+                if isinstance(e, sqlite3.IntegrityError):
+                    raise FormatError(f"the change breaks the schema, nothing written: {e}") from None
+                if isinstance(e, sqlite3.DatabaseError):
+                    raise FormatError(f"{self.db}: {e}") from None
+                raise
+            if write and con.total_changes != before:
+                try:
+                    self.save(dump(con))
+                except BaseException:
+                    self.forget()
+                    raise
+
+    def forget(self):
+        if self.cache:
+            self.cache[1].close()
+        self.cache = None
+
+    def loaded(self):
+        """The cached connection, (re)loaded if the file changed since."""
+        key = self.file_key()
+        if self.cache and self.cache[0] == key and key is not None:
+            return self.cache[1]
+        self.forget()
+        text = self.db_path.read_text(encoding="utf-8") if key else None
+        try:
+            con = load_sql(text) if text is not None else load_sql(f"{SCHEMA} PRAGMA user_version = {SCHEMA_VERSION};")
+        except sqlite3.Error as e:
+            if "not authorized" in str(e):
+                raise FormatError(f"{self.db} holds a statement a dump doesn't (ATTACH or a PRAGMA besides "
+                                  "user_version); pm doesn't run it. Undo the hand edit") from None
+            raise FormatError(f"{self.db}: {e}") from None
+        version = con.execute("PRAGMA user_version").fetchone()[0]
+        if version != SCHEMA_VERSION:
+            con = self.migrate(con, version)
+            with contextlib.nullcontext() if self.locked else self.lock():
+                if self.db_path.read_text(encoding="utf-8") != text:
+                    con.close()
+                    raise FormatError(f"{self.db} changed while migrating, try again")
+                self.save(dump(con))
+                self.commit_db(f"{self.db}: schema {version} -> {SCHEMA_VERSION}", running_run(con))
+            self.say(f"pm: migrated {self.db} from schema {version} to {SCHEMA_VERSION}")
+        elif problem := schema_difference(con):
+            con.close()
+            raise FormatError(f"{self.db}: {problem}; the schema is pm's (SCHEMA in pm/__init__.py), "
+                              f"undo the hand edit or merge")
+        elif text is None:
+            self.save(dump(con))
+        con.execute("PRAGMA foreign_keys = ON")
+        self.cache = (self.file_key(), con)
+        return con
 
     def migrate(self, old, version):
         """`old` (schema `version`) brought to SCHEMA_VERSION: MIGRATIONS in order, then the rows of the tables and
@@ -481,9 +588,7 @@ class Project:
             for v in range(version, SCHEMA_VERSION):
                 step = MIGRATIONS[v]
                 step(old) if callable(step) else old.executescript(step)
-            con = sqlite3.connect(":memory:", isolation_level=None)
-            con.row_factory = sqlite3.Row
-            con.executescript(f"BEGIN; {SCHEMA} PRAGMA user_version = {SCHEMA_VERSION}; COMMIT;")
+            con = load_sql(f"{SCHEMA} PRAGMA user_version = {SCHEMA_VERSION};")
             con.execute("BEGIN")
             for (t,) in con.execute("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY rowid").fetchall():
                 have = {c[1] for c in old.execute(f"PRAGMA table_info({t})")}
@@ -503,15 +608,24 @@ class Project:
         tmp.write_text(text, encoding="utf-8")
         os.replace(tmp, self.db_path)
 
-    def commit_db(self, message):
-        """Commit the database file if it changed; not in a worker, which commits it with its work."""
+    def commit_db(self, message, running=...):
+        """Commit the database file if it changed. Not in a worker, nor while one runs: `pm run` commits the file with
+        the task. Returns False if git failed."""
         if os.environ.get("PM_WORKER") or not self.git("status", "--porcelain", "--", self.db).strip():
-            return
+            return True
+        if running is ...:
+            with self.connect() as db:
+                running = running_run(db)
+        if running:
+            self.say(f"pm: task {running['task_id']} is running; {self.db} is committed with it")
+            return True
         try:
             self.git("add", "--", self.db)
             self.git("commit", "-q", "-m", f"pm: {message}", "--", self.db)
+            return True
         except subprocess.CalledProcessError as e:
             self.say(f"pm: committing {self.db} failed: {e.stderr.strip()}")
+            return False
 
     def rows(self, sql, *args):
         with self.connect() as db:
@@ -547,7 +661,8 @@ class Project:
         return subprocess.run(["git", *args], cwd=self.root, capture_output=True, text=True, check=True).stdout
 
     def dirty(self):
-        return bool(self.git("status", "--porcelain").strip())
+        """Changes besides the database (pm commits that itself)."""
+        return any(l[3:] != self.db for l in self.git("status", "--porcelain").splitlines())
 
     # --- validate ----------------------------------------------------------------------------
 
@@ -623,14 +738,16 @@ class Project:
         if not answered and not everything:
             ds = [d for d in self.pending() if matches(d, grep)]
             return self.decisions_of(ds) or ("No pending decisions" + (" matching " + " or ".join(map(repr, grep)) if grep else "") + ".\n")
-        where = "" if everything else (
-            "WHERE status = 'answered' AND signoff IS NULL AND kind = 'rule' "
-            "AND id NOT IN (SELECT superseded_id FROM decision_supersedes s JOIN decision n ON n.id = s.decision_id "
-            "WHERE s.note = '' AND n.status = 'answered')")
+        where = "" if everything else "WHERE " + IN_LOG
         ds = [d for d in self.rows(f"SELECT * FROM decision {where} ORDER BY coalesce(closed_at, created_at) DESC, "
                                    "id DESC") if matches(d, grep)]
         return "\n".join(self.log_entry(d) for d in ds) or (
             "No decisions" + (" matching " + " or ".join(map(repr, grep)) if grep else "") + ".\n")
+
+    @staticmethod
+    def log_ids(db):
+        """Ids of the decisions in the log (`pm decision list --answered`)."""
+        return {r[0] for r in db.execute(f"SELECT id FROM decision WHERE {IN_LOG}")}
 
     def log_entry(self, d):
         """A decision in a few lines: header, answer, consequences, supersede links."""
@@ -678,7 +795,7 @@ class Project:
         if d["signoff"] and d["status"] == "pending":
             out += ["", self.signoff_view(did, d["signoff"])]
         if opts := json.loads(d["options"]):
-            out += ["", "Options:"] + [f"  {n}) {o}{'  (recommended)' if n == 1 else ''}" for n, o in enumerate(opts, 1)]
+            out += ["", "Options:"] + option_lines(opts)
         if d["answer"]:
             out += ["", f"Answer ({stamp(d['closed_at'])}" + (f", task {d['decided_by_task']}'s own choice" if
                                                              d["decided_by_task"] else "") + f"): {d['answer']}"]
@@ -705,8 +822,7 @@ class Project:
                 out.append(f"  blocks task(s) {', '.join(blocks)}")
             if d["body"]:
                 out.append("  " + d["body"].replace("\n", "\n  "))
-            for n, o in enumerate(d["options"], 1):
-                out.append(f"  {n}) {o}{'  (recommended)' if n == 1 else ''}")
+            out += option_lines(d["options"])
             out.append("")
         return "\n".join(out)
 
@@ -734,10 +850,19 @@ class Project:
             closed += 1
         return closed
 
+    def approve(self, did):
+        with self.connect() as db:
+            if not self.get(db, "decision", did)["signoff"]:
+                raise FormatError(f"decision {did} is not a sign-off; answer it (pm decision answer)")
+        self.resolve(did, answer=SIGNOFF_ANSWER)
+
     def answer(self, did, reply, kind=None, supersedes=()):
         """Answer decision did: an option's number or own text. Returns the answer."""
         with self.connect() as db:
-            opts = json.loads(self.get(db, "decision", did)["options"])
+            d = self.get(db, "decision", did)
+            opts = json.loads(d["options"])
+        if d["signoff"] and reply != SIGNOFF_ANSWER:
+            raise FormatError(f"decision {did} is a sign-off: approve it (pm decision approve {did})")
         if reply.isdigit() and 1 <= int(reply) <= len(opts):
             reply = opts[int(reply) - 1]
         self.resolve(did, answer=reply, kind=kind, supersedes=supersedes)
@@ -874,7 +999,7 @@ class Project:
     def edit(self, name, template=""):
         """Open the user's editor (as `git commit` does) on <git dir>/<name> holding `template`. Returns the saved
         text, or None if the editor failed or the file was not saved. No comment lines: '#' starts Markdown headings."""
-        path = Path(self.git("rev-parse", "--absolute-git-dir").strip()) / name
+        path = self.git_dir / name
         path.write_text(template, encoding="utf-8")
         before = path.stat().st_mtime_ns
         editor = self.config["editor"]
@@ -901,6 +1026,8 @@ class Project:
         """For `pm <what> add`: with a subject, the body from stdin; without, both from the editor (first
         line: subject, the rest: body). None if the editor was quit without saving or saved empty."""
         if subject is not None:
+            if sys.stdin.isatty():
+                print(f"pm: the body of the {what}, then Ctrl-D (or pipe it: … < body.md):", file=sys.stderr)
             return subject, sys.stdin.read()
         if not sys.stdin.isatty():
             raise FormatError(f"`pm {what} add` without a subject needs a terminal; give the subject and pipe the "
@@ -934,6 +1061,12 @@ class Project:
                                     plan=ref("plan", pid, "masterplan", True)),
                         creator()))
         return mid
+
+    def milestone_hold(self, mid, hold):
+        """Put a milestone on hold, or resume one on hold."""
+        if not hold and self.rows("SELECT 1 FROM milestone WHERE id = ? AND status <> 'on-hold'", mid):
+            raise FormatError(f"milestone {mid} is not on hold")
+        self.milestone_set(mid, status="on-hold" if hold else "open")
 
     def milestone_set(self, mid, **fields):
         """Set fields of a milestone (subject, status, body, queue_index); None leaves a field as it is. A changed subject or body
@@ -975,26 +1108,43 @@ class Project:
         return db.execute("SELECT min(t.plan_id) FROM task t JOIN plan p ON p.id = t.plan_id "
                           "WHERE p.milestone_id = ? AND t.kind = 'masterplan'", (mid,)).fetchone()[0]
 
-    def child_plans(self, db, pid):
-        mid = self.get(db, "plan", pid)["milestone_id"]
+    def plan_children(self, db, mid):
+        """{plan id: [ids of the plans below it]} of milestone mid."""
         master = self.masterplan(db, mid)
         rows = db.execute("SELECT p.id, CASE WHEN q.milestone_id = p.milestone_id AND q.id <> p.id THEN q.id END "
                           "FROM plan p LEFT JOIN task t ON t.id = p.created_by_task LEFT JOIN plan q ON q.id = t.plan_id "
                           "WHERE p.milestone_id = ? AND p.id <> ? ORDER BY p.id", (mid, master or 0)).fetchall()
-        return [c for c, parent in rows if (parent or master) == pid and c != pid]
+        children = {}
+        for c, parent in rows:
+            if (parent or master) not in (None, c):
+                children.setdefault(parent or master, []).append(c)
+        return children
 
-    def plan_done(self, db, pid, seen=None):
-        seen = set() if seen is None else seen
-        seen.add(pid)
-        if not db.execute("SELECT 1 FROM task WHERE plan_id = ?", (pid,)).fetchone() or \
-                db.execute("SELECT 1 FROM task WHERE plan_id = ? AND status = 'open'", (pid,)).fetchone():
-            return False
-        return all(self.plan_done(db, c, seen) for c in self.child_plans(db, pid) if c not in seen)
+    def child_plans(self, db, pid):
+        return self.plan_children(db, self.get(db, "plan", pid)["milestone_id"]).get(pid, [])
+
+    def plan_done(self, db, pid, children=None, memo=None):
+        """Plan pid has tasks, none open, and every plan below it is done. children: plan_children of its milestone;
+        memo: answers so far (a cycle counts as done)."""
+        if children is None:
+            children = self.plan_children(db, self.get(db, "plan", pid)["milestone_id"])
+        memo = {} if memo is None else memo
+        if pid not in memo:
+            memo[pid] = True
+            n, open_ = db.execute("SELECT count(*), coalesce(sum(status = 'open'), 0) FROM task WHERE plan_id = ?",
+                                  (pid,)).fetchone()
+            memo[pid] = bool(n) and not open_ and all(self.plan_done(db, c, children, memo) for c in children.get(pid, []))
+        return memo[pid]
 
     def done_plans(self):
         """Ids of the done plans."""
         with self.connect() as db:
-            return [pid for (pid,) in db.execute("SELECT id FROM plan ORDER BY id").fetchall() if self.plan_done(db, pid)]
+            out = []
+            for (mid,) in db.execute("SELECT id FROM milestone ORDER BY id").fetchall():
+                children, memo = self.plan_children(db, mid), {}
+                out += [pid for (pid,) in db.execute("SELECT id FROM plan WHERE milestone_id = ?", (mid,)).fetchall()
+                        if self.plan_done(db, pid, children, memo)]
+            return sorted(out)
 
     def check_plan_open(self, db, pid):
         if self.plan_done(db, pid):
@@ -1024,7 +1174,7 @@ class Project:
             subject = REVISE_MASTERPLAN_SUBJECT.format(ref("milestone", m["id"], m["subject"]))
             body = self.prompt("revise_masterplan_prompt", plan_id=pid, plan=ref("plan", pid, p["subject"], True),
                                milestone=ref("milestone", m["id"], m["subject"], True))
-            if db.execute("SELECT 1 FROM task WHERE plan_id = ? AND kind = 'masterplan' AND status = 'open' "
+            if db.execute("SELECT 1 FROM task WHERE plan_id = ? AND kind IN ('masterplan', 'revise') AND status = 'open' "
                           + NOT_RUNNING, (pid,)).fetchone():
                 return None
         else:
@@ -1034,13 +1184,12 @@ class Project:
                                 plan=ref("plan", pid, p["subject"], True),
                                 parent_plan=ref("plan", parent, q["subject"], True))
                     + f"\n\n# Plan {parent}: {q['subject']}\n\n{q['body']}")
-            if old := [r for r in db.execute("SELECT id, subject FROM task WHERE plan_id = ? AND kind = 'plan' "
-                                             "AND status = 'open' " + NOT_RUNNING, (pid,)).fetchall()
-                       if is_revise_plan(r[1], pid)]:
-                db.execute("UPDATE task SET subject = ?, body = ? WHERE id = ?", (subject, body, old[0][0]))
+            if old := db.execute("SELECT id FROM task WHERE plan_id = ? AND kind = 'revise' AND status = 'open' "
+                                 + NOT_RUNNING, (pid,)).fetchone():
+                db.execute("UPDATE task SET subject = ?, body = ? WHERE id = ?", (subject, body, old[0]))
                 return None
         tid = db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task) "
-                         "VALUES (?, ?, ?, ?, ?, ?)", (pid, subject, "plan" if parent else "masterplan",
+                         "VALUES (?, ?, ?, ?, ?, ?)", (pid, subject, "revise",
                                                        self.config["planning_priority"], body, creator())).lastrowid
         return tid, subject
 
@@ -1096,15 +1245,17 @@ class Project:
                               "VALUES (?, ?, ?, ?, ?, ?)", (pid, subject, kind, prio, body.strip(), creator())).lastrowid
 
     def task_set(self, tid, **fields):
-        """Set fields of an open task (status, note, priority, subject, body); a value None clears it. Subject and
-        body: refused while the task runs."""
+        """Set fields of an open task (status, note, priority, subject, body); a value None clears it. A running task:
+        only its own worker changes it, and not its subject or body."""
         with self.connect(write=True) as db:
             if (t := self.get(db, "task", tid))["status"] != "open":
                 raise FormatError(f"task {tid} is {t['status']}; a closed task can't be changed")
-            if {"subject", "body"} & fields.keys() and db.execute(
-                    "SELECT 1 FROM run WHERE task_id = ? AND result = 'running'", (tid,)).fetchone():
-                raise FormatError(f"task {tid} is running; its subject and body can't be changed. "
-                                  f"Add a follow-up task instead: pm task add {t['plan_id']}")
+            if (r := running_run(db)) and r["task_id"] == tid:
+                if creator() != tid:
+                    raise FormatError(f"task {tid} is running; it can't be changed until its run ends")
+                if {"subject", "body"} & fields.keys():
+                    raise FormatError(f"task {tid} is running; its subject and body can't be changed. "
+                                      f"Add a follow-up task instead: pm task add {t['plan_id']}")
             for k, v in fields.items():
                 if k == "status":
                     db.execute("UPDATE task SET status = ?, retired_at = CASE WHEN ? <> 'open' THEN ? END WHERE id = ?",
@@ -1268,7 +1419,7 @@ class Project:
     @property
     def logs(self):
         """log_dir; relative: inside the git dir, so never tracked."""
-        return Path(self.git("rev-parse", "--absolute-git-dir").strip()) / self.config["log_dir"]
+        return self.git_dir / self.config["log_dir"]
 
     def run_worker(self, cmd, prompt, log, tid, info):
         """Run the worker in its own session, writing its output to the log and a readable form of it to the
@@ -1281,10 +1432,11 @@ class Project:
             raise KeyboardInterrupt(signal.Signals(sig).name)
         old = {sig: signal.signal(sig, stop) for sig in (signal.SIGTERM, signal.SIGHUP)}
         try:
-            with open(log, "w", encoding="utf-8") as f, subprocess.Popen(
+            with open(log, "w", encoding="utf-8", errors="replace") as f, subprocess.Popen(
                     cmd, cwd=self.root, env=os.environ | {"PM_WORKER": "1", "PM_TASK": str(tid)},
                     stdin=subprocess.DEVNULL if prompt is None else subprocess.PIPE, stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT, text=True, bufsize=1, start_new_session=True) as proc:
+                    stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1,
+                    start_new_session=True) as proc:
                 try:
                     if prompt is not None:
                         with contextlib.suppress(BrokenPipeError):
@@ -1382,16 +1534,42 @@ class Project:
                        f"{', '.join(c + ' = ?' for c in cols)} WHERE id = ?",
                        (now(), result, reason, code, *(info.get(c) for c in cols), rid))
 
+    @contextlib.contextmanager
+    def run_lock(self):
+        """Held for the whole `pm run`: one per repository. The kernel drops it when the process ends."""
+        fd = os.open(self.git_dir / "pm-run.lock", os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                raise FormatError(f"`pm run` (pid {os.pread(fd, 32, 0).decode().strip()}) is working this repository; "
+                                  "`pm stop` stops it after its task") from None
+            os.ftruncate(fd, 0)
+            os.pwrite(fd, f"{os.getpid()}\n".encode(), 0)
+            yield
+        finally:
+            os.close(fd)
+
+    def run_pid(self):
+        """The pid of the `pm run` working this repository, or None."""
+        try:
+            fd = os.open(self.git_dir / "pm-run.lock", os.O_RDONLY)
+        except FileNotFoundError:
+            return None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            return None
+        except BlockingIOError:
+            pid = os.pread(fd, 32, 0).decode().strip()
+            return int(pid) if pid.isdigit() else None
+        finally:
+            os.close(fd)
+
     def close_stale_run(self):
-        """A 'running' run whose `pm run` is gone becomes failed and is committed; one whose process lives is an
-        error: one `pm run` per repository."""
+        """Under the run lock, a 'running' run is one whose `pm run` died: it becomes failed and is committed."""
         r = (self.rows("SELECT * FROM run WHERE result = 'running'") or [None])[0]
         if r is None:
             return
-        with contextlib.suppress(ProcessLookupError, TypeError):
-            if r["pid"] != os.getpid():
-                os.kill(r["pid"], 0)
-                raise FormatError(f"`pm run` (pid {r['pid']}) is working task {r['task_id']}, run {r['id']}")
         with self.connect(write=True) as db:
             db.execute("UPDATE run SET ended_at = ?, result = 'failed', reason = 'interrupted' WHERE id = ?",
                        (now(), r["id"]))
@@ -1592,8 +1770,7 @@ class Project:
 
     def planning_missing(self, t, before):
         """What a done task of a planning kind failed to do, or None."""
-        revision = t["subject"].startswith("revise the masterplan") or is_revise_plan(t["subject"], t["plan_id"])
-        if t["kind"] in ("plan", "masterplan") and not revision and self.planning_snapshot() == before:
+        if t["kind"] in ("plan", "masterplan") and self.planning_snapshot() == before:
             return "added or changed no plan"
         if t["kind"] == "split" and not self.rows("SELECT 1 FROM task WHERE plan_id = ? AND kind IN ('work', 'plan')",
                                                   t["plan_id"]):
@@ -1626,7 +1803,10 @@ class Project:
                 os.write(2, b"\n== stopping after this task (Ctrl-C again: stop now)\n")  # print() may be mid-write
         old = {sig: signal.signal(sig, stop_later) for sig in (signal.SIGINT, signal.SIGUSR1)}
         try:
-            return self.work_queue(once, dry_run)
+            if dry_run:
+                return self.work_queue(once, dry_run)
+            with self.run_lock():
+                return self.work_queue(once, dry_run)
         finally:
             for sig, handler in old.items():
                 signal.signal(sig, handler)
@@ -1669,6 +1849,8 @@ class Project:
             if self.dirty():
                 self.say(self.dirty_message())
                 return 1
+            if not self.commit_db("uncommitted changes"):
+                return 1
             tid = q[0][1]
             result, message = self.work(tid)
             if result == "failed":
@@ -1684,16 +1866,16 @@ class Project:
 
     def stop(self):
         """Ask the running `pm run` to stop after its current task."""
-        r = (self.rows("SELECT * FROM run WHERE result = 'running'") or [None])[0]
+        pid = self.run_pid()
         try:
-            os.kill(r["pid"], signal.SIGUSR1)
+            os.kill(pid, signal.SIGUSR1)
         except (TypeError, ProcessLookupError):
-            raise FormatError("no `pm run` is working a task; between tasks or waiting for a usage limit, Ctrl-C "
-                              "or `kill <pid>` stops it with nothing lost") from None
-        self.say(f"`pm run` (pid {r['pid']}) stops after task {r['task_id']}")
+            raise FormatError("no `pm run` is working this repository") from None
+        r = (self.rows("SELECT * FROM run WHERE result = 'running'") or [None])[0]
+        self.say(f"`pm run` (pid {pid}) stops " + (f"after task {r['task_id']}" if r else "before its next task"))
 
     def dirty_message(self):
-        files = self.git("status", "--porcelain").splitlines()
+        files = [l for l in self.git("status", "--porcelain").splitlines() if l[3:] != self.db]
         out = [f"The working tree has {len(files)} uncommitted change(s); commit or stash them first:"]
         out += ["  " + l for l in files[:10]] + ([f"  … and {len(files) - 10} more"] if len(files) > 10 else [])
         last = (self.rows("SELECT * FROM run WHERE ended_at IS NOT NULL ORDER BY id DESC LIMIT 1") or [None])[0]
@@ -1706,8 +1888,9 @@ class Project:
 
     def status(self):
         for r in self.rows("SELECT * FROM run WHERE result = 'running'"):
+            gone = "" if self.run_pid() else "; its `pm run` is gone, the next one records it as interrupted"
             self.say(f"Running: task {r['task_id']} (run {r['id']}, pid {r['pid']}) since {stamp(r['started_at'])}, "
-                     f"{duration(seconds(r['started_at'], None))}")
+                     f"{duration(seconds(r['started_at'], None))}{gone}")
         for m in self.rows(
                 "SELECT m.id, m.subject, m.status, m.created_at, m.queue_index, "
                 "(SELECT count(*) FROM plan p WHERE p.milestone_id = m.id) AS plans, "
@@ -1789,7 +1972,7 @@ def main(argv=None):
     ap.add_argument("--version", action="version", version=f"pm {VERSION}, database schema {SCHEMA_VERSION}")
     ap.add_argument("--root", help="the project's git repository (default: the one around the current directory)")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name, text in [("init", f"write {CONFIG_FILE} and the database (missing ones only) and commit them"),
+    for name, text in [("init", f"write {CONFIG_FILE} (if missing) and commit it; the first command that uses the database writes it"),
                        ("status", "open and on-hold milestones, the queue, pending decisions"), ("queue", "the whole queue"),
                        ("validate", "check the database"),
                        ("decide", "answer pending decisions in the terminal, one by one"),
@@ -1961,10 +2144,7 @@ def main(argv=None):
                 print(mid)
                 msg = f"milestone {mid} added: {entry[0]}"
             elif args.action in ("hold", "resume"):
-                if args.action == "resume" and pm.rows("SELECT 1 FROM milestone WHERE id = ? AND status <> 'on-hold'",
-                                                       args.milestone):
-                    raise FormatError(f"milestone {args.milestone} is not on hold")
-                pm.milestone_set(args.milestone, status="on-hold" if args.action == "hold" else "open")
+                pm.milestone_hold(args.milestone, args.action == "hold")
                 msg = f"milestone {args.milestone} " + ("on hold" if args.action == "hold" else "resumed")
             else:
                 print_queued(pm.milestone_set(args.milestone, subject=args.subject, status=args.status,
@@ -2035,9 +2215,7 @@ def main(argv=None):
                 pm.set_kind(args.decision, args.kind)
                 msg = f"decision {args.decision}: kind {args.kind}"
             elif args.action == "approve":
-                if not pm.rows("SELECT 1 FROM decision WHERE id = ? AND signoff IS NOT NULL", args.decision):
-                    raise FormatError(f"decision {args.decision} is not a sign-off; use `pm decision answer`")
-                pm.resolve(args.decision, answer=SIGNOFF_ANSWER)
+                pm.approve(args.decision)
                 msg = f"decision {args.decision} approved"
             elif args.action == "irrelevant":
                 pm.resolve(args.decision, irrelevant=args.reason)

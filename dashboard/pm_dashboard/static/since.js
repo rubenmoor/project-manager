@@ -3,26 +3,34 @@ import { html, useState, useEffect } from "/vendor/preact-htm.js";
 import { Pill, Time, Named } from "/ui.js";
 import { usd, stamp } from "/data.js";
 
-const KEY = "pm-seen";
+// Per project (its root), like celebrate.js: two projects served on the same port don't share it.
+const key = (root) => `pm-seen:${root}`;
 const PREFIXED = new Set(["milestone", "plan", "task"]);
 const name = (k, r) => (PREFIXED.has(k) ? html`<${Named} kind=${k} r=${r} />` : r.subject);
 const suffix = (k, r) => (PREFIXED.has(k) ? null : html` <span class="muted">${k} ${r.id}</span>`);
-export const getSeen = () => { try { return localStorage.getItem(KEY); } catch { return null; } };
-export const setSeen = (c) => { try { localStorage.setItem(KEY, c); } catch {} };
+export const getSeen = (root) => {
+  try { return root ? localStorage.getItem(key(root)) ?? localStorage.getItem("pm-seen") : null; } catch { return null; }
+};
+export const setSeen = (root, c) => { try { localStorage.setItem(key(root), c); } catch {} };
 
 // Rows changed since the seen commit; refetched when the state changes. The first visit marks the current HEAD.
 export function useSince(state) {
   const [since, setSince] = useState(null);
-  const [seen, setSeenState] = useState(getSeen());
+  const root = state && state.root;
+  const [seen, setSeenState] = useState(null);
   const head = state && state.head && state.head.commit;
-  useEffect(() => { if (!seen && head) { setSeen(head); setSeenState(head); } }, [head]);
+  useEffect(() => {
+    const s = getSeen(root);
+    if (s) setSeenState(s);
+    else if (root && head) { setSeen(root, head); setSeenState(head); }
+  }, [root, head]);
   useEffect(() => {
     if (!seen) return;
     let gone = false;
     fetch(`/api/since?commit=${seen}`).then((r) => r.json()).then((j) => !gone && setSince(j)).catch(() => {});
     return () => { gone = true; };
   }, [seen, state && state.read_at]);
-  const mark = () => { if (head) { setSeen(head); setSeenState(head); } };
+  const mark = () => { if (head) { setSeen(root, head); setSeenState(head); } };
   return { since, mark, seen };
 }
 

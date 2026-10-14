@@ -43,7 +43,8 @@ Text is edited in place, through pm's own methods; each change is a commit (`pm:
 - After adding a milestone: add another, or start `pm run` in the terminal (the page says whether it runs)
 - Edits cascade as in pm: a changed milestone queues "revise the masterplan of milestone N: …"; a changed plan queues "create tasks for plan N: …" and "revise plan M: …" for each plan below it
 - Implemented milestones, done plans (no open task, nor in the plans below them) and closed tasks are read-only; pm refuses changes to them
-- While a worker runs: the running task can't be changed; other changes are allowed and committed with the running task, not on their own
+- While a worker runs: the running task can't be changed; other changes are allowed and committed with the running task, not on their own (pm's rules)
+- A text edit is refused if the row changed since editing started (a worker or another window): copy your text, then edit the new version
 - pm's checks apply: e.g. an open task needs a body
 
 ## How it works
@@ -51,7 +52,7 @@ Text is edited in place, through pm's own methods; each change is a commit (`pm:
 - Reads the working copy of `tasks.sql` (a running worker's changes included) through `pm.Project.connect()`
 - Polls `tasks.sql`, `.git/HEAD`, `.git/index`, `.git/logs/HEAD` every 0.5 s; pushes changes over server-sent events; the browser refetches the snapshot
 - The running task: the `run` row with result `running` that `pm run` keeps while a worker works
-- Between tasks: a running task already done (its worker finishing), then `pm run` committing and picking the next task or waiting for a usage limit: told apart by the run row and whether its `pid` lives; shown with a spinner
+- Between tasks: a running task already done (its worker finishing), then `pm run` committing and picking the next task or waiting for a usage limit: told apart by the run row and `pm run`'s lock (`pm.Project.run_pid`); shown with a spinner
 - Worker log: `.git/pm-logs/task-<id>-run-<run>.log` (`task-<id>.log`: the latest), shown as `pm run` shows it (`pm.Project.read_event`); `pm run` flushes it per line
 - Usage limits: the newest `rate_limit_event` in the worker logs (claude's stream-json); as of the last worker's API call, so stale between runs; usage outside pm counts in the % but not in the token totals
 - A task's commit: the one `pm run` made, `task <id>: <subject>`

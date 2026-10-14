@@ -6,7 +6,7 @@
 import json, os, re, sys
 from pathlib import Path
 
-KILL_BY_PATTERN = re.compile(r"\bpkill\b[^;&|\n]*\s(-\w*f\b|--full\b)|\bkillall\b|\bkill\s+(-\w+\s+)*-1\b")
+KILL_BY_PATTERN = re.compile(r"\bpkill\b[^;&|\n]*\s(-\w*f\b|--full\b)|\bkillall\b|\bkill\s+(--?\w*\s+)*-1\b")
 KILL_REASON = "pm: stop processes by PID (kill $!) or a pidfile; pkill -f, killall and kill -1 can match this worker"
 
 
