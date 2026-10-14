@@ -17,7 +17,7 @@ In the project's git repository (the one with `project-manager.toml`):
   - running: its output, live
   - open: queue position or what blocks it, body, decisions, earlier runs; after a failed run: pm's summary and the run's output
   - failed last run: a red "failed" pill in the queue; with no worker running, "pm run stopped: task N failed" and the likely cause
-  - done or dropped: note, runs, files changed, the output of its last run
+  - done or dropped: note, rows its commit touched (tasks created first; tasks, plans, decisions, milestones: new, edited, done, dropped, answered, waits for …; each styled by kind), runs, files changed, the output of its last run
 - **Overview**: running task, decisions waiting on you, cost, open and on-hold milestones with progress, queue head; without milestones a welcome screen with one button
 - **Queue**: as `pm run` sees it; open tasks it leaves out and why
 - **Milestones**: cards grouped by queue index (lowest first), with progress and the number of pending decisions its open tasks wait for, linked to exactly those (`#/decisions?milestone=N`)
@@ -61,6 +61,6 @@ Text is edited in place, through pm's own methods; each change is a commit (`pm:
 
 - `pm_dashboard/__init__.py`: server, watcher, JSON API (`/api/state`, `/api/log/<task>?from=N`, `/api/events`, `/api/since?commit=C`, `/api/task/<id>/commit`, `/api/usage`, `POST /api/edit`)
 - `pm_dashboard/edit.py`: writes and the run rules; history from git
-- `pm_dashboard/static/`: `app.js` (shell, routing, live state), `views.js` (pages), `live.js` (run view), `editor.js` (in-place editing), `add.js` (forms, welcome), `since.js`, `diff.js`, `notify.js`, `usage.js`, `ui.js` (components, charts), `data.js` (indexes, what pm derives)
+- `pm_dashboard/static/`: `app.js` (shell, routing, live state), `views.js` (pages), `live.js` (run view), `editor.js` (in-place editing), `add.js` (forms, welcome), `affected.js` (rows a task's commit touched), `since.js`, `diff.js`, `notify.js`, `usage.js`, `ui.js` (components, charts), `data.js` (indexes, what pm derives)
 - `pm_dashboard/static/vendor/`: Preact + htm 3.1.1, marked 12.0.2, diff2html 3.4.48 (slim, with highlight.js), CodeMirror 6 bundled from `vendor-src/codemirror.js`:
   `npm i esbuild codemirror@6.0.1 @codemirror/lang-markdown@6.2.5 && npx esbuild vendor-src/codemirror.js --bundle --format=esm --minify --outfile=…/vendor/codemirror.js`

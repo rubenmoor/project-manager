@@ -8,7 +8,7 @@ Serves the browser client (static/) and a JSON API on 127.0.0.1:
     /api/log/<task>      the task's latest worker log (?run=R: run R's) as readable lines, from byte ?from=N on
     /api/events          server-sent events: "state" when tasks.sql or git changes, "log" when the running log grows
     /api/since?commit=C  rows changed between commit C and the working copy
-    /api/task/<id>/commit  the commit pm made for the task, with its patch
+    /api/task/<id>/commit  the commit pm made for the task, with its patch and the rows it changed
     /api/usage           the account's usage limits, from the newest rate_limit_event in the worker logs
     POST /api/edit       {"op": …}: add or change milestones, plans, tasks through pm (edit.py)
 """

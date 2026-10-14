@@ -129,6 +129,26 @@ def load(sql):
         con.close()
 
 
+def diff(old_sql, new_sql):
+    """Two versions of tasks.sql, row by row: {table: {added, removed, changed: [{row, before}]}}."""
+    old, new = load(old_sql), load(new_sql)
+    tables = {}
+    for t in new:
+        o, n = old.get(t, {}), new[t]
+        added = [n[k] for k in n if k not in o]
+        removed = [o[k] for k in o if k not in n]
+        # Columns a newer schema added aren't changes.
+        before = lambda k: {f: o[k][f] for f in n[k] if f in o[k] and o[k][f] != n[k][f]}
+        changed = [{"row": n[k], "before": before(k)} for k in n if k in o and before(k)]
+        for rows in (added, removed, [c["row"] for c in changed], [c["before"] for c in changed]):
+            for r in rows:
+                if isinstance(r.get("options"), str):
+                    r["options"] = json.loads(r["options"])
+        if added or removed or changed:
+            tables[t] = {"added": added, "removed": removed, "changed": changed}
+    return tables
+
+
 def since(project, commit):
     """What changed in the database between `commit` and the working copy, row by row."""
     try:
@@ -137,23 +157,9 @@ def since(project, commit):
     except subprocess.CalledProcessError:
         return {"error": f"{project.db} isn't in commit {commit[:12]}"}
     try:
-        old, new = load(old_sql), load(project.db_path.read_text(encoding="utf-8"))
+        tables = diff(old_sql, project.db_path.read_text(encoding="utf-8"))
     except sqlite3.Error as e:
         return {"error": f"can't read {project.db}: {e}"}
-    tables = {}
-    for t in new:
-        o, n = old.get(t, {}), new[t]
-        added = [n[k] for k in n if k not in o]
-        removed = [o[k] for k in o if k not in n]
-        # Columns a newer schema added aren't changes.
-        diff = lambda k: {f: o[k][f] for f in n[k] if f in o[k] and o[k][f] != n[k][f]}
-        changed = [{"row": n[k], "before": diff(k)} for k in n if k in o and diff(k)]
-        for rows in (added, removed, [c["row"] for c in changed], [c["before"] for c in changed]):
-            for r in rows:
-                if isinstance(r.get("options"), str):
-                    r["options"] = json.loads(r["options"])
-        if added or removed or changed:
-            tables[t] = {"added": added, "removed": removed, "changed": changed}
     return {"commit": commit, "date": when, "tables": tables}
 
 
@@ -171,4 +177,14 @@ def task_commit(project, tid):
         files.append({"file": name, "added": None if a == "-" else int(a), "deleted": None if d == "-" else int(d)})
     big = len(patch) > MAX_DIFF
     return {"commit": commit, "date": date, "subject": subject, "body": body.strip(), "files": files,
-            "patch": patch[:MAX_DIFF], "truncated": big}
+            "patch": patch[:MAX_DIFF], "truncated": big, "rows": rows(project, commit)}
+
+
+def rows(project, commit):
+    """The commit's changes to tasks.sql, row by row; None if it didn't touch it or can't be read."""
+    try:
+        if not project.git("diff", "--name-only", f"{commit}^", commit, "--", project.db).strip():
+            return None
+        return diff(project.git("show", f"{commit}^:{project.db}"), project.git("show", f"{commit}:{project.db}"))
+    except (subprocess.CalledProcessError, sqlite3.Error):
+        return None

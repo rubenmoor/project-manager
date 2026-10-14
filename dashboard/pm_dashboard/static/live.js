@@ -4,6 +4,7 @@
 import { html, useState, useEffect, useRef, useLayoutEffect } from "/vendor/preact-htm.js";
 import { Pill, Kind, Prio, Elapsed, Time, Markdown, Ref, Named, NamedLink } from "/ui.js";
 import { Log } from "/views.js";
+import { Affected } from "/affected.js";
 import { usd, stamp, duration, seconds, tokens } from "/data.js";
 
 function useHeight(ref) {
@@ -39,7 +40,7 @@ function Runs({ d, runs }) {
     ${r.reason ? html`<tr><td></td><td colspan="5" class="muted reason">${r.reason.split("\n")[0].slice(0, 200)}</td></tr>` : null}`)}</tbody></table>`;
 }
 
-function Files({ t }) {
+function Files({ d, t }) {
   const [c, setC] = useState(null);
   useEffect(() => {
     let gone = false;
@@ -49,7 +50,8 @@ function Files({ t }) {
   }, [t.id, t.retired_at]);
   if (!c) return null;
   if (!c.commit) return html`<h3>Changes</h3><div class="muted">No commit by <code>pm run</code>.</div>`;
-  return html`<h3>Changes <span class="muted mono">${c.commit.slice(0, 7)}</span></h3>
+  return html`<${Affected} d=${d} t=${t} rows=${c.rows} />
+    <h3>Changes <span class="muted mono">${c.commit.slice(0, 7)}</span></h3>
     <table class="compact"><tbody>${c.files.map((f) => html`<tr><td class="mono">${f.file}</td>
       <td class="num r plus">${f.added != null ? `+${f.added}` : ""}</td><td class="num r minus">${f.deleted != null ? `−${f.deleted}` : "bin"}</td></tr>`)}</tbody></table>
     <div><a href=${`#/task/${t.id}`}>the diff on the task page</a></div>`;
@@ -88,7 +90,7 @@ function Detail({ d, t, running }) {
       <span class="muted">${stamp(t.retired_at)} · <${Time} ts=${t.retired_at} /></span>
       ${runs.length ? html`<span class="muted">· ${runs.length} run${runs.length > 1 ? "s" : ""}, ${duration(total)}, ${usd(d.cost(runs))}</span>` : null}</div>
       ${t.note ? html`<div class="note">${t.note}</div>` : null}</div>
-    <${Files} t=${t} />
+    <${Files} d=${d} t=${t} />
     <${Runs} d=${d} runs=${runs} />
     ${last ? html`<h3>Output of the last run</h3><${Log} d=${d} t=${t} live=${false} />` : null}
   </div>`;

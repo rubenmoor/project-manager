@@ -392,3 +392,17 @@ ins { color: var(--good-text); text-decoration: none; }
 .celebrate-subject { color: var(--ink); text-decoration: none; }
 .celebrate-subject:hover { text-decoration: underline; }
 .celebrate-card .btn { margin-top: 8px; }
+.affected li { display: flex; gap: 10px; align-items: baseline; padding: 3px 0; }
+.affected .fx { flex: none; min-width: 64px; text-align: center; padding: 0 7px; border-radius: 4px; font-size: 12px;
+  border: 1px solid transparent; background: var(--surface-2); color: var(--ink-2); white-space: nowrap; }
+.affected .fx-what { min-width: 0; }
+.affected .fx-what .muted, .affected .fx-what .tag { margin-left: 6px; }
+.fx-created .fx, .fx-done .fx, .fx-implemented .fx { background: rgba(12, 163, 12, 0.12); color: var(--good-text); }
+.fx-edited .fx, .fx-consequences .fx { background: var(--warning-wash); color: var(--ink); }
+.fx-asked .fx, .fx-sign-off .fx, .fx-reopened .fx, .fx-unblocked .fx { background: var(--accent-wash); color: var(--accent); }
+.fx-answered .fx, .fx-recorded .fx, .fx-supersedes .fx { background: transparent; border-color: var(--accent); color: var(--accent); }
+.fx-waits .fx, .fx-on-hold .fx { background: transparent; border-color: var(--warning); color: var(--ink); }
+.fx-dropped .fx, .fx-irrelevant .fx { color: var(--muted); }
+.fx-dropped .fx-what > a, .fx-irrelevant .fx-what > a { color: var(--muted); text-decoration: line-through; }
+.fx-deleted .fx { background: var(--critical-wash); color: var(--critical); }
+.fx-deleted .fx-what { color: var(--muted); text-decoration: line-through; }
