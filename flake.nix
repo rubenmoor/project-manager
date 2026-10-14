@@ -32,7 +32,8 @@
           src = ./dashboard;
           build-system = [ pkgs.python3Packages.setuptools ];
           dependencies = [ (pkgs.python3Packages.toPythonModule default) ];
-          makeWrapperArgs = [ "--prefix" "PATH" ":" "${pkgs.git}/bin" ];
+          # PYTHONPATH would come first: an older pm on it (a checkout) would shadow the pm built here
+          makeWrapperArgs = [ "--prefix" "PATH" ":" "${pkgs.git}/bin" "--unset" "PYTHONPATH" ];
           meta.mainProgram = "pm-dashboard";
         };
       });

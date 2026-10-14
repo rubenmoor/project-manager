@@ -17,10 +17,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
+PM_MIN_VERSION = 23     # the pm whose Project this version uses (log_ids, run_pid, approve, milestone_hold)
 try:
     import pm
 except ImportError:
     sys.exit("pm-dashboard: the `pm` package is not importable; put the pm repository on PYTHONPATH or install it")
+if getattr(pm, "VERSION", 0) < PM_MIN_VERSION:
+    sys.exit(f"pm-dashboard: needs pm {PM_MIN_VERSION} or newer, but imported pm {getattr(pm, 'VERSION', '?')} from "
+             f"{pm.__file__}: an older pm on PYTHONPATH? (`echo $PYTHONPATH`)")
 from pm_dashboard import edit
 
 STATIC = Path(__file__).parent / "static"
