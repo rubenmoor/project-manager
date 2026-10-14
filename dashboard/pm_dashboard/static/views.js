@@ -34,6 +34,9 @@ function Banners({ d }) {
 
 function RunningCard({ d }) {
   const r = d.running;
+  if (!r && (d.stale || d.crash)) return html`<div class="card"><div class="row"><${Pill} status="failed" label="pm not running" />
+      <span class="sub"><code>pm run</code> crashed${d.stale ? html` during <${TaskLink} t=${d.task.get(d.stale.task_id)} />` : ""}.</span></div>
+    ${d.crash ? html`<pre class="crash">${d.crash.error}</pre>` : null}</div>`;
   if (!r) return html`<div class="card"><div class="sub">No worker is running${d.queue.length ? html`: start them with <code>pm run</code> in the project's terminal` : ""}.</div>
     ${d.queue.length ? html`<div class="muted" style="margin-top:4px">Next: <${TaskLink} t=${d.task.get(d.queue[0])} /></div>` : null}</div>`;
   const t = d.task.get(r.task_id);
@@ -240,8 +243,8 @@ function RunsTable({ d, runs, showTask = false }) {
       <td class="num muted">${r.id}</td>
       ${showTask ? html`<td><${TaskLink} t=${d.task.get(r.task_id)} /></td>` : null}
       <td class="num">${stamp(r.started_at)}</td>
-      <td class="r"><${Elapsed} start=${r.started_at} end=${r.ended_at} /></td>
-      <td><${Pill} status=${r.result} />${r.reason ? html`<div class="muted reason" style="font-size:12px;max-width:520px" title=${r.reason}>${reasonText(r)}</div>` : null}</td>
+      <td class="r"><${Elapsed} start=${r.started_at} end=${r.ended_at || (d.stale === r && d.crash ? d.crash.at : null)} /></td>
+      <td>${d.stale === r ? html`<${Pill} status="failed" label="crashed" />` : html`<${Pill} status=${r.result} />`}${r.reason ? html`<div class="muted reason" style="font-size:12px;max-width:520px" title=${r.reason}>${reasonText(r)}</div>` : null}</td>
       <td class="r num">${r.turns ?? ""}</td><td class="r num">${tokens(d.tokens(r))}</td><td class="r num">${usd(r.cost_usd)}</td>
       <td class="muted">${r.model || ""}</td><td class="mono muted">${r.base_commit ? r.base_commit.slice(0, 7) : ""}</td></tr>`)}</tbody></table></div>`;
 }

@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-PM_MIN_VERSION = 23     # the pm whose Project this version uses (log_ids, run_pid, approve, milestone_hold)
+PM_MIN_VERSION = 31     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold)
 try:
     import pm
 except ImportError:
@@ -84,7 +84,7 @@ class Watcher:
                 state = read_state(self.project, self.last_good) if changed else self.state
                 log, alive = self.running_log(state), self.project.run_pid()
                 if changed or log != self.log or alive != self.alive:
-                    state = state | {"pm_run": alive}      # a new dict: handlers may be serializing the old one
+                    state = state | {"pm_run": alive, "pm_crash": None if alive else self.project.run_crash()}  # a new dict
                     if "error" not in state:
                         self.last_good = state
                     self.state, self.sig, self.log, self.alive = state, sig, log, alive

@@ -6,7 +6,10 @@ export function index(state) {
     state, milestones: t.milestone, plans: t.plan, tasks: t.task, decisions: t.decision, runs: t.run,
     milestone: by(t.milestone), plan: by(t.plan), task: by(t.task), decision: by(t.decision),
     queue: state.queue, queuePos: new Map(state.queue.map((id, i) => [id, i])),
-    running: t.run.find((r) => r.result === "running") || null,
+    // A 'running' row whose pm run is gone (it crashed) is stale, not running.
+    running: (state.pm_run != null && t.run.find((r) => r.result === "running")) || null,
+    stale: (state.pm_run == null && t.run.find((r) => r.result === "running")) || null,
+    crash: state.pm_crash || null,
     planDone: new Set(state.done_plans || []),
   };
   // rows grouped by key(row): Map key → [value(row)]

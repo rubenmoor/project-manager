@@ -15,6 +15,7 @@ In the project's git repository (the one with `project-manager.toml`):
 
 - **Live** (home while pm runs): left, one timeline: queue above (next nearest), the running task between two rules, done and dropped tasks below (newest first); a click selects a task (outline); right, the selected task's task page (below), with a link to it
   - failed last run: a red "failed" pill in the queue; with no worker running, "pm run stopped: task N failed" and the likely cause
+  - crashed `pm run` (e.g. disk full): "pm not running", the task it was on and its error (also on the overview, and a notification); its stale `running` run shows as "crashed"
 - **Overview**: running task, decisions waiting on you, cost, open and on-hold milestones with progress, queue head; without milestones a welcome screen with one button
 - **Queue**: as `pm run` sees it; open tasks it leaves out and why
 - **Milestones**: open and on-hold cards grouped by queue index (lowest first), completed ones in their own column on the right (newest first); with progress and the number of pending decisions its open tasks wait for, linked to exactly those (`#/decisions?milestone=N`)
@@ -51,7 +52,7 @@ Text is edited in place, through pm's own methods; each change is a commit (`pm:
 
 - Reads the working copy of `tasks.sql` (a running worker's changes included) through `pm.Project.connect()`
 - Polls `tasks.sql`, `.git/HEAD`, `.git/index`, `.git/logs/HEAD` every 0.5 s; pushes changes over server-sent events; the browser refetches the snapshot
-- The running task: the `run` row with result `running` that `pm run` keeps while a worker works
+- The running task: the `run` row with result `running` that `pm run` keeps while a worker works, and only while `pm run` holds its lock; else it is stale and the error comes from `pm.Project.run_crash`
 - Between tasks: a running task already done (its worker finishing), then `pm run` committing and picking the next task or waiting for a usage limit: told apart by the run row and `pm run`'s lock (`pm.Project.run_pid`); shown with a spinner
 - Worker log: `.git/pm-logs/task-<id>-run-<run>.log` (`task-<id>.log`: the latest), shown as `pm run` shows it (`pm.Project.read_event`); `pm run` flushes it per line
 - Usage limits: the newest `rate_limit_event` in the worker logs (claude's stream-json); as of the last worker's API call, so stale between runs; usage outside pm counts in the % but not in the token totals

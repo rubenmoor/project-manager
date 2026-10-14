@@ -33,7 +33,8 @@ export function Live({ d }) {
   const failedLast = (t) => { const e = d.taskRuns(t).filter((x) => x.ended_at).pop(); return e && e.result === "failed"; };
   const alive = d.state.pm_run != null;
   const between = !r && alive && lastRun ? lastRun : null;
-  const stopped = !r && !alive && lastRun && lastRun.result === "failed" ? lastRun : null;
+  const crashed = !alive && (d.stale || d.crash) ? { run: d.stale, error: d.crash ? d.crash.error : null, at: d.crash ? d.crash.at : null } : null;
+  const stopped = !r && !alive && !crashed && lastRun && lastRun.result === "failed" ? lastRun : null;
   const next = d.queue.length ? d.task.get(d.queue[0]) : null;
   const busy = wrapping ? { spin: true, text: `Task ${rt.id} is ${rt.status === "open" ? "waiting for a decision" : rt.status}; its worker is finishing`,
       sub: "Then pm records the run, commits, and starts the next task." }
@@ -43,7 +44,7 @@ export function Live({ d }) {
       sub: next ? `Next in the queue: t${next.id} ${next.subject}` : "The queue is empty: pm run stops." }
     : null;
   const [picked, setPicked] = useState(null);
-  const sel = picked != null && d.task.get(picked) ? picked : current ? current.id : lastRun ? lastRun.task_id : null;
+  const sel = picked != null && d.task.get(picked) ? picked : current ? current.id : crashed && crashed.run ? crashed.run.task_id : lastRun ? lastRun.task_id : null;
   const scroller = useRef(null), card = useRef(null), top = useRef(null), bottom = useRef(null);
   const H = useHeight(scroller), cardH = useHeight(card), topH = useHeight(top), bottomH = useHeight(bottom);
   // Room so the current task can reach both the top and the bottom of the column.
@@ -70,6 +71,9 @@ export function Live({ d }) {
             <div class="muted"><${Named} kind="plan" r=${d.plan.get(current.plan_id)} /> · <${Named} kind="milestone" r=${d.milestoneOfTask(current)} /></div></div></${Item}>`
           : busy ? html`<div class="tl-idle tl-busy">${busy.spin ? html`<span class="spinner"></span>` : null}<div>
             <div class="sub">${busy.text}</div><div class="muted">${busy.sub}</div></div></div>`
+          : crashed ? html`<div class="tl-idle tl-crashed"><div class="sub"><b>pm not running</b>: <code>pm run</code> crashed${crashed.run ? html` during <a href=${`#/task/${crashed.run.task_id}`} onClick=${(e) => { e.preventDefault(); setPicked(crashed.run.task_id); }}>task ${crashed.run.task_id}</a>` : ""}${crashed.at ? html`, <${Time} ts=${crashed.at} />` : ""}.</div>
+            ${crashed.error ? html`<pre class="crash">${crashed.error}</pre>` : html`<div class="muted">It left no error message (killed, or out of memory?).</div>`}
+            <div class="muted">Fix the cause, then start it again with <code>pm run</code>${crashed.run ? "; it records the run as failed" : ""}.</div></div>`
           : stopped ? html`<div class="tl-idle"><div class="sub"><code>pm run</code> stopped: <a href=${`#/task/${stopped.task_id}`} onClick=${(e) => { e.preventDefault(); setPicked(stopped.task_id); }}>task ${stopped.task_id} failed</a>.</div>
             <div class="muted">${(stopped.reason || "").split("\n").find((l) => l.startsWith("likely cause: ")) || (stopped.reason || "").split("\n")[0]}</div></div>`
           : html`<div class="tl-idle"><div class="sub">No worker is running${d.queue.length ? html`: start them with <code>pm run</code> in the project's terminal` : ""}.</div>

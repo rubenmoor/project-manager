@@ -19,6 +19,7 @@ export function useNotifications(d) {
       pending: new Set(d.decisions.filter((x) => x.status === "pending").map((x) => x.id)),
       failed: new Set(d.runs.filter((x) => x.result === "failed").map((x) => x.id)),
       running: d.running ? d.running.id : null,
+      crash: d.crash ? d.crash.at : null,
       queue: d.queue.length,
     };
     const p = prev.current;
@@ -33,7 +34,10 @@ export function useNotifications(d) {
       const r = d.runs.find((x) => x.id === id);
       notify(`Task ${r.task_id} failed`, (r.reason || "").split("\n")[0], `#/task/${r.task_id}`);
     }
-    if (now.running) clearTimeout(stopTimer.current);
+    if (now.crash && now.crash !== p.crash) {
+      clearTimeout(stopTimer.current);
+      notify("pm run crashed", d.crash.error || "no error message", "#/live");
+    } else if (now.running) clearTimeout(stopTimer.current);
     else if (p.running) {
       // Between two tasks nothing runs for a moment; only a lasting pause means pm run stopped.
       stopTimer.current = setTimeout(() => {

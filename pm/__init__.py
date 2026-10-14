@@ -20,11 +20,11 @@ template is the file of that name next to this one), and commits it; the first c
 writes it. pm commits its own changes to tasks.sql; workers commit them with their work. Nothing is pushed.
 """
 import argparse, collections, contextlib, datetime, fcntl, functools, json, os, re, shlex, signal, sqlite3, \
-    subprocess, sys, threading, time, tomllib, zoneinfo
+    subprocess, sys, threading, time, tomllib, traceback, zoneinfo
 from pathlib import Path
 
 
-VERSION = 30  # bump by one with every commit (AGENTS.md)
+VERSION = 31  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -311,6 +311,12 @@ def stamp(ts):
     return ts[:16].replace("T", " ") if ts else ""
 
 
+def parse_crash(lock):
+    """The run lock's content: the pid; after a crash also its time and the error."""
+    pid, at, error = (lock.decode(errors="replace").split("\n", 2) + ["", ""])[:3]
+    return {"pid": int(pid) if pid.isdigit() else None, "at": at, "error": error.strip()} if at else None
+
+
 def seconds(start, end):
     return int((datetime.datetime.fromisoformat(end or now()) - datetime.datetime.fromisoformat(start)).total_seconds())
 
@@ -480,6 +486,7 @@ class Project:
         self.db_path = self.root / self.db
         self.out = out
         self.stopping = False       # `pm run` stops after the current task
+        self.crash = None           # run_crash() as `pm run` started
         self.cache = None           # (file_key(), the loaded database)
         self.mutex = threading.RLock()
         self.locked = False
@@ -1577,9 +1584,17 @@ class Project:
             except BlockingIOError:
                 raise FormatError(f"`pm run` (pid {os.pread(fd, 32, 0).decode().strip()}) is working this repository; "
                                   "`pm stop` stops it after its task") from None
+            self.crash = parse_crash(os.pread(fd, 4096, 0))
             os.ftruncate(fd, 0)
             os.pwrite(fd, f"{os.getpid()}\n".encode(), 0)
-            yield
+            try:
+                yield
+            except Exception as e:
+                # Into the lock file's own block, which needs no new space (a full disk is a likely cause).
+                msg = "".join(traceback.format_exception_only(e)).strip()[:2000]
+                with contextlib.suppress(OSError):
+                    os.pwrite(fd, f"{os.getpid()}\n{now()}\n{msg}\n".encode(errors="replace"), 0)
+                raise
         finally:
             os.close(fd)
 
@@ -1593,8 +1608,22 @@ class Project:
             fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
             return None
         except BlockingIOError:
-            pid = os.pread(fd, 32, 0).decode().strip()
+            pid = os.pread(fd, 32, 0).decode().split("\n")[0].strip()
             return int(pid) if pid.isdigit() else None
+        finally:
+            os.close(fd)
+
+    def run_crash(self):
+        """While no `pm run` lives: how the last one crashed, {"pid", "at", "error"}, or None."""
+        try:
+            fd = os.open(self.git_dir / "pm-run.lock", os.O_RDONLY)
+        except FileNotFoundError:
+            return None
+        try:
+            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+            return parse_crash(os.pread(fd, 4096, 0))
+        except BlockingIOError:
+            return None
         finally:
             os.close(fd)
 
@@ -1604,9 +1633,9 @@ class Project:
         if r is None:
             return
         with self.connect(write=True) as db:
-            db.execute("UPDATE run SET ended_at = ?, result = 'failed', reason = 'interrupted' WHERE id = ?",
-                       (now(), r["id"]))
-        self.commit_db(f"run {r['id']} (task {r['task_id']}) interrupted")
+            db.execute("UPDATE run SET ended_at = ?, result = 'failed', reason = ? WHERE id = ?",
+                       (now(), f"pm run crashed: {self.crash['error']}" if self.crash else "interrupted", r["id"]))
+        self.commit_db(f"run {r['id']} (task {r['task_id']}) " + ("crashed" if self.crash else "interrupted"))
 
     def work(self, tid):
         """Run the worker for a task until no usage limit stops it; record each run and commit the task.
@@ -1924,9 +1953,11 @@ class Project:
 
     def status(self):
         for r in self.rows("SELECT * FROM run WHERE result = 'running'"):
-            gone = "" if self.run_pid() else "; its `pm run` is gone, the next one records it as interrupted"
+            gone = "" if self.run_pid() else "; its `pm run` is gone, the next one records it as failed"
             self.say(f"Running: task {r['task_id']} (run {r['id']}, pid {r['pid']}) since {stamp(r['started_at'])}, "
                      f"{duration(seconds(r['started_at'], None))}{gone}")
+        if (c := self.run_crash()) and not self.run_pid():
+            self.say(f"`pm run` (pid {c['pid']}) crashed at {stamp(c['at'])}: {c['error']}")
         for m in self.rows(
                 "SELECT m.id, m.subject, m.status, m.created_at, m.queue_index, "
                 "(SELECT count(*) FROM plan p WHERE p.milestone_id = m.id) AS plans, "
