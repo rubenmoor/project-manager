@@ -27,6 +27,7 @@ export function AddForm({ kind, parent, onClose }) {
   const w = WHAT[kind];
   const [subject, setSubject] = useState("");
   const [prio, setPrio] = useState("");
+  const [queue, setQueue] = useState("");
   const [taskKind, setTaskKind] = useState("work");
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
@@ -35,6 +36,10 @@ export function AddForm({ kind, parent, onClose }) {
     if (busy) return;
     const op = { op: `${kind}_add`, subject, body: body.current };
     if (kind === "task") { op.plan = parent; op.kind = taskKind; }
+    if (kind === "milestone" && queue.trim() !== "") {
+      if (!/^-?\d+$/.test(queue.trim())) { setError("the queue index is a whole number, or empty"); return; }
+      op.queue_index = Number(queue);
+    }
     if (kind !== "milestone" && prio.trim() !== "") {
       if (!/^-?\d+$/.test(prio.trim())) { setError("the priority is a whole number, or empty"); return; }
       op.priority = Number(prio);
@@ -56,6 +61,8 @@ export function AddForm({ kind, parent, onClose }) {
     <input class="line-edit h1" placeholder=${w.ph} value=${subject} onInput=${(e) => setSubject(e.target.value)} ref=${autofocus} />
     <div class="cm-frame"><${CodeEditor} value=${w.body} autofocus=${false} onChange=${(v) => (body.current = v)} ph="Body (Markdown)" /></div>
     <div class="row" style="margin-top:10px">
+      ${kind === "milestone" ? html`<label class="sub" title="tasks of milestones with a lower queue index are worked first">queue index
+        <input class="small" value=${queue} placeholder="0" onInput=${(e) => setQueue(e.target.value)} /></label>` : null}
       ${kind !== "milestone" ? html`<label class="sub">priority <input class="small" value=${prio} placeholder=${kind === "task" ? "plan's" : "none"}
         onInput=${(e) => setPrio(e.target.value)} /></label>` : null}
       ${kind === "task" ? html`<label class="sub">kind <select class="small" value=${taskKind} onChange=${(e) => setTaskKind(e.target.value)}>

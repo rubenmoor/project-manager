@@ -17,7 +17,7 @@ In the project's git repository (the one with `project-manager.toml`):
   - failed last run: a red "failed" pill in the queue; with no worker running, "pm run stopped: task N failed" and the likely cause
 - **Overview**: running task, decisions waiting on you, cost, open and on-hold milestones with progress, queue head; without milestones a welcome screen with one button
 - **Queue**: as `pm run` sees it; open tasks it leaves out and why
-- **Milestones**: cards grouped by queue index (lowest first), with progress and the number of pending decisions its open tasks wait for, linked to exactly those (`#/decisions?milestone=N`)
+- **Milestones**: open and on-hold cards grouped by queue index (lowest first), completed ones in their own column on the right (newest first); with progress and the number of pending decisions its open tasks wait for, linked to exactly those (`#/decisions?milestone=N`)
 - **Milestone**, **plans**: plans by priority with their tasks; filters by status and kind; change a milestone's queue index; put a milestone on hold or resume it (its plans and open tasks show "on hold")
 - **Task**: queue position or what blocks it, body, note, priority, decisions; after a failed run: pm's summary
   - done or dropped: rows its commit touched (Affected: tasks created first; tasks, plans, decisions, milestones: new, edited, done, dropped, answered, waits for …; each styled by kind; says why when empty), files changed, the full diff (syntax highlighted)
@@ -38,7 +38,7 @@ Text is edited in place, through pm's own methods; each change is a commit (`pm:
 
 - Subjects and bodies of milestones, plans and tasks: rendered; `i`, Enter or a click shows the Markdown source (CodeMirror, marked "Markdown"); Esc or leaving it saves
 - Priorities: click the number; empty clears it
-- Tasks: done or drop with a note; add milestones and tasks (plans come from workers)
+- Tasks: done or drop with a note; add milestones (with a queue index, default 0) and tasks (plans come from workers)
 - Pending decisions, on their page, as `pm decision answer|approve|irrelevant`: pick an option or write the answer (Markdown, edited like a body; Esc renders it), one-off, supersedes; Answer or Ctrl-Enter. Sign-offs: Approve. Irrelevant: a reason; drops the open tasks waiting for it. Drafts survive navigating away (session storage)
 - After adding a milestone: add another, or start `pm run` in the terminal (the page says whether it runs)
 - Edits cascade as in pm: a changed milestone queues "revise the masterplan of milestone N: …"; a changed plan queues "create tasks for plan N: …" and "revise plan M: …" for each plan below it

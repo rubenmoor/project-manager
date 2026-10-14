@@ -42,7 +42,8 @@ def apply(project, op):
                             f"window); copy your text, then edit the new version")
     if kind == "milestone_add":
         subject = text(op.get("subject"), "the subject")
-        mid = project.milestone_add(subject.strip(), text(op.get("body", ""), "the body", False) or "")
+        mid = project.milestone_add(subject.strip(), text(op.get("body", ""), "the body", False) or "",
+                                    prio(op.get("queue_index")) or 0)
         return f"milestone {mid} added: {subject.strip()}", mid
     if kind == "milestone_edit":
         project.milestone_set(int(op["id"]), subject=text(op.get("subject"), "the subject", False),

@@ -110,6 +110,10 @@ h3 { font-size: 14px; margin: 16px 0 6px; font-weight: 600; }
 .hold-note { margin: 8px 0; padding: 6px 10px; border-radius: 4px; color: var(--muted);
   background: color-mix(in srgb, var(--warning) 10%, transparent); }
 .cards { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); }
+.cards.one { grid-template-columns: 1fr; }
+.ms-cols { display: grid; gap: 24px; grid-template-columns: minmax(0, 1fr) 300px; align-items: start; }
+.ms-done { border-left: 1px solid var(--border); padding-left: 24px; }
+@media (max-width: 760px) { .ms-cols { grid-template-columns: 1fr; } .ms-done { border-left: 0; padding-left: 0; } }
 .tiles { display: grid; gap: 12px; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); margin: 12px 0; }
 .tile .label { color: var(--ink-2); font-size: 12px; }
 .tile .value { font-size: 22px; font-weight: 600; margin-top: 2px; }
