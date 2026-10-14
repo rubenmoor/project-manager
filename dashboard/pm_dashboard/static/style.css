@@ -230,6 +230,13 @@ dl.meta dt { color: var(--muted); }
 dl.meta dd { margin: 0; }
 .options { margin: 8px 0; padding-left: 20px; }
 .options li.rec::after { content: "recommended"; margin-left: 8px; font-size: 11px; color: var(--muted); }
+.resolve { margin-top: 12px; }
+.options.pick li { margin: 4px 0; }
+.options .option { font: inherit; text-align: left; color: var(--ink); background: var(--surface); cursor: pointer;
+  border: 1px solid var(--border); border-radius: 6px; padding: 4px 10px; }
+.options .option:hover { border-color: var(--accent); }
+.options .option.chosen { border-color: var(--accent); background: var(--accent-wash); }
+.btn.danger { background: var(--critical); border-color: var(--critical); color: #fff; }
 .section-head { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
 
 /* editing */

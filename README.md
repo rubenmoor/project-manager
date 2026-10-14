@@ -45,7 +45,7 @@ The first line is the subject, the rest the body. The same without the editor, e
 pm milestone add "Users can export their data as CSV" < milestone-csv-export.md
 ```
 
-Questions you can't answer yet don't need to block the milestone: workers turn them into decisions, `pm run` skips the tasks they block, and you answer with `pm decide` in the terminal, or `pm decision answer` (e.g. from a Claude session). Answered decisions are the project's decision log: `pm decision list --answered`, with what each answer changed (consequences), which newer answer replaced it (supersede), and the lasting choices workers recorded on their own (`pm decision record`), which you override by superseding them.
+Questions you can't answer yet don't need to block the milestone: workers turn them into decisions, `pm run` skips the tasks they block, and you answer with `pm decide` in the terminal, `pm decision answer` (e.g. from a Claude session), or on a decision's page in `pm-dashboard`. Answered decisions are the project's decision log: `pm decision list --answered`, with what each answer changed (consequences), which newer answer replaced it (supersede), and the lasting choices workers recorded on their own (`pm decision record`), which you override by superseding them.
 
 `pm init` writes `project-manager.toml` from the template `pm/project-manager.toml` (database file name, worker command, usage-limit margin, log folder, editor, the five prompts below, the priority settings, the sign-offs) and commits it; run again, it does nothing. Adjust the defaults (e.g. the database file name) before the first other command: that one writes `tasks.sql` with the schema (`SCHEMA` in `pm/__init__.py`) if it is missing. Other commands need the config. Nothing is pushed.
 
@@ -110,7 +110,7 @@ Global: `--root <repo>`. A text value `-` reads stdin.
 
 ## Dashboard
 
-`dashboard/` holds `pm-dashboard`, an optional local web view and editor of `tasks.sql`: the running worker and its output, queue, milestones, decisions, what changed since you last looked, runs and cost, live; subjects, bodies and priorities edited in place. A separate package, not installed with `pm`: `nix run .#dashboard` (details: `dashboard/README.md`).
+`dashboard/` holds `pm-dashboard`, an optional local web view and editor of `tasks.sql`: the running worker and its output, queue, milestones, decisions, what changed since you last looked, runs and cost, live; subjects, bodies and priorities edited in place; pending decisions answered, approved or closed. A separate package, not installed with `pm`: `nix run .#dashboard` (details: `dashboard/README.md`).
 
 ## Workers
 

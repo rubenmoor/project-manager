@@ -72,7 +72,7 @@ export function CodeEditor({ value, onDone, onChange, autofocus = true, ph = "" 
 }
 
 // Starts editing on `i` / Enter / click (not on a link), or on the "pm-edit" event (the global `i` key).
-function useEditTrigger(start, disabled) {
+export function useEditTrigger(start, disabled) {
   const ref = useRef(null);
   useEffect(() => {
     const el = ref.current;

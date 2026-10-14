@@ -92,7 +92,30 @@ def apply(project, op):
             raise EditError("status must be done or dropped")
         project.task_set(int(op["id"]), status=status, note=text(op.get("note"), "the note"))
         return f"task {op['id']} {'done' if status == 'done' else 'drop'}", None
+    if kind == "decision_answer":
+        once, sup = op.get("once", False), op.get("supersedes", [])
+        if not isinstance(once, bool) or not isinstance(sup, list) or not all(type(s) is int for s in sup):
+            raise EditError("once must be true or false, supersedes a list of decision ids")
+        if project.rows("SELECT 1 FROM decision WHERE id = ? AND signoff IS NOT NULL", int(op["id"])):
+            raise EditError(f"decision {op['id']} is a sign-off: approve it")
+        said = project.answer(int(op["id"]), text(op.get("answer"), "the answer").strip(), "once" if once else None, sup)
+        return f"decision {op['id']} answered: {short(said)}", None
+    if kind == "decision_approve":
+        if not project.rows("SELECT 1 FROM decision WHERE id = ? AND signoff IS NOT NULL", int(op["id"])):
+            raise EditError(f"decision {op['id']} is not a sign-off; answer it")
+        project.resolve(int(op["id"]), answer=pm.SIGNOFF_ANSWER)
+        return f"decision {op['id']} approved", None
+    if kind == "decision_irrelevant":
+        reason = text(op.get("reason"), "the reason").strip()
+        project.resolve(int(op["id"]), irrelevant=reason)
+        return f"decision {op['id']} irrelevant: {short(reason)}", None
     raise EditError(f"unknown edit {kind!r}")
+
+
+def short(s):
+    """A commit subject's worth of a Markdown text: its first line."""
+    line = s.strip().splitlines()[0]
+    return line if len(line) <= 72 and "\n" not in s.strip() else line[:71].rstrip() + "…"
 
 
 def edit(project, op):

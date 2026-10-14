@@ -4,6 +4,7 @@ import { usd, tokens, stamp, duration, seconds, day } from "/data.js";
 import { EditableBody, EditableLine, PrioEdit, post, autofocus } from "/editor.js";
 import { AddButton, Welcome } from "/add.js";
 import { TaskDiff } from "/diff.js";
+import { Resolve } from "/resolve.js";
 
 const runningId = (d) => d.running && d.running.task_id;
 const saveTask = (id, field) => (v) => post({ op: "task_edit", id, [field]: v });
@@ -387,7 +388,7 @@ export function Decisions({ d, query }) {
     <td class="muted" style="width:140px">${(d.tasksWaiting.get(x.id) || []).length} task(s)</td>
     <td class="muted" style="width:110px"><${Time} ts=${x.closed_at || x.created_at} /></td></tr>`)}</tbody></table></div>`;
   return html`<h1>Decisions</h1>
-    <div class="sub">Answer them in a Claude session, with <code>pm decide</code> or <code>pm decision answer</code>; <a href="#/since">since you last looked</a> shows what changed.</div>
+    <div class="sub">Answer one on its page, in a Claude session, with <code>pm decide</code> or <code>pm decision answer</code>; <a href="#/since">since you last looked</a> shows what changed.</div>
     ${signoffs.length ? html`<h2>Sign-offs (${signoffs.length})</h2><${PendingGroups} d=${d} xs=${signoffs} />` : null}
     <h2>Questions (${questions.length})</h2>${questions.length ? html`<${PendingGroups} d=${d} xs=${questions} />` : html`<div class="empty">None pending.</div>`}
     <h2>Closed (${closed.length})</h2>
@@ -406,6 +407,7 @@ export function Decision({ d, id }) {
   if (!x) return html`<div class="empty">No decision ${id}.</div>`;
   const waiting = d.tasksWaiting.get(x.id) || [];
   const extra = Object.entries(x).filter(([k, v]) => !KNOWN.has(k) && v != null);
+  const pending = x.status === "pending";
   return html`<div class="crumbs"><a href="#/decisions">Decisions</a></div>
     <h1>${x.subject}</h1>
     <div class="row sub"><${Pill} status=${x.status} />${x.signoff ? html`<span class="tag signoff">sign-off: ${x.signoff}</span>` : null}
@@ -417,9 +419,10 @@ export function Decision({ d, id }) {
     ${x.status !== "pending" ? html`<div class="card" style="margin:12px 0"><b>${x.status === "answered" ? "Answer" : "Irrelevant"}</b>
       (${stamp(x.closed_at)}${x.decided_by_task != null ? html`, the own choice of <a href=${`#/task/${x.decided_by_task}`}>task ${x.decided_by_task}</a>` : null}): ${x.answer || x.reason}</div>` : null}
     ${x.consequences ? html`<h3>Consequences</h3><div class="card"><${Markdown} text=${x.consequences} /></div>` : null}
-    ${x.options.length ? html`<h3>Options</h3><ol class="options">${x.options.map((o, i) => html`<li class=${i === 0 ? "rec" : ""}>${o}</li>`)}</ol>` : null}
+    ${x.options.length && !pending ? html`<h3>Options</h3><ol class="options">${x.options.map((o, i) => html`<li class=${i === 0 ? "rec" : ""}>${o}</li>`)}</ol>` : null}
     ${x.body.trim() || !x.signoff_view ? html`<div class="card" style="margin-top:12px"><${Markdown} text=${x.body} empty="No body." /></div>` : null}
     ${x.signoff_view ? html`<h2>What it approves</h2><div class="card"><${Markdown} text=${x.signoff_view} /></div>` : null}
+    ${pending ? html`<${Resolve} key=${x.id} d=${d} x=${x} />` : null}
     <h2>Tasks waiting for it (${waiting.length})</h2>
     ${waiting.length ? html`<div class="tablewrap"><${TaskRows} d=${d} tasks=${waiting} /></div>` : html`<div class="empty">None.</div>`}`;
 }

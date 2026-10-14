@@ -10,7 +10,7 @@ Serves the browser client (static/) and a JSON API on 127.0.0.1:
     /api/since?commit=C  rows changed between commit C and the working copy
     /api/task/<id>/commit  the commit pm made for the task, with its patch and the rows it changed
     /api/usage           the account's usage limits, from the newest rate_limit_event in the worker logs
-    POST /api/edit       {"op": …}: add or change milestones, plans, tasks through pm (edit.py)
+    POST /api/edit       {"op": …}: add or change milestones, plans, tasks, resolve decisions through pm (edit.py)
 """
 import argparse, datetime, json, mimetypes, os, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
