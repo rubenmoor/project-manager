@@ -124,3 +124,12 @@ export function Bars({ data, fmt = String, height = 180, horizontal = false }) {
       ${data[tip.i].extra ? html`<div class="muted">${data[tip.i].extra}</div>` : null}</div>` : null}
   </div>`;
 }
+
+// A section that starts hidden; `head` is its heading.
+export function Fold({ head, open = false, children }) {
+  const [shown, setShown] = useState(open);
+  useEffect(() => setShown(open), [open]);
+  return html`<div class="section-head">${head}
+      <button class="iconbtn" onClick=${() => setShown(!shown)}>${shown ? "hide" : "show"}</button></div>
+    ${shown ? children : null}`;
+}

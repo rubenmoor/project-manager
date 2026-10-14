@@ -1,5 +1,5 @@
 import { html, useState, useEffect, useRef } from "/vendor/preact-htm.js";
-import { Markdown, Pill, Kind, Prio, TaskLink, Id, Ref, Named, NamedLink, Titled, Time, Elapsed, Tile, Progress, Bars } from "/ui.js";
+import { Markdown, Pill, Kind, Prio, TaskLink, Id, Ref, Named, NamedLink, Titled, Time, Elapsed, Tile, Progress, Bars, Fold } from "/ui.js";
 import { usd, tokens, stamp, duration, seconds, day } from "/data.js";
 import { EditableBody, EditableLine, PrioEdit, post, autofocus } from "/editor.js";
 import { AddButton, Welcome } from "/add.js";
@@ -241,8 +241,15 @@ export const reasonText = (r) => r.result === "failed" ? r.reason : r.reason.spl
 
 const MAX_LINES = 5000;
 
+// The nearest ancestor that scrolls: a live log follows its end there.
+function scroller(el) {
+  for (let e = el && el.parentElement; e; e = e.parentElement)
+    if (/auto|scroll/.test(getComputedStyle(e).overflowY)) return e;
+  return document.scrollingElement;
+}
+
 // One fetch at a time: a size change while one is out fetches again when it returns, from where it ended.
-export function Log({ d, t, live, full = false, run = null }) {
+export function Log({ d, t, live, run = null }) {
   const [lines, setLines] = useState(null);
   const [cut, setCut] = useState(0);
   const f = useRef({ gen: 0, next: 0, busy: false, again: false });
@@ -257,7 +264,8 @@ export function Log({ d, t, live, full = false, run = null }) {
       s.busy = true;
       fetch(`/api/log/${t.id}?from=${s.next}${run != null ? `&run=${run}` : ""}`).then((r) => r.json()).then((j) => {
         if (f.current.gen !== gen) return;
-        const stick = box.current && box.current.scrollHeight - box.current.scrollTop - box.current.clientHeight < 40;
+        const sc = live && box.current ? scroller(box.current) : null;
+        const stick = sc && sc.scrollHeight - sc.scrollTop - sc.clientHeight < 40;
         s.next = j.next;
         setLines((old) => {
           const all = (old || []).concat(j.lines);
@@ -265,7 +273,7 @@ export function Log({ d, t, live, full = false, run = null }) {
           setCut((c) => c + all.length - MAX_LINES);
           return all.slice(-MAX_LINES);
         });
-        if (stick || !box.current) requestAnimationFrame(() => box.current && (box.current.scrollTop = box.current.scrollHeight));
+        if (stick) requestAnimationFrame(() => (sc.scrollTop = sc.scrollHeight));
       }).catch(() => {}).finally(() => {
         if (f.current.gen !== gen) return;
         s.busy = false;
@@ -276,14 +284,12 @@ export function Log({ d, t, live, full = false, run = null }) {
   }, [t.id, size, run]);
   if (lines === null) return html`<div class="empty">Loading the log…</div>`;
   if (!lines.length) return html`<div class="empty">No log for this task.</div>`;
-  return html`<div class=${"log" + (full ? " full" : "")} ref=${box}>${cut ? html`<div class="muted">… ${cut} earlier lines</div>` : null}
+  return html`<div class="log" ref=${box}>${cut ? html`<div class="muted">… ${cut} earlier lines</div>` : null}
     ${lines.map((l) => html`<div class=${l.startsWith("  → ") ? "tool" : /^\[\w+: \d+ turns/.test(l) ? "res" : ""}>${l || " "}</div>`)}</div>`;
 }
 
 export function Task({ d, id, query }) {
   const t = d.task.get(id);
-  const [showLog, setShowLog] = useState(query === "log");
-  useEffect(() => setShowLog(query === "log"), [id, query]);
   if (!t) return html`<div class="empty">No task ${id}.</div>`;
   const p = d.plan.get(t.plan_id), m = d.milestone.get(p.milestone_id);
   const runs = d.taskRuns(t);
@@ -311,10 +317,8 @@ export function Task({ d, id, query }) {
     ${created.length ? html`<h2>Created by this task</h2><ul>${created.map(([k, r]) => html`<li>${k} ${k === "decision" ? html`<a href=${`#/${k}/${r.id}`}>${r.subject}</a>` : html`<${NamedLink} kind=${k} r=${r} />`}</li>`)}</ul>` : null}
     <h2>Runs (${runs.length}${runs.length ? `, ${usd(d.cost(runs))}` : ""})</h2>
     <${RunsTable} d=${d} runs=${runs} />
-    ${t.status !== "open" || runs.length ? html`<h2>Changes</h2><${TaskDiff} task=${t} version=${t.retired_at} />` : null}
-    <div class="section-head"><h2>Worker log${running ? " (live)" : ""}</h2>
-      <button class="iconbtn" onClick=${() => setShowLog(!showLog)}>${showLog ? "hide" : "show"}</button></div>
-    ${showLog ? html`<${Log} d=${d} t=${t} live=${running} />` : null}`;
+    ${t.status !== "open" || runs.length ? html`<${Fold} key=${"diff" + t.id} head=${html`<h2>Changes</h2>`}><${TaskDiff} task=${t} version=${t.retired_at} /></${Fold}>` : null}
+    <${Fold} key=${"log" + t.id} head=${html`<h2>Worker log${running ? " (live)" : ""}</h2>`} open=${query === "log"}><${Log} d=${d} t=${t} live=${running} /></${Fold}>`;
 }
 
 function HoldButton({ m }) {

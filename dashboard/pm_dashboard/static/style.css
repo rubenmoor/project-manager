@@ -207,7 +207,7 @@ td.subject { min-width: 220px; }
 
 /* log */
 .log { background: var(--code); border-radius: 8px; padding: 10px 12px; font-family: var(--mono); font-size: 12px;
-       max-height: 560px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+       white-space: pre-wrap; overflow-wrap: anywhere; }
 .log .tool { color: var(--ink-2); }
 .log .res { color: var(--good-text); font-weight: 600; }
 
@@ -312,18 +312,15 @@ select.small { width: auto; }
 .tl-detail-subject { font-size: 16px; font-weight: 600; }
 .live-detail { flex: 1; min-height: 0; overflow-y: auto; }
 .live-detail h3 { margin-top: 18px; }
-.live-detail .log { max-height: 420px; }
 .outcome .note { margin-top: 6px; }
 table.compact td { padding: 3px 8px; border-bottom: 1px solid var(--grid); font-size: 13px; }
 table.compact td.reason { font-size: 12px; }
 .reason { white-space: pre-wrap; overflow-wrap: anywhere; }
 table.compact tr:hover { background: none; }
 details > summary { cursor: pointer; margin: 14px 0 6px; }
-.log.full { flex: 1; max-height: none; }
 @media (max-width: 760px) {
   .live { grid-template-columns: 1fr; grid-template-rows: 55vh 1fr; height: auto; }
   .tl { border-right: 0; border-bottom: 1px solid var(--border); }
-  .log.full { max-height: 70vh; }
 }
 
 /* since */
@@ -346,7 +343,7 @@ ins { color: var(--good-text); text-decoration: none; }
 /* task diff */
 .plus { color: var(--good-text); }
 .minus { color: var(--critical); }
-.diffbox { font-size: 12px; }
+.diffbox { font-size: 12px; position: relative; }
 .diffbox .d2h-file-wrapper { border-color: var(--border); border-radius: 8px; }
 .hljs-keyword, .hljs-selector-tag, .hljs-built_in, .hljs-type { color: #cf222e; }
 .hljs-string, .hljs-regexp, .hljs-addition { color: #0a3069; }

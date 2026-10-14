@@ -2,7 +2,8 @@
 // tasks below, newest first); right, the selected task: the running one's output, an open one's details, a retired
 // one's outcome. A click selects (outline); j/k move the selection.
 import { html, useState, useEffect, useRef, useLayoutEffect } from "/vendor/preact-htm.js";
-import { Pill, Kind, Prio, Elapsed, Time, Markdown, Ref, Named, NamedLink } from "/ui.js";
+import { Pill, Kind, Prio, Elapsed, Time, Markdown, Ref, Named, NamedLink, Fold } from "/ui.js";
+import { TaskDiff } from "/diff.js";
 import { Log } from "/views.js";
 import { Affected } from "/affected.js";
 import { usd, stamp, duration, seconds, tokens } from "/data.js";
@@ -54,7 +55,7 @@ function Files({ d, t }) {
     <h3>Changes <span class="muted mono">${c.commit.slice(0, 7)}</span></h3>
     <table class="compact"><tbody>${c.files.map((f) => html`<tr><td class="mono">${f.file}</td>
       <td class="num r plus">${f.added != null ? `+${f.added}` : ""}</td><td class="num r minus">${f.deleted != null ? `−${f.deleted}` : "bin"}</td></tr>`)}</tbody></table>
-    <div><a href=${`#/task/${t.id}`}>the diff on the task page</a></div>`;
+    <${Fold} key=${"diff" + t.id} head=${html`<h3>Full diff</h3>`}><${TaskDiff} task=${t} version=${t.retired_at} /></${Fold}>`;
 }
 
 function Detail({ d, t, running }) {
@@ -72,7 +73,8 @@ function Detail({ d, t, running }) {
       ${running ? html`<span>· <${Elapsed} start=${d.running.started_at} /></span>` : null}
       ${qi >= 0 ? html`<span>· ${qi === 0 ? "next in the queue" : `#${qi + 1} in the queue`}</span>` : null}</div></div>`;
   const body = html`<div class="card live-body"><${Markdown} text=${t.body} /></div>`;
-  if (running) return html`${head}${body}<${Log} d=${d} t=${t} live full />`;
+  if (running) return html`${head}${body}<div class="live-detail">
+    <${Fold} key=${"log" + t.id} head=${html`<h3>Output (live)</h3>`}><${Log} d=${d} t=${t} live /></${Fold}></div>`;
   const fail = last && last.result === "failed" ? last : null;
   if (t.status === "open") return html`${head}<div class="live-detail">
     ${fail ? html`<div class="banner error"><b>Run ${fail.id} failed</b> <span class="muted">${stamp(fail.ended_at)}</span><pre>${fail.reason || ""}</pre></div>` : null}
@@ -81,7 +83,7 @@ function Detail({ d, t, running }) {
     ${decs.length ? html`<h3>Decisions</h3><ul class="plain">${decs.map((x) => html`<li><${Pill} status=${x.status} /> <a href=${`#/decision/${x.id}`}>${x.subject}</a></li>`)}</ul>` : null}
     <div class="muted" style="margin-top:10px">created ${stamp(t.created_at)}${t.created_by_task != null ? html` by <a href=${`#/task/${t.created_by_task}`}>task ${t.created_by_task}</a>` : ""}</div>
     <${Runs} d=${d} runs=${runs} />
-    ${fail ? html`<h3>Output of the failed run</h3><${Log} d=${d} t=${t} live=${false} run=${fail.id} />` : null}
+    ${fail ? html`<${Fold} key=${"log" + t.id} head=${html`<h3>Output of the failed run</h3>`}><${Log} d=${d} t=${t} live=${false} run=${fail.id} /></${Fold}>` : null}
   </div>`;
   const total = runs.reduce((s, r) => s + seconds(r.started_at, r.ended_at), 0);
   return html`${head}<div class="live-detail">
@@ -92,7 +94,7 @@ function Detail({ d, t, running }) {
       ${t.note ? html`<div class="note">${t.note}</div>` : null}</div>
     <${Files} d=${d} t=${t} />
     <${Runs} d=${d} runs=${runs} />
-    ${last ? html`<h3>Output of the last run</h3><${Log} d=${d} t=${t} live=${false} />` : null}
+    ${last ? html`<${Fold} key=${"log" + t.id} head=${html`<h3>Output of the last run</h3>`}><${Log} d=${d} t=${t} live=${false} /></${Fold}>` : null}
   </div>`;
 }
 
