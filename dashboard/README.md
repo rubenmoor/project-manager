@@ -27,6 +27,7 @@ In the project's git repository (the one with `project-manager.toml`):
 - **Since you looked**: rows changed since the commit you marked as seen (uncommitted ones included): decisions answered, choices workers recorded without asking, plan bodies as diffs, new and closed tasks, runs
 - **Runs**: cost per day, per task kind, per milestone; done and dropped tasks per cost bracket (total over their runs); every run
 - Status line (bottom): Claude account usage of the 5-hour window and the week (%, reset time), tokens and cost of pm's workers in each window
+- Milestone implemented: a message with fireworks (no sound), shown once the tab is visible again; stays until "Yay!"; remembered per project in the browser
 - Notifications (`notify` in the top bar): a new pending decision, a failed run, `pm run` stopped or done
 - Ids: every task, plan and milestone shown with its id first (`t12`, `p3`, `m1`), as workers and Claude refer to them
 - Keys: `g` then `l o q m d s r` to go; `/` search (a number finds that id); `i` edit; Esc save

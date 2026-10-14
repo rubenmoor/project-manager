@@ -7,6 +7,7 @@ import { MilestoneAdded } from "/add.js";
 import { Since, useSince, sinceCount } from "/since.js";
 import { useNotifications, NotifyButton } from "/notify.js";
 import { UsageLine } from "/usage.js";
+import { Celebrate } from "/celebrate.js";
 
 function route() {
   const [path, query] = location.hash.replace(/^#/, "").split("?");
@@ -157,6 +158,7 @@ function App() {
         : d ? html`<div class="empty">No such page.</div>` : null}
     </main>
     <${UsageLine} d=${d} version=${shown} />
+    <${Celebrate} d=${d} />
   </div>`;
 }
 
