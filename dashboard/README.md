@@ -26,8 +26,9 @@ In the project's git repository (the one with `project-manager.toml`):
   - runs, worker log (live while it runs, following its end)
   - diff and log start hidden; "show" shows them in full, no inner scroll box (the log open via `?log`)
 - **Decisions**: pending sign-offs and questions by milestone, the ones holding up the most important work first; closed ones: the decision log (as `pm decision list --answered`) or all; tags for one-offs, workers' own choices, superseded ones; a decision's page shows consequences and supersede links; a pending one is resolved there (below)
-- **Reports**: executive summaries, newest first; the button queues `pm summary request` (an exec task, priority 10000); while one is open the button is disabled and links to it, which reads the previous summary and reports the delta
-  - resource use reports: per category (criteria below its name) tasks, time, tokens, cost and shares, bars by time; the button queues `pm report request` the same way
+- **Reports**: on top a button per kind, `pm summary request` and `pm report request` (exec tasks, priority 10000); while one is open its button is disabled and links to it; below every report of every kind, newest first
+  - executive summary: reads the previous one and reports the delta
+  - resource use report: per category (criteria below its name) tasks, time, tokens, cost and shares, bars by time
 - **Runs**: cost per day, per task kind, per milestone; done and dropped tasks per cost bracket (total over their runs); every run
 - Status line (bottom): Claude account usage of the 5-hour window and the week (%, reset time), tokens and cost of pm's workers in each window; a marker in each bar shows how much of the window has passed: bar green while usage is behind it (budget left at the reset), orange once ahead (runs out before the reset)
 - Milestone implemented: a message with fireworks (no sound), shown once the tab is visible again; stays until "Yay!"; remembered per project in the browser
