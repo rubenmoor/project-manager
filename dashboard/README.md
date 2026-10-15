@@ -14,7 +14,8 @@ In the project's git repository (the one with `project-manager.toml`):
 ## Views
 
 - **Live** (home while pm runs): left, one timeline: queue above (next nearest), the running task between two rules, done and dropped tasks below (newest first); a click selects a task (outline); right, the selected task's task page (below), with a link to it
-  - "show tasks blocked by decisions" (top, off by default, remembered in the browser): open tasks waiting for pending decisions, in purple, where they would queue once unblocked, with the decisions they wait for
+  - running task (or what pm run is doing) pinned in the middle; queue and done/dropped scroll on their own; queue opens at "next"
+  - "blocked by decisions" (queue header, off by default, remembered in the browser): open tasks waiting for pending decisions, in purple, where they would queue once unblocked, with the decisions they wait for
   - failed last run: a red "failed" pill in the queue; with no worker running, "pm run stopped: task N failed" and the likely cause
   - crashed `pm run` (e.g. disk full): "pm not running", the task it was on and its error (also on the overview, and a notification); its stale `running` run shows as "crashed"
 - **Overview**: running task, decisions waiting on you, cost, open and on-hold milestones with progress, queue head; without milestones a welcome screen with one button

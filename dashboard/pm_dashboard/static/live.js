@@ -44,7 +44,7 @@ export function Live({ d }) {
   const queued = d.queue.filter((id) => !current || id !== current.id).map((id) => d.task.get(id));
   const queue = (showBlocked && blocked.length
     ? [...queued, ...blocked].map((t) => [queueKey(d, t), t]).sort((a, b) => byKey(a[0], b[0])).map(([, t]) => t)
-    : queued).reverse();
+    : [...queued]).reverse();
   const qpos = new Map(queued.map((t, i) => [t.id, i + 1]));
   const retired = d.tasks.filter((t) => t.retired_at).sort((a, b) => (a.retired_at < b.retired_at ? 1 : a.retired_at > b.retired_at ? -1 : b.id - a.id));
   const lastRun = [...d.runs].filter((x) => x.ended_at).sort((a, b) => (a.ended_at < b.ended_at ? 1 : -1))[0];
@@ -63,24 +63,21 @@ export function Live({ d }) {
     : null;
   const [picked, setPicked] = useState(null);
   const sel = picked != null && d.task.get(picked) ? picked : current ? current.id : crashed && crashed.run ? crashed.run.task_id : lastRun ? lastRun.task_id : null;
-  const scroller = useRef(null), card = useRef(null), top = useRef(null), bottom = useRef(null);
-  const H = useHeight(scroller), cardH = useHeight(card), topH = useHeight(top), bottomH = useHeight(bottom);
-  // Room so the current task can reach both the top and the bottom of the column.
-  const padTop = Math.max(0, H - cardH - topH), padBottom = Math.max(0, H - cardH - bottomH);
-  const centred = useRef(null);
+  // The queue scrolls on its own, opened at its end ("next"); again whenever the running task or the toggle changes.
+  const qbox = useRef(null), H = useHeight(qbox), atEnd = useRef(null);
   useLayoutEffect(() => {
-    const key = current ? current.id : "none";
-    if (!H || !cardH || centred.current === key) return;
-    centred.current = key;
-    scroller.current.scrollTop = card.current.offsetTop - scroller.current.offsetTop - (H - cardH) / 2;
-  }, [H, cardH, current && current.id]);
+    const key = `${current ? current.id : "none"} ${showBlocked}`;
+    if (!H || atEnd.current === key) return;
+    atEnd.current = key;
+    qbox.current.scrollTop = qbox.current.scrollHeight;
+  }, [H, current && current.id, showBlocked]);
   const selTask = sel != null ? d.task.get(sel) : null;
   return html`<div class="live">
-    <div class="tl" ref=${scroller}>
-      <label class="tl-toggle"><input type="checkbox" checked=${showBlocked} onChange=${(e) => toggleBlocked(e.target.checked)} />
-        show tasks blocked by decisions${blocked.length ? html` <span class="muted num">(${blocked.length})</span>` : null}</label>
-      <div style=${`height:${padTop}px`}></div>
-      <div ref=${top}>${queue.length ? html`<div class="tl-label">queue, next nearest${showBlocked && blocked.length ? "; blocked tasks where they would queue" : ""}</div>` : null}
+    <div class="tl">
+      <div class="tl-head"><span class="tl-label">queue, next nearest${showBlocked && blocked.length ? "; blocked where they would queue" : ""}</span>
+        <label class="tl-toggle"><input type="checkbox" checked=${showBlocked} onChange=${(e) => toggleBlocked(e.target.checked)} />
+          blocked by decisions${blocked.length ? html` <span class="muted num">(${blocked.length})</span>` : null}</label></div>
+      <div class="tl-pane" ref=${qbox}><div class="tl-end">${queue.length ? null : html`<div class="tl-label">The queue is empty.</div>`}
         ${queue.map((t) => {
           const q = qpos.get(t.id);
           if (q == null) return html`<${Item} id=${t.id} sel=${sel} select=${setPicked} cls="blocked">
@@ -90,8 +87,8 @@ export function Live({ d }) {
           return html`<${Item} id=${t.id} sel=${sel} select=${setPicked}>
             <span class="tl-pos num">${q === 1 ? "next" : `#${q}`}</span>
             <span class="tl-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} />${failedLast(t) ? html` <${Pill} status="failed" />` : null}</span><${Prio} p=${d.prio(t)} /></${Item}>`;
-        })}</div>
-      <div class="tl-current" ref=${card}>
+        })}</div></div>
+      <div class="tl-current">
         ${current ? html`<${Item} id=${current.id} sel=${sel} select=${setPicked} cls="now">
             <div class="grow"><div class="row"><${Pill} status="running" /><span class="sub">task ${current.id} · <${Elapsed} start=${r.started_at} /></span></div>
             <div class="tl-current-subject"><${Named} kind="task" r=${current} /> <${Kind} kind=${current.kind} /></div>
@@ -106,14 +103,13 @@ export function Live({ d }) {
           : html`<div class="tl-idle"><div class="sub">No worker is running${d.queue.length ? html`: start them with <code>pm run</code> in the project's terminal` : ""}.</div>
             <div class="muted">${d.queue.length ? "The next task is just above." : "The queue is empty."}</div></div>`}
       </div>
-      <div ref=${bottom}>${retired.length ? html`<div class="tl-label">done and dropped, newest first</div>` : null}
+      <div class="tl-pane">${retired.length ? html`<div class="tl-label">done and dropped, newest first</div>` : null}
         ${retired.map((t) => {
           const runs = d.taskRuns(t);
           return html`<${Item} id=${t.id} sel=${sel} select=${setPicked} cls="retired"><${Pill} status=${t.status} />
             <span class="tl-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} /></span>
             <span class="muted num" style="white-space:nowrap">${runs.length ? usd(d.cost(runs)) + " · " : ""}<${Time} ts=${t.retired_at} /></span></${Item}>`;
         })}</div>
-      <div style=${`height:${padBottom}px`}></div>
     </div>
     <div class="live-out">${selTask ? html`<${Task} key=${selTask.id} d=${d} id=${selTask.id} embedded />`
       : html`<div class="empty">No run yet. Select a task on the left.</div>`}</div>
