@@ -459,7 +459,7 @@ export function Decisions({ d, query }) {
     <td class="muted" style="width:140px">${(d.tasksWaiting.get(x.id) || []).length} task(s)</td>
     <td class="muted" style="width:110px"><${Time} ts=${x.closed_at || x.created_at} /></td></tr>`)}</tbody></table></div>`;
   return html`<h1>Decisions</h1>
-    <div class="sub">Answer one on its page, in a Claude session, with <code>pm decide</code> or <code>pm decision answer</code>; <a href="#/summary">an executive summary</a> tells what changed.</div>
+    <div class="sub">Answer one on its page, in a Claude session, with <code>pm decide</code> or <code>pm decision answer</code>; <a href="#/reports">an executive summary</a> tells what changed.</div>
     ${signoffs.length ? html`<h2>Sign-offs (${signoffs.length})</h2><${PendingGroups} d=${d} xs=${signoffs} />` : null}
     <h2>Questions (${questions.length})</h2>${questions.length ? html`<${PendingGroups} d=${d} xs=${questions} />` : html`<div class="empty">None pending.</div>`}
     <h2>Closed (${closed.length})</h2>

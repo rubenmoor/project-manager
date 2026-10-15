@@ -4,7 +4,7 @@ import { Pill, Elapsed, Time } from "/ui.js";
 import { Overview, Queue, Milestones, Milestone, Plan, Task, Decisions, Decision, Runs } from "/views.js";
 import { Live } from "/live.js";
 import { MilestoneAdded } from "/add.js";
-import { Summary } from "/summary.js";
+import { Reports } from "/reports.js";
 import { Tasks } from "/tasks.js";
 import { useNotifications, NotifyButton } from "/notify.js";
 import { UsageLine } from "/usage.js";
@@ -47,8 +47,8 @@ function useState2() {
 }
 
 const NAV = [["live", "Live"], ["overview", "Overview"], ["queue", "Queue"], ["tasks", "Tasks"], ["milestones", "Milestones"],
-  ["decisions", "Decisions"], ["summary", "Summary"], ["runs", "Runs"]];
-const SECTION = { added: "milestones", milestone: "milestones", plan: "milestones", task: "tasks", decision: "decisions" };
+  ["decisions", "Decisions"], ["reports", "Reports"], ["runs", "Runs"]];
+const SECTION = { summary: "reports", added: "milestones", milestone: "milestones", plan: "milestones", task: "tasks", decision: "decisions" };
 
 function Search({ d }) {
   const [q, setQ] = useState("");
@@ -112,7 +112,7 @@ function App() {
   if (r.page === "home") r = { ...r, page: home || "overview" };
   const page = SECTION[r.page] || r.page;
   const pending = d ? d.decisions.filter((x) => x.status === "pending").length : 0;
-  const View = { added: MilestoneAdded, live: Live, summary: Summary, tasks: Tasks, overview: Overview, queue: Queue, milestones: Milestones, milestone: Milestone, plan: Plan, task: Task,
+  const View = { added: MilestoneAdded, live: Live, reports: Reports, summary: Reports, tasks: Tasks, overview: Overview, queue: Queue, milestones: Milestones, milestone: Milestone, plan: Plan, task: Task,
     decisions: Decisions, decision: Decision, runs: Runs }[r.page];
   const root = state ? state.root.split("/").pop() : "";
   useEffect(() => { document.title = root ? `${root} - PM Dashboard` : "PM Dashboard"; }, [root]);

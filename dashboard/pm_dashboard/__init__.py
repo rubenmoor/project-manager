@@ -10,15 +10,15 @@ Serves the browser client (static/) and a JSON API on 127.0.0.1:
     /api/task/<id>/commit  the commit pm made for the task, with its patch and the rows it changed
     /api/usage           the account's usage limits, from the newest rate_limit_event in the worker logs
     POST /api/edit       {"op": …}: add or change milestones, plans, tasks, resolve decisions, request an
-                         executive summary through pm (edit.py)
+                         executive summary or a resource use report through pm (edit.py)
 """
 import argparse, datetime, errno, json, mimetypes, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-PM_MIN_VERSION = 41     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
-                        # summary_request, exec tasks, open_summary)
+PM_MIN_VERSION = 44     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
+                        # summary_request, exec tasks, open_summary, report_request, report_rows)
 try:
     import pm
 except ImportError:
@@ -29,7 +29,8 @@ if getattr(pm, "VERSION", 0) < PM_MIN_VERSION:
 from pm_dashboard import edit
 
 STATIC = Path(__file__).parent / "static"
-TABLES = ("milestone", "plan", "task", "decision", "task_decision", "decision_supersedes", "run", "summary")
+TABLES = ("milestone", "plan", "task", "decision", "task_decision", "decision_supersedes", "run", "summary",
+          "resource_use_report")
 POLL = 0.5
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "
        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
@@ -113,12 +114,15 @@ def read_state(project, last_good=None):
                 d["signoff_view"] = project.signoff_view(d["id"], d["signoff"])
         head_signoff = project.needs_signoff(queue[0]) if queue else None
         done_plans = project.done_plans()
-        open_summary = project.open_summary()
+        open_summary, open_report = project.open_summary(), project.open_report()
+        for r in tables["resource_use_report"]:
+            r["categories"] = project.report_rows(r["id"])
         errors = project.validate()
     except pm.FormatError as e:
         return base | {"error": str(e), "last_good": last_good}
     return base | {"tables": tables, "queue": queue, "head_signoff": head_signoff, "done_plans": done_plans,
-                   "errors": errors, "open_summary": open_summary}
+                   "errors": errors, "open_summary": open_summary,
+                   "open_report": open_report}
 
 
 def usage(project):

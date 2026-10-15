@@ -107,6 +107,30 @@ and pm itself; never ids, file names or counts of these. One screen at most, abo
 Store it: `pm summary add < summary.md`, delete summary.md, then close your task.
 '''
 
+# Body of the task "write a resource use report" (kind exec), queued by `pm report request` or the dashboard's button
+# at priority 10000. Its worker stores the report with `pm report add`; pm sums each category's time, tokens and cost.
+report_prompt = '''
+Write a resource use report: sort every done task of this project into categories of the work itself, so the owner
+sees where time and tokens went. Change nothing in the project; stage nothing.
+
+`pm report tasks` lists the done tasks: id, kind, the commits that did the work, subject, note.
+
+1. First pass: read every task's diff (`git show --stat <commit>`, then `git show <commit> -- . ':!{database}'`;
+   skim large ones) and, where the diff doesn't tell, `pm show <id>`. Note in notes.md, one line per task: what it
+   actually built or changed, and loose candidate categories. Name them in the project's own terms: what the product
+   is made of and what making it takes, e.g. for a game 3D assets, question authoring, store publishing, UI,
+   translations; never pm's task kinds. Planning and upkeep tasks are classified like the rest, by what they plan
+   or touch.
+2. Decide on a set of mutually exclusive categories that together cover every task, each with one sentence of
+   criteria that decides which tasks belong in it. Start from scratch; don't look at earlier reports.
+3. Second pass: apply the criteria and put every task in exactly one category; a task that spans several goes
+   where most of its work went.
+
+Store it: write report.json, `{"categories": [{"name": "…", "criteria": "…", "tasks": [3, 7]}]}`, then
+`pm report add < report.json` (it refuses a report that misses a done task or has one twice), delete notes.md and
+report.json, then close your task.
+'''
+
 # Priority of the planning work: the masterplan `pm milestone add` creates (its tasks write the plans) and every task
 # "create tasks for plan N: …". Above every other plan, so all plans and their tasks exist before implementation starts;
 # within one milestone queue index: a higher index waits, planning included.

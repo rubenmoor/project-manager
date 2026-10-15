@@ -36,6 +36,7 @@
 - **Sign-off:** a decision pm makes, per `signoff` in project-manager.toml, before a plan is split into tasks, before work tasks run, or before a task marked web gets web access; its only answer is approve. Shown as `Decision 4 (answered, sign-off): …`. Not for agents to create or answer.
 - **Recorded by pm, not set by you:** `created_at` everywhere, `retired_at` of tasks, `implemented_at`, `closed_at`; `created_by_task` (your task, when you create a plan, task or decision as a worker); one **run** per worker run, with result, time, tokens and cost.
 - **Executive summary:** the human requests one (`pm summary request`, or the dashboard's button): pm queues the `exec` task "write an executive summary" at priority 10000 (body: `summary_prompt` in project-manager.toml), unless one is open. Its worker reads the previous summary (`pm summary show`: body, date, the commit it was written at), reports the delta since then and stores the new one: `pm summary add < summary.md` (only in an `exec` task). `pm summary list`, `pm show s2`.
+- **Resource use report:** the human requests one (`pm report request`, or the dashboard's button): pm queues the `exec` task "write a resource use report" at priority 10000 (body: `report_prompt`). Its worker lists the done tasks (`pm report tasks`: id, kind, commits, subject, note), reads every diff and notes candidate categories in the project's own terms (first pass), fixes a set of mutually exclusive categories with one sentence of criteria each, from scratch, then puts every done task in exactly one (second pass): `pm report add < report.json`, `{"categories": [{"name": "…", "criteria": "…", "tasks": [3, 7]}]}`; refused unless every done task is in exactly one category. pm sums each category's time, tokens and cost from the runs. `pm report show`, `pm report list`, `pm show r2`.
 - **Queue:** open tasks of open milestones, and open `exec` tasks, that no pending decision blocks; by the milestone's queue index (lowest first; `exec`: 0), then highest priority first, then by milestone, plan and task id. `pm run` takes the first one.
 
 ## Inspect
@@ -257,6 +258,7 @@ pm decide            # answer pending decisions: a number, own text, o <answer> 
 pm decision answer 3 1 --once --supersedes 2   # a one-off answer; this one replaces decision 2
 pm decision kind 3 rule   # rule: lasting, in the log; once: a one-off
 pm summary request   # queue an executive summary (an exec task, priority 10000); pm summary show: the newest
+pm report request    # queue a resource use report (an exec task, priority 10000); pm report show: the newest
 ```
 
 Agents don't start `pm run`: a worker is already one task of a run.

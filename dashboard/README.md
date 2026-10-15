@@ -26,7 +26,8 @@ In the project's git repository (the one with `project-manager.toml`):
   - runs, worker log (live while it runs, following its end)
   - diff and log start hidden; "show" shows them in full, no inner scroll box (the log open via `?log`)
 - **Decisions**: pending sign-offs and questions by milestone, the ones holding up the most important work first; closed ones: the decision log (as `pm decision list --answered`) or all; tags for one-offs, workers' own choices, superseded ones; a decision's page shows consequences and supersede links; a pending one is resolved there (below)
-- **Summary**: executive summaries, newest first; the button queues `pm summary request` (an exec task, priority 10000); while one is open the button is disabled and links to it, which reads the previous summary and reports the delta
+- **Reports**: executive summaries, newest first; the button queues `pm summary request` (an exec task, priority 10000); while one is open the button is disabled and links to it, which reads the previous summary and reports the delta
+  - resource use reports: per category (criteria below its name) tasks, time, tokens, cost and shares, bars by time; the button queues `pm report request` the same way
 - **Runs**: cost per day, per task kind, per milestone; done and dropped tasks per cost bracket (total over their runs); every run
 - Status line (bottom): Claude account usage of the 5-hour window and the week (%, reset time), tokens and cost of pm's workers in each window; a marker in each bar shows how much of the window has passed: bar green while usage is behind it (budget left at the reset), orange once ahead (runs out before the reset)
 - Milestone implemented: a message with fireworks (no sound), shown once the tab is visible again; stays until "Yay!"; remembered per project in the browser
@@ -65,6 +66,6 @@ Text is edited in place, through pm's own methods; each change is a commit (`pm:
 
 - `pm_dashboard/__init__.py`: server, watcher, JSON API (`/api/state`, `/api/log/<task>?from=N`, `/api/events`, `/api/task/<id>/commit`, `/api/usage`, `POST /api/edit`)
 - `pm_dashboard/edit.py`: writes and the run rules; history from git
-- `pm_dashboard/static/`: `app.js` (shell, routing, live state), `views.js` (pages), `live.js` (run view), `editor.js` (in-place editing), `add.js` (forms, welcome), `affected.js` (rows a task's commit touched), `tasks.js`, `summary.js`, `diff.js`, `notify.js`, `usage.js`, `ui.js` (components, charts), `data.js` (indexes, what pm derives)
+- `pm_dashboard/static/`: `app.js` (shell, routing, live state), `views.js` (pages), `live.js` (run view), `editor.js` (in-place editing), `add.js` (forms, welcome), `affected.js` (rows a task's commit touched), `tasks.js`, `reports.js`, `diff.js`, `notify.js`, `usage.js`, `ui.js` (components, charts), `data.js` (indexes, what pm derives)
 - `pm_dashboard/static/vendor/`: Preact + htm 3.1.1, marked 12.0.2, diff2html 3.4.48 (slim, with highlight.js), CodeMirror 6 bundled from `vendor-src/codemirror.js`:
   `npm i esbuild codemirror@6.0.1 @codemirror/lang-markdown@6.2.5 && npx esbuild vendor-src/codemirror.js --bundle --format=esm --minify --outfile=…/vendor/codemirror.js`

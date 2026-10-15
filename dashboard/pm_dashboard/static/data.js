@@ -4,6 +4,7 @@ export function index(state) {
   const by = (rows) => new Map(rows.map((r) => [r.id, r]));
   const d = {
     state, milestones: t.milestone, plans: t.plan, tasks: t.task, decisions: t.decision, runs: t.run, summaries: t.summary || [],
+    reports: t.resource_use_report || [],
     milestone: by(t.milestone), plan: by(t.plan), task: by(t.task), decision: by(t.decision),
     queue: state.queue, queuePos: new Map(state.queue.map((id, i) => [id, i])),
     // A 'running' row whose pm run is gone (it crashed) is stale, not running.
