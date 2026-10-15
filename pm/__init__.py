@@ -27,7 +27,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 40  # bump by one with every commit (AGENTS.md)
+VERSION = 41  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -1110,8 +1110,16 @@ class Project:
     # --- executive summaries -------------------------------------------------------------------
 
     def summary_request(self):
-        """Queue an exec task that writes an executive summary. Returns its id."""
-        return self.task_add(None, SUMMARY_SUBJECT, self.prompt("summary_prompt"), SUMMARY_PRIORITY, "exec")
+        """Queue an exec task that writes an executive summary, unless one is open. Returns (its id, newly queued)."""
+        if (old := self.open_summary()) is not None:
+            return old, False
+        return self.task_add(None, SUMMARY_SUBJECT, self.prompt("summary_prompt"), SUMMARY_PRIORITY, "exec"), True
+
+    def open_summary(self):
+        """The open exec task that writes an executive summary, or None."""
+        rows = self.rows("SELECT id FROM task WHERE kind = 'exec' AND status = 'open' AND subject = ? ORDER BY id",
+                         SUMMARY_SUBJECT)
+        return rows[0]["id"] if rows else None
 
     def summary_add(self, body):
         """Store the summary the running exec task wrote. Returns its id."""
@@ -2394,7 +2402,7 @@ def main(argv=None):
     di.add_argument("reason")
     su = sub.add_parser("summary", aliases=["summaries"], help="executive summaries of the project").add_subparsers(
         dest="action", required=True)
-    su.add_parser("request", help=f"queue an exec task that writes one (priority {SUMMARY_PRIORITY}); prints its id")
+    su.add_parser("request", help=f"queue an exec task that writes one (priority {SUMMARY_PRIORITY}), unless one is open; prints its id")
     su.add_parser("add", help="in an exec task's worker: store the summary (Markdown, stdin); prints its id")
     su.add_parser("show", help="the newest summary, or one (also `pm show s2`)").add_argument("summary", type=int, nargs="?")
     su.add_parser("list", help="every summary, newest first: id, date, commit, first line")
@@ -2549,9 +2557,12 @@ def main(argv=None):
                 msg = f"decision {did} added: {args.subject}"
         elif args.cmd in ("summary", "summaries"):
             if args.action == "request":
-                tid = pm.summary_request()
+                tid, new = pm.summary_request()
                 print(tid)
-                msg = f"task {tid} queued: {SUMMARY_SUBJECT}"
+                if new:
+                    msg = f"task {tid} queued: {SUMMARY_SUBJECT}"
+                else:
+                    print(f"task {tid} already writes one", file=sys.stderr)
             elif args.action == "add":
                 sid = pm.summary_add(sys.stdin.read())
                 print(sid)

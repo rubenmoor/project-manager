@@ -1,25 +1,25 @@
 // Executive summaries: a button queues the task that writes one (pm summary request); it reports the delta since the last.
 import { html, useState } from "/vendor/preact-htm.js";
-import { Markdown, Pill, Time, TaskLink, Fold } from "/ui.js";
+import { Markdown, Time, TaskLink, Fold } from "/ui.js";
 import { stamp } from "/data.js";
 import { post } from "/editor.js";
 
-// The task the button queued (this page's own; the Tasks page lists every exec task).
+// While an exec task writes a summary (pm's open_summary), the button is disabled and links to it.
 function Request({ d }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  const [queued, setQueued] = useState(null);
   const go = () => {
     setBusy(true); setError(null);
-    post({ op: "summary_request" }).then((r) => setQueued(r.id)).catch((e) => setError(e.message)).finally(() => setBusy(false));
+    post({ op: "summary_request" }).catch((e) => setError(e.message)).finally(() => setBusy(false));
   };
-  const t = queued != null ? d.task.get(queued) : null;
+  const id = d.state.open_summary;
+  const t = id != null ? d.task.get(id) : null;
   const running = t && d.running && d.running.task_id === t.id;
   const pos = t ? d.queuePos.get(t.id) : null;
-  return html`<div class="row"><button class="btn primary" onClick=${go} disabled=${busy}>Write an executive summary</button>
-    ${t ? html`<${Pill} status=${running ? "running" : t.status} label=${running ? "writing" : t.status === "open" ? "queued" : t.status} />
-      <span class="sub"><${TaskLink} t=${t} />${running ? html` · <a href=${`#/task/${t.id}?log`}>live log</a>`
-        : pos != null ? `, #${pos + 1} in the queue` : ""}</span>`
+  return html`<div class="row"><button class="btn primary" onClick=${go} disabled=${busy || !!t}>
+      ${t ? (running ? "Writing an executive summary…" : "Executive summary queued") : "Write an executive summary"}</button>
+    ${t ? html`<span class="sub"><${TaskLink} t=${t} />${running ? html` · <a href=${`#/task/${t.id}?log`}>live log</a>`
+        : pos != null ? `, #${pos + 1} in the queue` : ", not in the queue"}</span>`
     : html`<span class="muted">queues an exec task at priority 10000</span>`}
     ${error ? html`<span class="err">${error}</span>` : null}</div>`;
 }

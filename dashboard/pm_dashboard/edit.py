@@ -105,8 +105,8 @@ def apply(project, op):
         project.resolve(int(op["id"]), irrelevant=reason)
         return f"decision {op['id']} irrelevant: {short(reason)}", None
     if kind == "summary_request":
-        tid = project.summary_request()
-        return f"task {tid} queued: {pm.SUMMARY_SUBJECT}", tid
+        tid, new = project.summary_request()
+        return (f"task {tid} queued: {pm.SUMMARY_SUBJECT}" if new else f"task {tid} already queued"), tid
     raise EditError(f"unknown edit {kind!r}")
 
 

@@ -17,8 +17,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-PM_MIN_VERSION = 40     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
-                        # summary_request, exec tasks)
+PM_MIN_VERSION = 41     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
+                        # summary_request, exec tasks, open_summary)
 try:
     import pm
 except ImportError:
@@ -113,11 +113,12 @@ def read_state(project, last_good=None):
                 d["signoff_view"] = project.signoff_view(d["id"], d["signoff"])
         head_signoff = project.needs_signoff(queue[0]) if queue else None
         done_plans = project.done_plans()
+        open_summary = project.open_summary()
         errors = project.validate()
     except pm.FormatError as e:
         return base | {"error": str(e), "last_good": last_good}
     return base | {"tables": tables, "queue": queue, "head_signoff": head_signoff, "done_plans": done_plans,
-                   "errors": errors}
+                   "errors": errors, "open_summary": open_summary}
 
 
 def usage(project):
