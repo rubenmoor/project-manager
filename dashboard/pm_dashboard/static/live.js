@@ -5,6 +5,16 @@ import { Pill, Kind, Prio, Elapsed, Time, Named } from "/ui.js";
 import { Task } from "/views.js";
 import { usd } from "/data.js";
 
+const SHOW_BLOCKED = "pm-live-blocked";
+const loadShow = () => { try { return localStorage.getItem(SHOW_BLOCKED) === "1"; } catch { return false; } };
+
+// The queue view's order (pm/__init__.py: queue), so blocked tasks sit where they would queue once unblocked.
+const queueKey = (d, t) => {
+  const p = t.plan_id != null ? d.plan.get(t.plan_id) : null, m = d.milestoneOfTask(t);
+  return [m ? m.queue_index : 0, -(t.effective_priority ?? 0), m ? m.id : 0, p ? p.id : 0, t.id];
+};
+const byKey = (a, b) => { for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return a[i] - b[i]; return 0; };
+
 function useHeight(ref) {
   const [h, setH] = useState(0);
   useLayoutEffect(() => {
@@ -27,7 +37,15 @@ export function Live({ d }) {
   // The worker closed its task (or made it wait for a decision) but hasn't exited yet.
   const wrapping = rt && (rt.status !== "open" || d.blockers(rt).length > 0);
   const current = wrapping ? null : rt;
-  const queue = d.queue.filter((id) => !current || id !== current.id).map((id) => d.task.get(id)).reverse();
+  const [showBlocked, setShowBlocked] = useState(loadShow);
+  const toggleBlocked = (on) => { setShowBlocked(on); try { localStorage.setItem(SHOW_BLOCKED, on ? "1" : "0"); } catch {} };
+  const blocked = d.tasks.filter((t) => t.status === "open" && !d.queuePos.has(t.id) && (!current || t.id !== current.id)
+    && d.blockers(t).length && (t.kind === "exec" || d.milestoneOfTask(t)?.status === "open"));
+  const queued = d.queue.filter((id) => !current || id !== current.id).map((id) => d.task.get(id));
+  const queue = (showBlocked && blocked.length
+    ? [...queued, ...blocked].map((t) => [queueKey(d, t), t]).sort((a, b) => byKey(a[0], b[0])).map(([, t]) => t)
+    : queued).reverse();
+  const qpos = new Map(queued.map((t, i) => [t.id, i + 1]));
   const retired = d.tasks.filter((t) => t.retired_at).sort((a, b) => (a.retired_at < b.retired_at ? 1 : a.retired_at > b.retired_at ? -1 : b.id - a.id));
   const lastRun = [...d.runs].filter((x) => x.ended_at).sort((a, b) => (a.ended_at < b.ended_at ? 1 : -1))[0];
   const failedLast = (t) => { const e = d.taskRuns(t).filter((x) => x.ended_at).pop(); return e && e.result === "failed"; };
@@ -59,11 +77,20 @@ export function Live({ d }) {
   const selTask = sel != null ? d.task.get(sel) : null;
   return html`<div class="live">
     <div class="tl" ref=${scroller}>
+      <label class="tl-toggle"><input type="checkbox" checked=${showBlocked} onChange=${(e) => toggleBlocked(e.target.checked)} />
+        show tasks blocked by decisions${blocked.length ? html` <span class="muted num">(${blocked.length})</span>` : null}</label>
       <div style=${`height:${padTop}px`}></div>
-      <div ref=${top}>${queue.length ? html`<div class="tl-label">queue, next nearest</div>` : null}
-        ${queue.map((t, i) => html`<${Item} id=${t.id} sel=${sel} select=${setPicked}>
-          <span class="tl-pos num">${queue.length - i === 1 ? "next" : `#${queue.length - i}`}</span>
-          <span class="tl-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} />${failedLast(t) ? html` <${Pill} status="failed" />` : null}</span><${Prio} p=${d.prio(t)} /></${Item}>`)}</div>
+      <div ref=${top}>${queue.length ? html`<div class="tl-label">queue, next nearest${showBlocked && blocked.length ? "; blocked tasks where they would queue" : ""}</div>` : null}
+        ${queue.map((t) => {
+          const q = qpos.get(t.id);
+          if (q == null) return html`<${Item} id=${t.id} sel=${sel} select=${setPicked} cls="blocked">
+            <span class="tl-pos num" title="waits for a pending decision">—</span>
+            <span class="tl-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} />
+              <span class="tag waits">waits for ${d.blockers(t).map((x) => `d${x.id}`).join(", ")}</span></span><${Prio} p=${d.prio(t)} /></${Item}>`;
+          return html`<${Item} id=${t.id} sel=${sel} select=${setPicked}>
+            <span class="tl-pos num">${q === 1 ? "next" : `#${q}`}</span>
+            <span class="tl-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} />${failedLast(t) ? html` <${Pill} status="failed" />` : null}</span><${Prio} p=${d.prio(t)} /></${Item}>`;
+        })}</div>
       <div class="tl-current" ref=${card}>
         ${current ? html`<${Item} id=${current.id} sel=${sel} select=${setPicked} cls="now">
             <div class="grow"><div class="row"><${Pill} status="running" /><span class="sub">task ${current.id} · <${Elapsed} start=${r.started_at} /></span></div>
