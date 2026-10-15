@@ -104,6 +104,9 @@ def apply(project, op):
         reason = text(op.get("reason"), "the reason").strip()
         project.resolve(int(op["id"]), irrelevant=reason)
         return f"decision {op['id']} irrelevant: {short(reason)}", None
+    if kind == "summary_request":
+        tid, new = project.summary_request()
+        return (f"task {tid} queued: {pm.SUMMARY_SUBJECT}" if new else f"task {tid} already queued"), tid
     raise EditError(f"unknown edit {kind!r}")
 
 
@@ -161,20 +164,6 @@ def diff(old_sql, new_sql):
         if added or removed or changed:
             tables[t] = {"added": added, "removed": removed, "changed": changed}
     return tables
-
-
-def since(project, commit):
-    """What changed in the database between `commit` and the working copy, row by row."""
-    try:
-        old_sql = project.git("show", f"{commit}:{project.db}")
-        when = project.git("log", "-1", "--format=%cI", commit).strip()
-    except subprocess.CalledProcessError:
-        return {"error": f"{project.db} isn't in commit {commit[:12]}"}
-    try:
-        tables = diff(old_sql, project.db_path.read_text(encoding="utf-8"))
-    except sqlite3.Error as e:
-        return {"error": f"can't read {project.db}: {e}"}
-    return {"commit": commit, "date": when, "tables": tables}
 
 
 def task_commit(project, tid):

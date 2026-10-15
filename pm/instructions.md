@@ -21,9 +21,9 @@
 - **Task kind:**
   - `work` (default): anything else
   - `plan`: writes a plan (`pm task add … --kind plan`)
-  - made by pm only: `masterplan` ("write the masterplan of milestone N: …"), `split` ("create tasks for plan N: …"), `cleanup` ("post-milestone cleanup of milestone N: …"), `revise` ("revise the masterplan of milestone N: …", "revise plan N: …"), `investigate` ("investigate the failure of task N: …": queued above a task that failed; adds fix tasks between the two, or changes or drops the task, or raises a decision)
+  - made by pm only: `masterplan` ("write the masterplan of milestone N: …"), `split` ("create tasks for plan N: …"), `cleanup` ("post-milestone cleanup of milestone N: …"), `revise` ("revise the masterplan of milestone N: …", "revise plan N: …"), `investigate` ("investigate the failure of task N: …": queued above a task that failed; adds fix tasks between the two, or changes or drops the task, or raises a decision), `summary` ("write an executive summary", below)
   - `plan`, `masterplan`, `split`: priority `planning_priority` (1000) unless given
-  - checked by `pm run` when done: `plan` and `masterplan` must add or change a plan (except "revise …", which may leave it as it is), `split` must leave its plan with tasks; otherwise the task fails
+  - checked by `pm run` when done: `plan` and `masterplan` must add or change a plan (except "revise …", which may leave it as it is), `split` must leave its plan with tasks, `summary` must store a summary; otherwise the task fails
 - **Decision:** subject (the question), body (context), options (the recommended one first), status `pending` | `answered` | `irrelevant`. A task linked to a pending decision waits. When the human answers, the task becomes workable again and its worker sees the answer in `pm show`. When a decision is marked irrelevant, the open tasks waiting for it are dropped.
 - **Decision log:** answered decisions are the project's decision log (`pm decision list --answered`). Also:
   - kind `rule` (default, lasting, in the log) | `once` (a go-ahead or check, not in the log)
@@ -34,7 +34,8 @@
 - **References:** refer to a milestone, plan, task or decision always by id and full subject, e.g. `plan 2: Backend endpoint`. Plain in a subject (`pm task add 2 "Fix the encoding of plan 2: Backend endpoint"`), in backticks in a body, note or decision text. pm's own tasks and sign-offs follow it; renaming a milestone, plan or task updates its references in open tasks that aren't running and in pending decisions.
 - **Sign-off:** a decision pm makes, per `signoff` in project-manager.toml, before a plan is split into tasks, before work tasks run, or before a task marked web gets web access; its only answer is approve. Shown as `Decision 4 (answered, sign-off): …`. Not for agents to create or answer.
 - **Recorded by pm, not set by you:** `created_at` everywhere, `retired_at` of tasks, `implemented_at`, `closed_at`; `created_by_task` (your task, when you create a plan, task or decision as a worker); one **run** per worker run, with result, time, tokens and cost.
-- **Queue:** open tasks of open milestones that no pending decision blocks; by the milestone's queue index (lowest first), then highest priority first, then by milestone, plan and task id. `pm run` takes the first one.
+- **Executive summary:** the human requests one (`pm summary request`, or the dashboard's button): pm queues a task of kind `summary`, without a plan, at priority 10000, so it runs next (body: `summary_prompt` in project-manager.toml); one at a time. Its worker reads the previous summary (`pm summary show`: body, date, the commit it was written at), reports the delta since then and stores the new one: `pm summary add < summary.md` (only in a summary task). `pm summary list`, `pm show s2`. A summary task that fails is dropped, not investigated.
+- **Queue:** open tasks of open milestones, and summary tasks, that no pending decision blocks; a summary first, then by the milestone's queue index (lowest first), then highest priority first, then by milestone, plan and task id. `pm run` takes the first one.
 
 ## Inspect
 
@@ -254,6 +255,7 @@ pm run --dry-run     # print the next worker command; change nothing
 pm decide            # answer pending decisions: a number, own text, o <answer> = one-off, s = skip, x <reason> = irrelevant; sign-offs: a = approve
 pm decision answer 3 1 --once --supersedes 2   # a one-off answer; this one replaces decision 2
 pm decision kind 3 rule   # rule: lasting, in the log; once: a one-off
+pm summary request   # queue an executive summary (priority 10000: next); pm summary show: the newest
 ```
 
 Agents don't start `pm run`: a worker is already one task of a run.

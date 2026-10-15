@@ -5,14 +5,16 @@ in-memory database (the schema is SCHEMA below). A new milestone comes with a fi
 changed milestone queues the revision of its masterplan, a changed plan that of the plans below it and of its open
 tasks; implemented milestones, done plans and closed tasks can't be changed; a milestone whose tasks are all closed
 gets a last one, the post-milestone cleanup, before it is implemented; a milestone on hold keeps its tasks out of
-the queue until it is resumed. The queue (the `queue` view): open tasks of
-open milestones that no pending decision blocks, by the milestone's queue index (lowest first), then highest priority
+the queue until it is resumed. An executive summary (`pm summary request`) is a task without a plan at
+SUMMARY_PRIORITY; its worker reads the previous summary and stores the new one in the summary table. The queue (the `queue` view): open tasks of
+open milestones (and summary tasks) that no pending decision blocks, by the milestone's queue index (lowest first), then highest priority
 first, then by milestone, plan and task.
 Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
 
     pm init | status | queue | show <task|d32|p3|m1> | validate | decide | run [--once] [--dry-run] | instructions
     pm milestone add|set|hold|resume|list|show …   pm plan add|edit|list …   pm task add|set|done|drop|priority …
     pm decision add|list|show|answer|approve|irrelevant|record|supersede|consequences|kind …
+    pm summary request|add|show|list
     pm task-pending-decision <task> <decision>
 
 Works on the git repository around the current directory. `pm init` writes the settings, project-manager.toml (the
@@ -24,7 +26,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 36  # bump by one with every commit (AGENTS.md)
+VERSION = 37  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -38,7 +40,7 @@ REPACK = ("import fcntl, subprocess, sys\nf = open(sys.argv[1], 'w')\ntry:\n    
 WORKER_ENV = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1", "BASH_MAX_TIMEOUT_MS": "3600000"}
 EPILOG = "Agents (LLMs): read `pm instructions` first, the full reference with examples for every command."
 PROMPT_KEYS = ("masterplan_prompt", "plan_tasks_prompt", "revise_masterplan_prompt", "revise_plan_prompt",
-               "cleanup_prompt", "investigate_prompt")
+               "cleanup_prompt", "investigate_prompt", "summary_prompt")
 PRIORITY_KEYS = ("plan_priority_prompt", "task_priority_prompt")
 # Items are referred to by id and full subject, `ref()`: plain in a subject, in backticks in a body.
 CLEANUP_SUBJECT = "post-milestone cleanup of {}"
@@ -47,11 +49,14 @@ WRITE_MASTERPLAN_SUBJECT = "write the masterplan of {}"
 REVISE_MASTERPLAN_SUBJECT = "revise the masterplan of {}"
 REVISE_PLAN_SUBJECT = "revise {}"
 INVESTIGATE_SUBJECT = "investigate the failure of {}"
+SUMMARY_SUBJECT = "write an executive summary"
+SUMMARY_PRIORITY = 10000
 # Dedupes queued planning tasks: a running one may have read the old text already, so it doesn't count.
 NOT_RUNNING = "AND id NOT IN (SELECT task_id FROM run WHERE result = 'running')"
 # work: the default; plan: writes a plan; made by pm only: masterplan, split ("create tasks for plan N: …"), cleanup,
-# revise ("revise the masterplan of milestone N: …", "revise plan N: …"), investigate (a failed task)
-TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup", "revise", "investigate")
+# revise ("revise the masterplan of milestone N: …", "revise plan N: …"), investigate (a failed task),
+# summary (an executive summary; the only kind without a plan)
+TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup", "revise", "investigate", "summary")
 PLANNING_KINDS = ("plan", "masterplan", "split")
 # `signoff` in project-manager.toml → decision.signoff; a sign-off's only answer is SIGNOFF_ANSWER
 SIGNOFF_LEVELS = {"masterplans": "masterplan", "plans": "plan", "task-queue": "task-queue", "web": "web"}
@@ -62,7 +67,7 @@ SIGNOFF_ANSWER = "approve"
 IN_LOG = ("status = 'answered' AND signoff IS NULL AND kind = 'rule' AND id NOT IN (SELECT superseded_id FROM "
           "decision_supersedes s JOIN decision n ON n.id = s.decision_id WHERE s.note = '' AND n.status = 'answered')")
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 # A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
 # run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
 # Columns and tables SCHEMA dropped are left behind, new ones get their defaults; so only renames, moved data and new
@@ -74,7 +79,7 @@ def revise_kind(con):
                 "AND (subject LIKE 'revise the masterplan of %' OR subject LIKE 'revise plan %')")
 
 
-MIGRATIONS = {12: "", 13: "", 14: revise_kind, 15: "", 16: ""}
+MIGRATIONS = {12: "", 13: "", 14: revise_kind, 15: "", 16: "", 17: ""}
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -100,9 +105,9 @@ CREATE TABLE plan (
 
 CREATE TABLE task (
     id              INTEGER PRIMARY KEY,
-    plan_id         INTEGER NOT NULL REFERENCES plan (id),
+    plan_id         INTEGER REFERENCES plan (id),          -- NULL: a summary
     subject         TEXT NOT NULL CHECK (trim(subject) <> ''),
-    kind            TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'plan', 'masterplan', 'split', 'cleanup', 'revise', 'investigate')),
+    kind            TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'plan', 'masterplan', 'split', 'cleanup', 'revise', 'investigate', 'summary')),
     status          TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done', 'dropped')),
     priority        INTEGER,                               -- NULL: the plan's
     note            TEXT,                                  -- done: date, files; dropped: reason
@@ -112,7 +117,8 @@ CREATE TABLE task (
     created_by_task INTEGER REFERENCES task (id),
     web             INTEGER NOT NULL DEFAULT 0 CHECK (web IN (0, 1)),  -- 1: its worker gets WebSearch and WebFetch
     CONSTRAINT "an open task needs a body" CHECK (status <> 'open' OR trim(body) <> ''),
-    CONSTRAINT "retired_at is set exactly when done or dropped" CHECK ((status = 'open') = (retired_at IS NULL))
+    CONSTRAINT "retired_at is set exactly when done or dropped" CHECK ((status = 'open') = (retired_at IS NULL)),
+    CONSTRAINT "a task has a plan unless it is a summary" CHECK ((kind = 'summary') = (plan_id IS NULL))
 ) STRICT;
 
 CREATE TABLE decision (
@@ -175,6 +181,14 @@ CREATE TABLE decision_supersedes (                         -- decision_id's answ
     CHECK (decision_id <> superseded_id)
 ) STRICT;
 
+CREATE TABLE summary (                                     -- an executive summary, written by a summary task
+    id          INTEGER PRIMARY KEY,
+    task_id     INTEGER NOT NULL REFERENCES task (id),
+    body        TEXT NOT NULL CHECK (trim(body) <> ''),     -- Markdown
+    head_commit TEXT,                                      -- git HEAD when written: the next summary's delta starts here
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now'))
+) STRICT;
+
 CREATE INDEX plan_milestone ON plan (milestone_id);
 CREATE INDEX task_plan ON task (plan_id);
 CREATE INDEX task_decision_decision ON task_decision (decision_id);
@@ -185,12 +199,12 @@ CREATE UNIQUE INDEX run_running ON run (result) WHERE result = 'running';  -- at
 CREATE VIEW queue AS
 SELECT coalesce(t.priority, p.priority, 0) AS priority, t.id AS task_id, t.subject, t.kind
 FROM task t
-JOIN plan p ON p.id = t.plan_id
-JOIN milestone m ON m.id = p.milestone_id
-WHERE m.status = 'open' AND t.status = 'open'
+LEFT JOIN plan p ON p.id = t.plan_id
+LEFT JOIN milestone m ON m.id = p.milestone_id
+WHERE (m.status = 'open' OR t.kind = 'summary') AND t.status = 'open'
   AND NOT EXISTS (SELECT 1 FROM task_decision td JOIN decision d ON d.id = td.decision_id
                   WHERE td.task_id = t.id AND d.status = 'pending')
-ORDER BY m.queue_index, priority DESC, m.id, p.id, t.id;
+ORDER BY m.queue_index, priority DESC, m.id, p.id, t.id;  -- NULL first: a summary before every milestone
 """
 
 WORKER_PROMPT = """You are the worker for task {id}. Follow the project's own instructions for agents (AGENTS.md, \
@@ -1080,6 +1094,46 @@ class Project:
             out.append(f"  task {t['id']}: {t['subject']}")
         return "\n".join(out)
 
+    # --- executive summaries -------------------------------------------------------------------
+
+    def summary_request(self):
+        """Queue the task that writes an executive summary, unless one is open. Returns (task id, newly queued)."""
+        human_only("request an executive summary")
+        with self.connect(write=True) as db:
+            if old := db.execute("SELECT id FROM task WHERE kind = 'summary' AND status = 'open'").fetchone():
+                return old[0], False
+            return db.execute("INSERT INTO task (subject, kind, priority, body) VALUES (?, 'summary', ?, ?)",
+                              (SUMMARY_SUBJECT, SUMMARY_PRIORITY, self.prompt("summary_prompt"))).lastrowid, True
+
+    def summary_add(self, body):
+        """Store the summary the running summary task wrote. Returns its id."""
+        tid = creator()
+        with self.connect(write=True) as db:
+            if tid is None or (t := self.get(db, "task", tid))["kind"] != "summary" or t["status"] != "open":
+                raise FormatError("only the worker of an open summary task adds a summary (`pm summary request`)")
+            if not body.strip():
+                raise FormatError("the summary is empty")
+            return db.execute("INSERT INTO summary (task_id, body, head_commit) VALUES (?, ?, ?)",
+                              (tid, body.strip(), self.head())).lastrowid
+
+    def summary_show(self, sid=None):
+        """Summary sid, or the newest; with the commit its delta starts from for the next one."""
+        rows = self.rows("SELECT * FROM summary WHERE id = ?", sid) if sid else self.rows(
+            "SELECT * FROM summary ORDER BY id DESC LIMIT 1")
+        if not rows:
+            if sid:
+                raise FormatError(f"no summary {sid}")
+            return "No executive summary yet.\n"
+        s = rows[0]
+        at = f", at commit {s['head_commit'][:12]}" if s["head_commit"] else ""
+        return f"# Executive summary {s['id']} ({stamp(s['created_at'])}, by task {s['task_id']}{at})\n\n{s['body']}\n"
+
+    def summaries(self):
+        """`pm summary list`: id, date, commit, first line; newest first."""
+        rows = self.rows("SELECT * FROM summary ORDER BY id DESC")
+        return "".join(f"{s['id']:4d}  {stamp(s['created_at'])}  {(s['head_commit'] or '')[:7]:<7}  "
+                       f"{s['body'].splitlines()[0].lstrip('# ')[:80]}\n" for s in rows) or "No executive summary yet.\n"
+
     # --- edit commands -----------------------------------------------------------------------
 
     def edit(self, name, template=""):
@@ -1365,12 +1419,13 @@ class Project:
     # --- show --------------------------------------------------------------------------------
 
     def show_ref(self, ref):
-        """`pm show`: "7" or "t7" (a task), "d32" or "decision 32", "p3" or "plan 3", "m1" or "milestone 1"."""
-        m = re.fullmatch(r"(?:(t|task|d|decision|p|plan|m|milestone)\s*)?(\d+)", " ".join(ref).strip().lower())
+        """`pm show`: "7" or "t7" (a task), "d32" or "decision 32", "p3" or "plan 3", "m1" or "milestone 1", "s2" or
+        "summary 2"."""
+        m = re.fullmatch(r"(?:(t|task|d|decision|p|plan|m|milestone|s|summary)\s*)?(\d+)", " ".join(ref).strip().lower())
         if not m:
-            raise FormatError(f"not a task, decision, plan or milestone: {' '.join(ref)!r} (e.g. 7, d32, p3, m1)")
+            raise FormatError(f"not a task, decision, plan, milestone or summary: {' '.join(ref)!r} (e.g. 7, d32, p3, m1, s2)")
         rid = int(m[2])
-        return {"d": self.decision_show, "p": self.plan_show, "m": self.milestone_show}.get(
+        return {"d": self.decision_show, "p": self.plan_show, "m": self.milestone_show, "s": self.summary_show}.get(
             (m[1] or "t")[0], self.show)(rid)
 
     def plan_show(self, pid):
@@ -1414,11 +1469,13 @@ class Project:
         """The task with its plan and milestone: the context a worker gets."""
         with self.connect() as db:
             t = self.get(db, "task", tid)
-            p = self.get(db, "plan", t["plan_id"])
-            m = self.get(db, "milestone", p["milestone_id"])
-            plans = db.execute("SELECT id, subject FROM plan WHERE milestone_id = ? ORDER BY id", (m["id"],)).fetchall()
-            siblings = db.execute("SELECT id, status, kind, subject FROM task WHERE plan_id = ? ORDER BY id",
-                                  (p["id"],)).fetchall()
+            p = m = None
+            if t["plan_id"] is not None:
+                p = self.get(db, "plan", t["plan_id"])
+                m = self.get(db, "milestone", p["milestone_id"])
+                plans = db.execute("SELECT id, subject FROM plan WHERE milestone_id = ? ORDER BY id", (m["id"],)).fetchall()
+                siblings = db.execute("SELECT id, status, kind, subject FROM task WHERE plan_id = ? ORDER BY id",
+                                      (p["id"],)).fetchall()
             ds = db.execute("SELECT d.* FROM task_decision td JOIN decision d ON d.id = td.decision_id "
                             "WHERE td.task_id = ? ORDER BY d.id", (tid,)).fetchall()
             runs = db.execute("SELECT * FROM run WHERE task_id = ? ORDER BY id", (tid,)).fetchall()
@@ -1427,15 +1484,17 @@ class Project:
                 "AND d.status = 'answered' AND d.signoff IS NULL AND d.kind = 'rule' AND NOT EXISTS (SELECT 1 FROM "
                 "task_decision o JOIN task t ON t.id = o.task_id WHERE o.decision_id = d.id AND o.task_id <> ? "
                 "AND t.status = 'open')", (tid, tid))}
-        prio = t["priority"] if t["priority"] is not None else p["priority"] or 0
+        prio = t["priority"] if t["priority"] is not None else (p and p["priority"]) or 0
         by = lambda r: f", by task {r['created_by_task']}" if r["created_by_task"] else ""
-        implemented = f", implemented {stamp(m['implemented_at'])}" if m["implemented_at"] else ""
-        out = [f"# Milestone {m['id']}: {m['subject']} ({m['status']}, created {stamp(m['created_at'])}{implemented})",
-               "", m["body"], "", "Plans: " + ", ".join(f"{x['id']} {x['subject']}" for x in plans), "",
-               f"# Plan {p['id']}: {p['subject']} (priority {p['priority'] or 0}, created {stamp(p['created_at'])}{by(p)})",
-               "", p["body"], ""]
-        out += [f"- task {x['id']} [{x['status']}{'' if x['kind'] == 'work' else ', ' + x['kind']}] {x['subject']}"
-                + (" ← this task" if x["id"] == tid else "") for x in siblings] + [""]
+        out = []
+        if p:
+            implemented = f", implemented {stamp(m['implemented_at'])}" if m["implemented_at"] else ""
+            out = [f"# Milestone {m['id']}: {m['subject']} ({m['status']}, created {stamp(m['created_at'])}{implemented})",
+                   "", m["body"], "", "Plans: " + ", ".join(f"{x['id']} {x['subject']}" for x in plans), "",
+                   f"# Plan {p['id']}: {p['subject']} (priority {p['priority'] or 0}, created {stamp(p['created_at'])}{by(p)})",
+                   "", p["body"], ""]
+            out += [f"- task {x['id']} [{x['status']}{'' if x['kind'] == 'work' else ', ' + x['kind']}] {x['subject']}"
+                    + (" ← this task" if x["id"] == tid else "") for x in siblings] + [""]
         retired = f", retired {stamp(t['retired_at'])}" if t["retired_at"] else ""
         web = (", web access" if self.web_granted(tid) else ", web: needs sign-off") if t["web"] else ""
         out += [f"# Task {tid}: {t['subject']} ({t['status']}, kind {t['kind']}, priority {prio}{web}, "
@@ -1959,6 +2018,8 @@ class Project:
         if t["kind"] == "split" and not self.rows("SELECT 1 FROM task WHERE plan_id = ? AND kind IN ('work', 'plan')",
                                                   t["plan_id"]):
             return "left its plan without tasks"
+        if t["kind"] == "summary" and not self.rows("SELECT 1 FROM summary WHERE task_id = ?", t["id"]):
+            return "stored no summary (`pm summary add`)"
         return None
 
     def commit_task(self, tid, subject, body):
@@ -2017,12 +2078,12 @@ class Project:
                 return 0
             self.close_stale_run()
             self.close_and_commit()
-            if not self.rows("SELECT 1 FROM milestone WHERE status = 'open'"):
+            q = self.queue()
+            if not q and not self.rows("SELECT 1 FROM milestone WHERE status = 'open'"):
                 held = [r["id"] for r in self.rows("SELECT id FROM milestone WHERE status = 'on-hold' ORDER BY id")]
                 self.say("No open milestone (`pm milestone add` starts one)." + (
                     f" On hold: milestone(s) {', '.join(map(str, held))} (`pm milestone resume <id>`)." if held else ""))
                 return 0
-            q = self.queue()
             if not q:
                 n = len(self.pending())
                 self.say(f"Queue empty; {n} pending decision(s)." + (" Answer them with `pm decide`." if n else ""))
@@ -2044,13 +2105,19 @@ class Project:
                 return 1
             if result == "failed":
                 self.say(f"\ntask {tid} failed: {message}")
-                if self.task_kind(tid) == "investigate":
+                if self.task_kind(tid) == "summary":
+                    self.task_set(tid, status="dropped", note="failed: " + message.splitlines()[0][:200])
+                    self.drop_task_stashes(tid)
+                    self.commit_db(f"task {tid} failed: dropped")
+                    self.say(f"task {tid} dropped; request a new summary to try again")
+                elif self.task_kind(tid) == "investigate":
                     self.say(f"Stopping: task {tid} investigated a failure; pm doesn't investigate an investigation.")
                     return 1
-                if not (iid := self.investigate(tid, message)):
+                elif not (iid := self.investigate(tid, message)):
                     self.say(f"Stopping: task {tid} failed again after {MAX_INVESTIGATIONS} investigations.")
                     return 1
-                self.say(f"task {iid} investigates it first")
+                else:
+                    self.say(f"task {iid} investigates it first")
             else:
                 self.say(f"\ntask {tid}: {result} ({message})")
             self.close_and_commit()
@@ -2314,6 +2381,12 @@ def main(argv=None):
     di = d.add_parser("irrelevant", help="close without answer; drops the open tasks it blocks")
     di.add_argument("decision", type=int)
     di.add_argument("reason")
+    su = sub.add_parser("summary", aliases=["summaries"], help="executive summaries of the project").add_subparsers(
+        dest="action", required=True)
+    su.add_parser("request", help=f"queue the task that writes one (priority {SUMMARY_PRIORITY}: next); prints its id")
+    su.add_parser("add", help="in a summary task's worker: store the summary (Markdown, stdin); prints its id")
+    su.add_parser("show", help="the newest summary, or one (also `pm show s2`)").add_argument("summary", type=int, nargs="?")
+    su.add_parser("list", help="every summary, newest first: id, date, commit, first line")
     tpd = sub.add_parser("task-pending-decision", help="the task waits until the decision is answered")
     tpd.add_argument("task", type=int)
     tpd.add_argument("decision", type=int)
@@ -2455,6 +2528,19 @@ def main(argv=None):
                 did = pm.decision_add(args.subject, args.body, args.option, "once" if args.once else "rule")
                 print(did)
                 msg = f"decision {did} added: {args.subject}"
+        elif args.cmd in ("summary", "summaries"):
+            if args.action == "request":
+                tid, new = pm.summary_request()
+                print(tid)
+                msg = new and f"task {tid} queued: {SUMMARY_SUBJECT}"
+            elif args.action == "add":
+                sid = pm.summary_add(sys.stdin.read())
+                print(sid)
+                msg = f"summary {sid} added"
+            elif args.action == "show":
+                print(pm.summary_show(args.summary), end="")
+            else:
+                print(pm.summaries(), end="")
         elif args.cmd == "task-pending-decision":
             pm.task_pending_decision(args.task, args.decision)
             msg = f"task {args.task} waits for decision {args.decision}"

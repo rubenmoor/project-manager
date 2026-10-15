@@ -84,6 +84,26 @@ If earlier investigations of this task are listed below, don't repeat their fix:
 Your note on `pm task done`: the cause and what you queued.
 '''
 
+# Body of the task "write an executive summary" (kind summary, no plan), queued by `pm summary request` or the
+# dashboard's button at priority 10000, so it runs next. Its worker stores the summary with `pm summary add`.
+summary_prompt = '''
+Write an executive summary of the project for the human: where it stands, in a few minutes of reading. Look, don't
+change: no code, files, tasks, plans or decisions; stage nothing.
+* the previous summary: `pm summary show` (none: this is the first, cover the project so far)
+* what happened since it: `git log --stat <its commit>..HEAD` (pm's commits name the tasks and decisions), `pm status`,
+  `pm milestone list`, `pm runs`, `pm decision list`, `pm decision list --answered`, `pm show <id>` where it matters
+
+Markdown, for the human, who knows the project but not the last days. Lead with:
+* **Needs you**: pending decisions and sign-offs, what each blocks; failures, stalls
+* **Since the last summary**: the delta: what got done, what changed course (new plans, revisions, dropped tasks,
+  decisions answered or recorded by workers), runs, failures and cost
+* **Where it stands**: each open milestone: progress, what comes next
+* **Risks**: what may go wrong, take longer or need a decision soon
+
+Bullets, ids with subjects (`task 12: <subject>`), no padding. Store it: `pm summary add < summary.md`, delete
+summary.md, then close your task.
+'''
+
 # Priority of the planning work: the masterplan `pm milestone add` creates (its tasks write the plans) and every task
 # "create tasks for plan N: …". Above every other plan, so all plans and their tasks exist before implementation starts;
 # within one milestone queue index: a higher index waits, planning included.

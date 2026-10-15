@@ -21,7 +21,7 @@ function TaskPrio({ d, t }) {
     save=${t.status === "open" ? saveTask(t.id, "priority") : null} disabled=${runningId(d) === t.id} />`;
 }
 
-const KINDS = ["work", "plan", "masterplan", "split", "cleanup", "revise", "investigate"];
+const KINDS = ["work", "plan", "masterplan", "split", "cleanup", "revise", "investigate", "summary"];
 
 function Banners({ d }) {
   const s = d.state;
@@ -43,7 +43,7 @@ function RunningCard({ d }) {
   return html`<div class="card">
     <div class="row"><${Pill} status="running" /><span class="sub">task ${t.id}, run ${r.id}, for <${Elapsed} start=${r.started_at} /></span></div>
     <div style="margin-top:6px;font-weight:600"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /></div>
-    <div class="muted" style="margin-top:2px"><${Named} kind="plan" r=${d.plan.get(t.plan_id)} /> · <a href=${`#/task/${t.id}?log`}>live log</a></div>
+    <div class="muted" style="margin-top:2px">${t.plan_id != null ? html`<${Named} kind="plan" r=${d.plan.get(t.plan_id)} /> · ` : null}<a href=${`#/task/${t.id}?log`}>live log</a></div>
   </div>`;
 }
 
@@ -108,19 +108,19 @@ function QueueTable({ d, ids }) {
   return html`<div class="tablewrap"><table>
     <thead><tr><th class="r">#</th><th>prio</th><th>task</th><th>plan</th><th>milestone</th></tr></thead>
     <tbody>${ids.map((id) => {
-      const t = d.task.get(id), p = d.plan.get(t.plan_id), m = d.milestone.get(p.milestone_id);
+      const t = d.task.get(id), p = d.plan.get(t.plan_id), m = d.milestoneOfTask(t);
       const run = d.running && d.running.task_id === id;
       return html`<tr class=${d.queuePos.get(id) === 0 ? "head-row" : ""}>
         <td class="r num muted">${d.queuePos.get(id) + 1}</td><td><${Prio} p=${d.prio(t)} /></td>
         <td class="subject"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /> ${run ? html`<${Pill} status="running" />` : null}</td>
-        <td class="ink2"><a class="ink2" href=${`#/plan/${p.id}`}><${Named} kind="plan" r=${p} /></a></td><td class="muted"><${Named} kind="milestone" r=${m} /></td></tr>`;
+        <td class="ink2">${p ? html`<a class="ink2" href=${`#/plan/${p.id}`}><${Named} kind="plan" r=${p} /></a>` : html`<a class="ink2" href="#/summary">executive summary</a>`}</td><td class="muted">${m ? html`<${Named} kind="milestone" r=${m} />` : null}</td></tr>`;
     })}</tbody></table></div>`;
 }
 
 export function Queue({ d }) {
   const out = d.tasks.filter((t) => t.status === "open" && !d.queuePos.has(t.id));
   return html`<h1>Queue</h1>
-    <div class="sub">What <code>pm run</code> works next: open tasks of open milestones that no pending decision blocks,
+    <div class="sub">What <code>pm run</code> works next: open tasks of open milestones that no pending decision blocks (an executive summary first),
       by the milestone's queue index (lowest first), then highest priority first, then milestone, plan and task.</div>
     <${Banners} d=${d} />
     <h2>${d.queue.length} workable</h2>
@@ -317,7 +317,7 @@ function Commit({ d, t }) {
 export function Task({ d, id, query, embedded = false }) {
   const t = d.task.get(id);
   if (!t) return html`<div class="empty">No task ${id}.</div>`;
-  const p = d.plan.get(t.plan_id), m = d.milestone.get(p.milestone_id);
+  const p = d.plan.get(t.plan_id), m = d.milestoneOfTask(t);
   const runs = d.taskRuns(t);
   const running = d.running && d.running.task_id === t.id;
   const decs = d.decisionsOf.get(t.id) || [];
@@ -326,7 +326,7 @@ export function Task({ d, id, query, embedded = false }) {
   const why = d.excluded(t);
   const last = runs.filter((r) => r.ended_at).pop();
   const fail = t.status === "open" && last && last.result === "failed" ? last : null;
-  return html`<div class="crumbs row"><span class="grow"><a href="#/milestones">Milestones</a> › <${NamedLink} kind="milestone" r=${m} /> › <${NamedLink} kind="plan" r=${p} /></span>
+  return html`<div class="crumbs row"><span class="grow">${p ? html`<a href="#/milestones">Milestones</a> › <${NamedLink} kind="milestone" r=${m} /> › <${NamedLink} kind="plan" r=${p} />` : html`<a href="#/summary">Executive summary</a>`}</span>
       ${embedded ? html`<a class="btn" href=${`#/task/${t.id}`}>Task page →</a>` : null}</div>
     <${Titled} kind="task" id=${t.id}><${EditableLine} text=${t.subject} save=${t.status === "open" ? saveTask(t.id, "subject") : null} disabled=${running} /></${Titled}>
     <div class="row sub">${running ? html`<${Pill} status="running" />` : html`<${Pill} status=${d.taskState(t)} />`}<${Kind} kind=${t.kind} />
@@ -445,7 +445,7 @@ export function Decisions({ d, query }) {
     <td class="muted" style="width:140px">${(d.tasksWaiting.get(x.id) || []).length} task(s)</td>
     <td class="muted" style="width:110px"><${Time} ts=${x.closed_at || x.created_at} /></td></tr>`)}</tbody></table></div>`;
   return html`<h1>Decisions</h1>
-    <div class="sub">Answer one on its page, in a Claude session, with <code>pm decide</code> or <code>pm decision answer</code>; <a href="#/since">since you last looked</a> shows what changed.</div>
+    <div class="sub">Answer one on its page, in a Claude session, with <code>pm decide</code> or <code>pm decision answer</code>; <a href="#/summary">an executive summary</a> tells what changed.</div>
     ${signoffs.length ? html`<h2>Sign-offs (${signoffs.length})</h2><${PendingGroups} d=${d} xs=${signoffs} />` : null}
     <h2>Questions (${questions.length})</h2>${questions.length ? html`<${PendingGroups} d=${d} xs=${questions} />` : html`<div class="empty">None pending.</div>`}
     <h2>Closed (${closed.length})</h2>

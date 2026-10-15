@@ -4,7 +4,7 @@ import { Pill, Elapsed, Time } from "/ui.js";
 import { Overview, Queue, Milestones, Milestone, Plan, Task, Decisions, Decision, Runs } from "/views.js";
 import { Live } from "/live.js";
 import { MilestoneAdded } from "/add.js";
-import { Since, useSince, sinceCount } from "/since.js";
+import { Summary, openSummary } from "/summary.js";
 import { useNotifications, NotifyButton } from "/notify.js";
 import { UsageLine } from "/usage.js";
 import { Celebrate } from "/celebrate.js";
@@ -46,7 +46,7 @@ function useState2() {
 }
 
 const NAV = [["live", "Live"], ["overview", "Overview"], ["queue", "Queue"], ["milestones", "Milestones"],
-  ["decisions", "Decisions"], ["since", "Since you looked"], ["runs", "Runs"]];
+  ["decisions", "Decisions"], ["summary", "Summary"], ["runs", "Runs"]];
 const SECTION = { added: "milestones", milestone: "milestones", plan: "milestones", task: "milestones", decision: "decisions" };
 
 function Search({ d }) {
@@ -99,7 +99,6 @@ function App() {
   }, []);
   const shown = state && (state.tables ? state : state.last_good);
   const d = useMemo(() => (shown ? index({ ...shown, __log: log }) : null), [shown, log]);
-  const since = useSince(shown);
   useNotifications(d);
   // The home page: the run view while pm runs (or ran in the last 5 minutes), else the overview; chosen on arrival.
   const [home, setHome] = useState(null);
@@ -110,10 +109,10 @@ function App() {
     setHome(d.milestones.length && (d.running || recent) ? "live" : "overview");
   }, [r0.page, !!d]);
   if (r.page === "home") r = { ...r, page: home || "overview" };
-  const page = SECTION[r.page] || r.page;
+  const page = r.page === "task" && d && d.task.get(r.id)?.kind === "summary" ? "summary" : SECTION[r.page] || r.page;
   const pending = d ? d.decisions.filter((x) => x.status === "pending").length : 0;
-  const nSince = sinceCount(since.since);
-  const View = { added: MilestoneAdded, live: Live, since: (p) => html`<${Since} since=${since.since} mark=${since.mark} state=${p.d.state} />`, overview: Overview, queue: Queue, milestones: Milestones, milestone: Milestone, plan: Plan, task: Task,
+  const summarizing = d && openSummary(d);
+  const View = { added: MilestoneAdded, live: Live, summary: Summary, overview: Overview, queue: Queue, milestones: Milestones, milestone: Milestone, plan: Plan, task: Task,
     decisions: Decisions, decision: Decision, runs: Runs }[r.page];
   const root = state ? state.root.split("/").pop() : "";
   useEffect(() => { document.title = root ? `${root} - PM Dashboard` : "PM Dashboard"; }, [root]);
@@ -132,7 +131,7 @@ function App() {
     </header>
     <nav class="nav">${NAV.map(([k, label]) => html`<a href=${`#/${k}`} class=${page === k ? "on" : ""}>
       <span>${label}</span>${k === "decisions" && pending ? html`<span class="tag">${pending}</span>` : null}
-      ${k === "since" && nSince ? html`<span class="tag new">${nSince}</span>` : null}
+      ${k === "summary" && summarizing ? html`<span class="tag new">${d.running && d.running.task_id === summarizing.id ? "writing" : "queued"}</span>` : null}
       ${k === "live" && d && d.running ? html`<span class="livedot" title="a worker is running"></span>` : null}</a>`)}</nav>
     <main class=${"main" + (page === "live" ? " full" : "")}>
       ${state && state.error ? html`<div class="banner error"><b>Can't read the database.</b> <pre>${state.error}</pre>

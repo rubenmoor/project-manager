@@ -3,7 +3,7 @@ export function index(state) {
   const t = state.tables;
   const by = (rows) => new Map(rows.map((r) => [r.id, r]));
   const d = {
-    state, milestones: t.milestone, plans: t.plan, tasks: t.task, decisions: t.decision, runs: t.run,
+    state, milestones: t.milestone, plans: t.plan, tasks: t.task, decisions: t.decision, runs: t.run, summaries: t.summary || [],
     milestone: by(t.milestone), plan: by(t.plan), task: by(t.task), decision: by(t.decision),
     queue: state.queue, queuePos: new Map(state.queue.map((id, i) => [id, i])),
     // A 'running' row whose pm run is gone (it crashed) is stale, not running.
@@ -34,22 +34,23 @@ export function index(state) {
   d.inLog = (x) => !!x.in_log;
   d.createdBy = group([["plan", t.plan], ["task", t.task], ["decision", t.decision]]
     .flatMap(([kind, rows]) => rows.filter((r) => r.created_by_task != null).map((r) => [kind, r])), ([, r]) => r.created_by_task);
-  d.milestoneOfTask = (task) => d.milestone.get(d.plan.get(task.plan_id).milestone_id);
+  // A summary task has no plan, so no milestone: null.
+  d.milestoneOfTask = (task) => (task.plan_id == null ? null : d.milestone.get(d.plan.get(task.plan_id).milestone_id));
   // The priority pm queues the task by (effective_priority), and where it comes from.
   d.prio = (task) => ({ value: task.effective_priority ?? 0,
-    from: task.priority != null ? "task" : d.plan.get(task.plan_id).priority != null ? "plan" : "default" });
+    from: task.priority != null ? "task" : task.plan_id != null && d.plan.get(task.plan_id).priority != null ? "plan" : "default" });
   // Pending decisions an open task of milestone m waits for: the ones the milestone needs answered to finish.
   d.milestoneDecisions = (m) => d.decisions.filter((x) => x.status === "pending"
-    && (d.tasksWaiting.get(x.id) || []).some((t) => t.status === "open" && d.milestoneOfTask(t).id === m.id));
+    && (d.tasksWaiting.get(x.id) || []).some((t) => t.status === "open" && d.milestoneOfTask(t)?.id === m.id));
   d.blockers = (task) => (d.decisionsOf.get(task.id) || []).filter((x) => x.status === "pending");
   d.excluded = (task) => {
     if (task.status !== "open") return null;
     const m = d.milestoneOfTask(task);
-    if (m.status !== "open") return `milestone ${m.id} is ${m.status.replace("-", " ")}`;
+    if (m && m.status !== "open") return `milestone ${m.id} is ${m.status.replace("-", " ")}`;
     const b = d.blockers(task);
     return b.length ? b : null;
   };
-  d.held = (m) => m.status === "on-hold";
+  d.held = (m) => !!m && m.status === "on-hold";
   d.taskState = (task) => (task.status === "open" && d.held(d.milestoneOfTask(task)) ? "on-hold" : task.status);
   d.cost = (runs) => runs.reduce((s, r) => s + (r.cost_usd || 0), 0);
   d.tokens = (r) => (r.input_tokens || 0) + (r.output_tokens || 0) + (r.cache_read_tokens || 0) + (r.cache_creation_tokens || 0);

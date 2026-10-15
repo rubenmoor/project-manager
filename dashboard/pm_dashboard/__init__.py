@@ -7,17 +7,18 @@ Serves the browser client (static/) and a JSON API on 127.0.0.1:
     /api/state           every table, the queue, git HEAD and changed files; or {"error": …}
     /api/log/<task>      the task's latest worker log (?run=R: run R's) as readable lines, from byte ?from=N on
     /api/events          server-sent events: "state" when tasks.sql or git changes, "log" when the running log grows
-    /api/since?commit=C  rows changed between commit C and the working copy
     /api/task/<id>/commit  the commit pm made for the task, with its patch and the rows it changed
     /api/usage           the account's usage limits, from the newest rate_limit_event in the worker logs
-    POST /api/edit       {"op": …}: add or change milestones, plans, tasks, resolve decisions through pm (edit.py)
+    POST /api/edit       {"op": …}: add or change milestones, plans, tasks, resolve decisions, request an
+                         executive summary through pm (edit.py)
 """
 import argparse, datetime, errno, json, mimetypes, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-PM_MIN_VERSION = 31     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold)
+PM_MIN_VERSION = 37     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
+                        # summary_request)
 try:
     import pm
 except ImportError:
@@ -28,7 +29,7 @@ if getattr(pm, "VERSION", 0) < PM_MIN_VERSION:
 from pm_dashboard import edit
 
 STATIC = Path(__file__).parent / "static"
-TABLES = ("milestone", "plan", "task", "decision", "task_decision", "decision_supersedes", "run")
+TABLES = ("milestone", "plan", "task", "decision", "task_decision", "decision_supersedes", "run", "summary")
 POLL = 0.5
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "
        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
@@ -46,7 +47,6 @@ class Watcher:
         self.last_good = None
         self.sig = None
         self.alive = None                       # the pid of `pm run`, while it lives
-        self.since_cache = (None, None)         # ((commit, sig), /api/since's answer)
 
     def signature(self):
         git = self.project.git_dir
@@ -68,13 +68,6 @@ class Watcher:
             return r["task_id"], (self.project.logs / f"task-{r['task_id']}.log").stat().st_size
         except FileNotFoundError:
             return r["task_id"], 0
-
-    def since(self, commit):
-        """/api/since, computed again only when tasks.sql or git changed."""
-        key = (commit, self.sig)
-        if self.since_cache[0] != key:
-            self.since_cache = (key, edit.since(self.project, commit))
-        return self.since_cache[1]
 
     def loop(self):
         while True:
@@ -112,7 +105,7 @@ def read_state(project, last_good=None):
             in_log = project.log_ids(db)
         plan_prio = {p["id"]: p["priority"] for p in tables["plan"]}
         for t in tables["task"]:
-            t["effective_priority"] = t["priority"] if t["priority"] is not None else plan_prio[t["plan_id"]] or 0
+            t["effective_priority"] = t["priority"] if t["priority"] is not None else plan_prio.get(t["plan_id"]) or 0
         for d in tables["decision"]:
             d["options"] = json.loads(d["options"])
             d["in_log"] = d["id"] in in_log
@@ -241,11 +234,6 @@ class Handler(BaseHTTPRequestHandler):
         w = self.watcher
         if path == "/api/state":
             return self.send(200, w.state)
-        if path == "/api/since":
-            commit = query.get("commit", [""])[0]
-            if not commit.isalnum():
-                return self.send(400, {"error": "bad commit"})
-            return self.send(200, w.since(commit))
         if path.startswith("/api/task/") and path.endswith("/commit"):
             try:
                 tid = int(path.split("/")[3])
