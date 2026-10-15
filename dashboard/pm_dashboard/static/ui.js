@@ -85,6 +85,20 @@ function niceMax(v) {
   return (f <= 1 ? 1 : f <= 2 ? 2 : f <= 2.5 ? 2.5 : f <= 5 ? 5 : 10) * p;
 }
 
+// The width of a .chart .lbl text (12px sans), for the label column of horizontal bars.
+let canvas;
+function textWidth(s) {
+  const c = (canvas ||= document.createElement("canvas").getContext("2d"));
+  c.font = `12px ${getComputedStyle(document.body).getPropertyValue("--sans") || "sans-serif"}`;
+  return Math.ceil(c.measureText(String(s)).width);
+}
+const fit = (s, w) => {
+  s = String(s);
+  if (textWidth(s) <= w) return s;
+  while (s.length > 1 && textWidth(s + "…") > w) s = s.slice(0, -1);
+  return s.trimEnd() + "…";
+};
+
 // One series of bars over categories (x: label), with a hover tooltip per bar.
 export function Bars({ data, fmt = String, height = 180, horizontal = false }) {
   const [tip, setTip] = useState(null);
@@ -92,11 +106,11 @@ export function Bars({ data, fmt = String, height = 180, horizontal = false }) {
   if (!data.length) return html`<div class="empty">No data yet.</div>`;
   const max = horizontal ? Math.max(...data.map((d) => d.value)) || 1 : niceMax(Math.max(...data.map((d) => d.value)) || 1);
   if (horizontal) {
-    const label = 120, row = 26, H = data.length * row + 4;
+    const label = Math.min(W * 0.45, Math.max(60, ...data.map((d) => textWidth(d.label))) + 8), row = 26, H = data.length * row + 4;
     const x = (v) => ((W - label - 70) * v) / max;
     return html`<div class="chart" ref=${ref}><svg width=${W} height=${H} viewBox=${`0 0 ${W} ${H}`} role="img">
       ${data.map((d, i) => html`<g>
-        <text class="lbl" x=${label - 8} y=${i * row + 17} text-anchor="end">${d.label}</text>
+        <text class="lbl" x=${label - 8} y=${i * row + 17} text-anchor="end"><title>${d.label}</title>${fit(d.label, label - 8)}</text>
         <rect class="mark" x=${label} y=${i * row + 6} width=${Math.max(2, x(d.value))} height="14" rx="3"></rect>
         <text class="val" x=${label + Math.max(2, x(d.value)) + 6} y=${i * row + 17}>${fmt(d.value)}</text>
       </g>`)}
