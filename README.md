@@ -57,7 +57,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 
 - milestone: subject, body, status (`open`, `on-hold`, `implemented`), `queue_index` (default 0), `created_at`, `implemented_at`
 - plan: belongs to a milestone; subject, body, priority, `created_at`, `created_by_task`
-- task: belongs to a plan; subject, body, kind (`work`, `plan`: writes a plan; made by pm: `masterplan`, `split` for "create tasks for plan N: …", `cleanup`, `revise` for "revise the masterplan of …" and "revise plan N: …"), status, priority, note, `created_at`, `retired_at` (done or dropped), `created_by_task`
+- task: belongs to a plan; subject, body, kind (`work`, `plan`: writes a plan; made by pm: `masterplan`, `split` for "create tasks for plan N: …", `cleanup`, `revise` for "revise the masterplan of …" and "revise plan N: …", `investigate` for "investigate the failure of task N: …"), status, priority, note, `created_at`, `retired_at` (done or dropped), `created_by_task`
 - decision: subject, body, options, status, answer or reason, `created_at`, `closed_at`, `created_by_task`, `signoff` (made by pm, see below), `kind` (`rule` | `once`), `decided_by_task` (a worker's own choice), `consequences`; `task_decision` links tasks to the decisions they wait for; `decision_supersedes` links a decision to the ones it replaces (note: only partly)
 - run: one worker run of `pm run`: task, start, end, result (`running`, `done`, `blocked`, `failed`, `limit`), reason, exit code, `base_commit` (HEAD at the start), `pid` of `pm run`; from claude's JSON output: model, session, turns, tokens (input, output, cache read, cache creation), cost in USD; while it runs, `running` (at most one, uncommitted); a `pm run` that died leaves it, the next `pm run` marks it `failed` (`interrupted`), or refuses while that process lives
 - timestamps in UTC; `created_by_task`: the task whose worker created the row (`PM_TASK`), empty for the human or pm
@@ -89,7 +89,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 | `instructions` | The full reference for agents (`pm/instructions.md`): every command with examples, recipes, errors |
 | `status`, `queue`, `milestone list`, `milestone show <id>`, `plans list`, `show <task\|d32\|p3\|m1>`, `validate` | Inspect; `show` also takes `decision 32` |
 | `runs [task]` | Worker runs: start, duration, result, turns, tokens, cost; totals per task kind |
-| `run [--once] [--dry-run]` | Work the queue until it is empty, 2 tasks fail in a row, or the tree has uncommitted changes |
+| `run [--once] [--dry-run]` | Work the queue until it is empty, Claude needs you, or the tree has uncommitted changes |
 | `stop` | Have the running `pm run` stop after its current task (SIGUSR1; same as one Ctrl-C) |
 | `milestone add`, `plan add <milestone>`, `task add <plan>` | In your editor (as `git commit`): first line subject, rest body (Markdown); quit unsaved or save empty to abort |
 | `milestone add <subject>`, `plan add <milestone> <subject>`, `task add <plan> <subject>` | Non-interactive: the body from stdin. `plan add` and `task add` also take `--priority`; `task add` `--kind plan`, `--web` |
@@ -139,4 +139,10 @@ One `pm run` per repository: it holds a lock (`.git/pm-run.lock`, with its pid) 
 
 A failed run: `pm` stashes what the worker left (`tasks.sql` aside; `git stash apply <sha>` gets it back), so the next `pm run` starts clean, and records a summary as the run's reason, shown in the terminal and on the dashboard: exit code or signal, duration, turns, the last tool call, a likely cause, the stash, the log. The next run of the same task gets that summary and the task's stashes in its prompt, with the instruction to inspect them, apply what is still good and recheck what they mark as done; `pm` drops them once the task is done or dropped. A run that exits non-zero after `pm task done`: with everything staged it counts as done; otherwise its work is stashed and the task reopened. Usage limits are looked for only in failed runs.
 
-A failed task doesn't stop `pm run`: pm adds a pending decision "Task <id> failed: how to go on?" (the summary as body; options retry as is, retry after a fix, drop the task; kind `once`, so not in the decision log) and links the task to it, so it leaves the queue. `pm run` stops on what may hit every task: 2 failed tasks in a row, a worker that failed without a single tool call (auth, network, the worker command), a usage limit without a readable reset time, an invalid database, a failed `git commit` or stash, a dirty tree before a task.
+A failed task doesn't stop `pm run` and isn't retried as it is: its leftovers are in its stash, and pm queues "investigate the failure of task N: …" (kind `investigate`, `investigate_prompt`, the failure's summary below) in its plan, priority one above it. The investigation finds the cause and, by it, adds a fix task between the two (a bug in a script), changes or drops the task, or raises a decision for the human; only then does the task run again, with its stash. A task that fails again after 3 investigations, or a failed investigation, stops `pm run`.
+
+Claude's own errors aren't the task's, so pm handles them itself, from the worker's result ("API Error: …") or, without one, its last log lines:
+- usage limit: wait for its reset (plus `limit_margin_minutes`), then the same task again
+- passing (overloaded, 5xx, 429, connection error, timeout, network errors, a limit without a readable reset): the same task again, at once, then after 1, 2, 5, 10, 20, 30, then every 60 minutes (`RETRY_MINUTES`)
+- needs you (invalid API key, /login, credit balance, unknown model, a worker command that can't start, a failure before any tool call that matches nothing): `pm run` stops, the task stays as it is
+- `pm run` also stops on an invalid database, a failed `git commit` or stash, a dirty tree before a task

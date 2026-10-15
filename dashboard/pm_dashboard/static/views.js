@@ -21,7 +21,7 @@ function TaskPrio({ d, t }) {
     save=${t.status === "open" ? saveTask(t.id, "priority") : null} disabled=${runningId(d) === t.id} />`;
 }
 
-const KINDS = ["work", "plan", "masterplan", "split", "cleanup", "revise"];
+const KINDS = ["work", "plan", "masterplan", "split", "cleanup", "revise", "investigate"];
 
 function Banners({ d }) {
   const s = d.state;

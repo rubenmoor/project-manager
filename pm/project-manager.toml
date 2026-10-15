@@ -69,6 +69,21 @@ After {milestone}, for the whole project:
 * check other milestones if their contents are up-to-date; raise a decision for each change they need
 '''
 
+# Body of the task pm queues when a task fails (kind investigate), above the failed task; the failure's summary
+# follows. {task}: the failed task; {task_id}, {plan_id}; {fix_priority}: between the investigation and the failed task.
+investigate_prompt = '''
+{task} failed in `pm run`; its summary is below. Find out why, don't redo its work:
+* read its log, `pm show {task_id}`, and the stashes it left (`git stash show -p --include-untracked <sha>`); don't apply or drop them, task {task_id}'s next run gets them
+* rerun the failing command or script to see the error yourself; find the cause in the code, not only the symptom
+Then, by what you find:
+* a bug in a script, test, tool or config of the project: add a task that fixes it, `pm task add {plan_id} "<subject>" --priority {fix_priority}`, with the cause, where it is and how to check the fix; it runs before task {task_id} does again
+* task {task_id} itself is wrong or out of date: change it (`pm task set {task_id} --body …`) or drop it (`pm task drop {task_id} "<reason>"`)
+* it needs the human: `pm decision add` with what you found and the options, then `pm task-pending-decision {task_id} <decision>`
+* nothing to fix (a passing outage): say so; task {task_id} runs again as it is
+If earlier investigations of this task are listed below, don't repeat their fix: raise a decision instead.
+Your note on `pm task done`: the cause and what you queued.
+'''
+
 # Priority of the planning work: the masterplan `pm milestone add` creates (its tasks write the plans) and every task
 # "create tasks for plan N: …". Above every other plan, so all plans and their tasks exist before implementation starts;
 # within one milestone queue index: a higher index waits, planning included.

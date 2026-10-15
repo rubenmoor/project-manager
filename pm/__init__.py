@@ -24,7 +24,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 34  # bump by one with every commit (AGENTS.md)
+VERSION = 35  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -38,7 +38,7 @@ REPACK = ("import fcntl, subprocess, sys\nf = open(sys.argv[1], 'w')\ntry:\n    
 WORKER_ENV = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1", "BASH_MAX_TIMEOUT_MS": "3600000"}
 EPILOG = "Agents (LLMs): read `pm instructions` first, the full reference with examples for every command."
 PROMPT_KEYS = ("masterplan_prompt", "plan_tasks_prompt", "revise_masterplan_prompt", "revise_plan_prompt",
-               "cleanup_prompt")
+               "cleanup_prompt", "investigate_prompt")
 PRIORITY_KEYS = ("plan_priority_prompt", "task_priority_prompt")
 # Items are referred to by id and full subject, `ref()`: plain in a subject, in backticks in a body.
 CLEANUP_SUBJECT = "post-milestone cleanup of {}"
@@ -46,11 +46,12 @@ PLAN_TASKS_SUBJECT = "create tasks for {}"
 WRITE_MASTERPLAN_SUBJECT = "write the masterplan of {}"
 REVISE_MASTERPLAN_SUBJECT = "revise the masterplan of {}"
 REVISE_PLAN_SUBJECT = "revise {}"
+INVESTIGATE_SUBJECT = "investigate the failure of {}"
 # Dedupes queued planning tasks: a running one may have read the old text already, so it doesn't count.
 NOT_RUNNING = "AND id NOT IN (SELECT task_id FROM run WHERE result = 'running')"
 # work: the default; plan: writes a plan; made by pm only: masterplan, split ("create tasks for plan N: …"), cleanup,
-# revise ("revise the masterplan of milestone N: …", "revise plan N: …")
-TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup", "revise")
+# revise ("revise the masterplan of milestone N: …", "revise plan N: …"), investigate (a failed task)
+TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup", "revise", "investigate")
 PLANNING_KINDS = ("plan", "masterplan", "split")
 # `signoff` in project-manager.toml → decision.signoff; a sign-off's only answer is SIGNOFF_ANSWER
 SIGNOFF_LEVELS = {"masterplans": "masterplan", "plans": "plan", "task-queue": "task-queue", "web": "web"}
@@ -61,7 +62,7 @@ SIGNOFF_ANSWER = "approve"
 IN_LOG = ("status = 'answered' AND signoff IS NULL AND kind = 'rule' AND id NOT IN (SELECT superseded_id FROM "
           "decision_supersedes s JOIN decision n ON n.id = s.decision_id WHERE s.note = '' AND n.status = 'answered')")
 
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 # A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
 # run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
 # Columns and tables SCHEMA dropped are left behind, new ones get their defaults; so only renames, moved data and new
@@ -73,7 +74,7 @@ def revise_kind(con):
                 "AND (subject LIKE 'revise the masterplan of %' OR subject LIKE 'revise plan %')")
 
 
-MIGRATIONS = {12: "", 13: "", 14: revise_kind, 15: ""}
+MIGRATIONS = {12: "", 13: "", 14: revise_kind, 15: "", 16: ""}
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -101,7 +102,7 @@ CREATE TABLE task (
     id              INTEGER PRIMARY KEY,
     plan_id         INTEGER NOT NULL REFERENCES plan (id),
     subject         TEXT NOT NULL CHECK (trim(subject) <> ''),
-    kind            TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'plan', 'masterplan', 'split', 'cleanup', 'revise')),
+    kind            TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'plan', 'masterplan', 'split', 'cleanup', 'revise', 'investigate')),
     status          TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done', 'dropped')),
     priority        INTEGER,                               -- NULL: the plan's
     note            TEXT,                                  -- done: date, files; dropped: reason
@@ -293,6 +294,32 @@ def ref(kind, id, subject, md=False):
     """An item as `<kind> <id>: <subject>`; md: in backticks, for a body."""
     text = f"{kind} {id}: {subject}"
     return f"`{text}`" if md else text
+
+
+# Claude's errors, in the worker's result ("API Error: …") or, without one, its last log lines. Needs the human: the run
+# stops. Passing: the same task again, now, then after RETRY_MINUTES each.
+CLAUDE_FATAL = ("invalid api key", "please run /login", "oauth token has expired", "authentication_error",
+                "credit balance is too low", "not_found_error", "permission_error")
+CLAUDE_PASSING = ("overloaded", "connection error", "timed out", "api error: 5", "api error: 429", "rate_limit_error")
+NETWORK_ERRORS = ("econnreset", "econnrefused", "etimedout", "eai_again", "enotfound", "socket hang up", "fetch failed")
+RETRY_MINUTES = (0, 1, 2, 5, 10, 20, 30, 60)
+# A task that fails again after this many investigations stops `pm run`: else a fix that doesn't fix loops.
+MAX_INVESTIGATIONS = 3
+
+
+def claude_trouble(info, tail):
+    """("fatal" | "transient", line) if Claude, not the task, made the run fail; else None. A failure before any
+    tool call that matches nothing counts as fatal: pm can't tell it from a broken setup."""
+    lines = [l.strip() for l in ([info["result"]] if info.get("result") else reversed(tail)) if l and l.strip()]
+    for l in lines:
+        low = l.lower()
+        if any(w in low for w in CLAUDE_FATAL):
+            return "fatal", l[:300]
+        if "api error" in low and any(w in low for w in CLAUDE_PASSING) or any(w in low for w in NETWORK_ERRORS):
+            return "transient", l[:300]
+    if not info.get("last_tool"):
+        return "fatal", "failed before any tool call: " + (lines[0][:300] if lines else "no output")
+    return None
 
 
 def creator():
@@ -1663,10 +1690,12 @@ class Project:
 
     def work(self, tid):
         """Run the worker for a task until no usage limit stops it; record each run and commit the task.
-        Returns ("done" | "blocked" | "failed" | "error" | "limit", message); "failed": the task's own failure, "error": one that stops
-        the run (the database, git, the worker never got going)."""
+        Returns ("done" | "blocked" | "failed" | "error" | "limit", message); "failed": the task's own failure,
+        "error": one that stops the run (the database, git, Claude needs the human). Claude's passing errors (network,
+        overload, a limit without a reset time): the same task again, now, then after RETRY_MINUTES."""
         cmd, prompt = self.worker_command(tid)
         before = self.planning_snapshot()
+        attempt = 0
         while True:
             started, rid = now(), self.start_run(tid)
             log = self.run_log(tid, rid)
@@ -1677,20 +1706,38 @@ class Project:
             except KeyboardInterrupt as e:
                 self.failed(tid, rid, f"interrupted ({e.args[0] if e.args else 'Ctrl-C'})", None, info, started, log)
                 raise
+            except OSError as e:
+                return "error", self.failed(tid, rid, f"the worker command can't start: {e}", None, info, started)[1]
             limit = self.limit_line(log, code, info)
-            if not limit:
+            if limit and (reset := limit_reset(limit)) is not None:
+                self.record_run(rid, code, info, "limit", limit.strip())
+                margin = datetime.timedelta(minutes=self.config["limit_margin_minutes"])
+                until = max(reset + margin, datetime.datetime.now(reset.tzinfo) + margin)
+                self.say(f"Usage limit ({limit.strip()}). Waiting until {until:%Y-%m-%d %H:%M %Z}, then the same task "
+                         "again.")
+                self.wait_until(until)
+                if self.stopping:
+                    return "limit", "stopped while waiting for the usage limit's reset"
+                continue
+            if limit:
+                trouble = "transient", f"usage limit without a readable reset time: {limit.strip()}"
+            elif (code != 0 or info.get("is_error")) and (self.unstaged() or self.task_status(tid) == "open"):
+                trouble = claude_trouble(info, tail_lines(log, 5))
+            else:
+                trouble = None
+            if not trouble:
                 break
-            reset = limit_reset(limit)
-            if reset is None:
-                return "error", self.failed(tid, rid, f"usage limit without a readable reset time: {limit.strip()}",
-                                            code, info, started, log)[1]
-            self.record_run(rid, code, info, "limit", limit.strip())
-            margin = datetime.timedelta(minutes=self.config["limit_margin_minutes"])
-            until = max(reset + margin, datetime.datetime.now(reset.tzinfo) + margin)
-            self.say(f"Usage limit ({limit.strip()}). Waiting until {until:%Y-%m-%d %H:%M %Z}, then the same task again.")
+            what, line = trouble
+            summary = self.failed(tid, rid, f"Claude: {line}", code, info, started, log)[1]
+            if what == "fatal":
+                return "error", summary + "\nthis needs you; the task stays as it is"
+            delay = RETRY_MINUTES[min(attempt, len(RETRY_MINUTES) - 1)]
+            attempt += 1
+            until = datetime.datetime.now().astimezone() + datetime.timedelta(minutes=delay)
+            self.say(f"Claude: {line}\nThe same task again " + (f"at {until:%H:%M}." if delay else "now."))
             self.wait_until(until)
             if self.stopping:
-                return "limit", "stopped while waiting for the usage limit's reset"
+                return "limit", "stopped while waiting to retry after a Claude error"
         if errors := self.validate():
             msg = "the database is no longer valid:\n  " + "\n  ".join(errors)
             try:
@@ -1702,11 +1749,7 @@ class Project:
             return "error", msg
         left = self.unstaged()
         if code != 0 and (left or self.task_status(tid) == "open"):
-            result = self.failed(tid, rid, exit_text(code), code, info, started, log)
-            if not info.get("last_tool"):
-                return "error", result[1] + "\nthe worker made no tool call: likely not the task's fault (auth, " \
-                                            "network, the worker command)"
-            return result
+            return self.failed(tid, rid, exit_text(code), code, info, started, log)
         with self.connect() as db:
             t = self.get(db, "task", tid)
             blocked = [str(r[0]) for r in db.execute(
@@ -1957,7 +2000,6 @@ class Project:
     def work_queue(self, once, dry_run):
         for w in self.worker_warnings():
             self.say(w)
-        failures = 0
         while True:
             errors = self.validate()
             if errors:
@@ -2001,14 +2043,15 @@ class Project:
                 self.say(f"\ntask {tid} failed: {message}\nStopping: this may hit every task.")
                 return 1
             if result == "failed":
-                failures += 1
-                did = self.park(tid, message)
-                self.say(f"\ntask {tid} failed: {message}\ntask {tid} waits for decision {did}")
-                if failures >= 2:
-                    self.say(f"Stopping: {failures} tasks failed in a row; something may be wrong for every task.")
+                self.say(f"\ntask {tid} failed: {message}")
+                if self.task_kind(tid) == "investigate":
+                    self.say(f"Stopping: task {tid} investigated a failure; pm doesn't investigate an investigation.")
                     return 1
+                if not (iid := self.investigate(tid, message)):
+                    self.say(f"Stopping: task {tid} failed again after {MAX_INVESTIGATIONS} investigations.")
+                    return 1
+                self.say(f"task {iid} investigates it first")
             else:
-                failures = 0
                 self.say(f"\ntask {tid}: {result} ({message})")
             self.close_and_commit()
             if once:
@@ -2017,14 +2060,33 @@ class Project:
                 self.say("Stopped as asked; `pm run` continues with the queue.")
                 return 0
 
-    def park(self, tid, summary):
-        """A failed task waits for a decision pm adds (kind once: not in the log), so the queue goes on."""
-        did = self.decision_add(f"Task {tid} failed: how to go on?", summary,
-                                ["retry as is", "retry after a fix (say which)", "drop the task"], kind="once")
+    def task_kind(self, tid):
+        with self.connect() as db:
+            return self.get(db, "task", tid)["kind"]
+
+    def investigate(self, tid, summary):
+        """Queue the investigation of failed task tid: in its plan, above it, so it and the fixes it adds (one below
+        it) run before task tid again. Returns its id; None after MAX_INVESTIGATIONS of the task, so it can't loop."""
         with self.connect(write=True) as db:
-            self.block(db, tid, did)
-        self.commit_db(f"task {tid} failed: decision {did}", running=None)
-        return did
+            t = self.get(db, "task", tid)
+            p = self.get(db, "plan", t["plan_id"])
+            prio = t["priority"] if t["priority"] is not None else p["priority"] or 0
+            earlier = db.execute("SELECT id, status, note FROM task WHERE kind = 'investigate' AND subject LIKE ? "
+                                 "ORDER BY id", (INVESTIGATE_SUBJECT.format(f"task {tid}: ") + "%",)).fetchall()
+            if len(earlier) >= MAX_INVESTIGATIONS:
+                return None
+            body = self.prompt("investigate_prompt", task=ref("task", tid, t["subject"], True), task_id=tid,
+                               plan_id=t["plan_id"], fix_priority=prio + 1)
+            body += "\n\n# The failure\n\n" + "\n".join(f"    {l}" for l in summary.splitlines())
+            if earlier:
+                body += "\n\n# Earlier investigations of this task\n\n" + "\n".join(
+                    f"- task {r['id']} ({r['status']}): {r['note'] or 'no note'}" for r in earlier)
+            iid = db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task) "
+                             "VALUES (?, ?, 'investigate', ?, ?, ?)",
+                             (t["plan_id"], INVESTIGATE_SUBJECT.format(ref("task", tid, t["subject"])), prio + 2, body,
+                              creator())).lastrowid
+        self.commit_db(f"task {tid} failed: task {iid} investigates", running=None)
+        return iid
 
     def stop(self):
         """Ask the running `pm run` to stop after its current task."""

@@ -21,7 +21,7 @@
 - **Task kind:**
   - `work` (default): anything else
   - `plan`: writes a plan (`pm task add … --kind plan`)
-  - made by pm only: `masterplan` ("write the masterplan of milestone N: …"), `split` ("create tasks for plan N: …"), `cleanup` ("post-milestone cleanup of milestone N: …"), `revise` ("revise the masterplan of milestone N: …", "revise plan N: …")
+  - made by pm only: `masterplan` ("write the masterplan of milestone N: …"), `split` ("create tasks for plan N: …"), `cleanup` ("post-milestone cleanup of milestone N: …"), `revise` ("revise the masterplan of milestone N: …", "revise plan N: …"), `investigate` ("investigate the failure of task N: …": queued above a task that failed; adds fix tasks between the two, or changes or drops the task, or raises a decision)
   - `plan`, `masterplan`, `split`: priority `planning_priority` (1000) unless given
   - checked by `pm run` when done: `plan` and `masterplan` must add or change a plan (except "revise …", which may leave it as it is), `split` must leave its plan with tasks; otherwise the task fails
 - **Decision:** subject (the question), body (context), options (the recommended one first), status `pending` | `answered` | `irrelevant`. A task linked to a pending decision waits. When the human answers, the task becomes workable again and its worker sees the answer in `pm show`. When a decision is marked irrelevant, the open tasks waiting for it are dropped.
@@ -248,7 +248,7 @@ pm decision consequences 32 "RAE number style in all prompts (prompts/*.md); sca
 
 ```sh
 pm init              # once per project: project-manager.toml, committed; the database is written on first use
-pm run               # work the queue until it is empty, 2 tasks fail in a row or the tree is dirty
+pm run               # work the queue until it is empty, Claude needs the human or the tree is dirty
 pm run --once        # one task
 pm run --dry-run     # print the next worker command; change nothing
 pm decide            # answer pending decisions: a number, own text, o <answer> = one-off, s = skip, x <reason> = irrelevant; sign-offs: a = approve
