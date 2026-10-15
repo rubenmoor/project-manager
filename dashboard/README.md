@@ -40,7 +40,7 @@ Text is edited in place, through pm's own methods; each change is a commit (`pm:
 - Subjects and bodies of milestones, plans and tasks: rendered; Enter or a click shows the Markdown source (CodeMirror, marked "Markdown"); Esc or leaving it saves
 - Priorities: click the number; empty clears it
 - Tasks: done or drop with a note; add milestones (with a queue index, default 0) and tasks (plans come from workers)
-- Pending decisions, on their page, as `pm decision answer|approve|irrelevant`: pick an option or write the answer (Markdown, edited like a body; Esc renders it), one-off, supersedes; Answer or Ctrl-Enter. Sign-offs: Approve. Irrelevant: a reason; drops the open tasks waiting for it. Drafts survive navigating away (session storage)
+- Pending decisions, on their page, as `pm decision answer|approve|irrelevant`: pick an option or write the answer (Markdown, edited like a body; Esc renders it), one-off, supersedes; Answer or Ctrl-Enter. Sign-offs: Approve. "& next" (Ctrl-Shift-Enter): then the next pending decision in the Decisions list order, or the list when none is left. Irrelevant: a reason; drops the open tasks waiting for it. Drafts survive navigating away (session storage)
 - After adding a milestone: add another, or start `pm run` in the terminal (the page says whether it runs)
 - Edits cascade as in pm: a changed milestone queues "revise the masterplan of milestone N: …"; a changed plan queues "create tasks for plan N: …" and "revise plan M: …" for each plan below it
 - Implemented milestones, done plans (no open task, nor in the plans below them) and closed tasks are read-only; pm refuses changes to them

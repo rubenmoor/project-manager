@@ -1,5 +1,6 @@
 // Resolving a pending decision on its page, as `pm decision answer|approve|irrelevant`: the answer or reason is a
-// Markdown draft (rendered; a click: source; Esc: rendered again), sent with a button or Ctrl-Enter.
+// Markdown draft (rendered; a click: source; Esc: rendered again), sent with a button or Ctrl-Enter; "& next"
+// (Ctrl-Shift-Enter) then opens the next pending decision.
 import { html, useState, useRef, useEffect } from "/vendor/preact-htm.js";
 import { CodeEditor, post, useEditTrigger } from "/editor.js";
 import { Markdown, InlineMd } from "/ui.js";
@@ -27,7 +28,7 @@ function useDraft(key) {
   return { value, set, cur };
 }
 
-export function Resolve({ d, x }) {
+export function Resolve({ d, x, next }) {
   const [mode, setMode] = useState("answer");
   const answer = useDraft(`pm-answer:${x.id}:${x.subject}`);
   const reason = useDraft(`pm-reason:${x.id}:${x.subject}`);
@@ -36,31 +37,37 @@ export function Resolve({ d, x }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const open = (d.tasksWaiting.get(x.id) || []).filter((t) => t.status === "open").length;
-  const go = async (op, draft) => {
+  // then: after success, open the next pending decision, or the Decisions list when none is left.
+  const go = async (op, draft, then) => {
     if (busy) return;
     setBusy(true);
-    try { await post(op); draft && draft.set(""); setError(null); }
+    try {
+      await post(op); draft && draft.set(""); setError(null);
+      if (then) location.hash = next != null ? `#/decision/${next}` : "#/decisions";
+    }
     catch (e) { setError(e.message); setBusy(false); }
   };
-  const submit = () => {
-    if (x.signoff) return go({ op: "decision_approve", id: x.id });
-    if (mode === "irrelevant") return go({ op: "decision_irrelevant", id: x.id, reason: reason.cur.current }, reason);
+  const submit = (then) => {
+    if (x.signoff) return go({ op: "decision_approve", id: x.id }, null, then);
+    if (mode === "irrelevant") return go({ op: "decision_irrelevant", id: x.id, reason: reason.cur.current }, reason, then);
     const ids = (sup.match(/\d+/g) || []).map(Number);
-    go({ op: "decision_answer", id: x.id, answer: answer.cur.current, once, supersedes: ids }, answer);
+    go({ op: "decision_answer", id: x.id, answer: answer.cur.current, once, supersedes: ids }, answer, then);
   };
-  const keys = (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(); } };
+  const nextBtn = (label, off) => html`<button class="btn primary" onClick=${() => submit(true)} disabled=${off}
+    title=${next != null ? `then open decision ${next}` : "none left: then back to the decisions"}>${label} & next</button>`;
+  const keys = (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(e.shiftKey); } };
   const status = html`<span class="grow"></span>${error ? html`<span class="err">${error}</span>` : null}`;
   if (x.signoff) return html`<div class="card resolve">
     <div class="row"><span class="sub">${open ? `Unblocks ${open} open task${open > 1 ? "s" : ""}. ` : ""}Leave it pending to change plans or tasks first.</span>
-      ${status}<button class="btn primary" onClick=${submit} disabled=${busy}>Approve</button></div></div>`;
+      ${status}<button class="btn" onClick=${() => submit()} disabled=${busy}>Approve</button>${nextBtn("Approve", busy)}</div></div>`;
   if (mode === "irrelevant") return html`<div class="resolve" onKeyDown=${keys}>
     <h2>Close as irrelevant</h2>
     <${Draft} value=${reason.value} set=${reason.set} empty="Why it no longer matters: click or press i to write." />
     <div class="row" style="margin-top:10px">
       <span class="sub">${open ? `Drops the ${open} open task${open > 1 ? "s" : ""} waiting for it.` : "No open task waits for it."}</span>
       ${status}<button class="iconbtn" onClick=${() => { setMode("answer"); setError(null); }}>cancel</button>
-      <button class="btn danger" onClick=${submit} disabled=${busy || !reason.value.trim()}>Close as irrelevant</button></div>
-    <div class="edit-hint">Markdown supported · Esc: render · Ctrl-Enter: close</div></div>`;
+      <button class="btn danger" onClick=${() => submit()} disabled=${busy || !reason.value.trim()}>Close as irrelevant</button></div>
+    <div class="edit-hint">Markdown supported · Esc: render · Ctrl-Enter: close · Ctrl-Shift-Enter: close & next</div></div>`;
   return html`<div class="resolve" onKeyDown=${keys}>
     <h2>Your answer</h2>
     ${x.options.length ? html`<ol class="options pick">${x.options.map((o, i) => html`<li class=${i === 0 ? "rec" : ""}>
@@ -75,6 +82,7 @@ export function Resolve({ d, x }) {
       <label class="sub" title="answered decisions this answer replaces">supersedes <input class="small" value=${sup}
         placeholder="ids" onInput=${(e) => setSup(e.target.value)} /></label>
       ${status}<button class="iconbtn" onClick=${() => { setMode("irrelevant"); setError(null); }}>irrelevant…</button>
-      <button class="btn primary" onClick=${submit} disabled=${busy || !answer.value.trim()}>Answer</button></div>
-    <div class="edit-hint">Markdown supported · Esc: render · Ctrl-Enter: answer${open ? ` · unblocks ${open} open task${open > 1 ? "s" : ""}` : ""}</div></div>`;
+      <button class="btn" onClick=${() => submit()} disabled=${busy || !answer.value.trim()}>Answer</button>
+      ${nextBtn("Answer", busy || !answer.value.trim())}</div>
+    <div class="edit-hint">Markdown supported · Esc: render · Ctrl-Enter: answer · Ctrl-Shift-Enter: answer & next${open ? ` · unblocks ${open} open task${open > 1 ? "s" : ""}` : ""}</div></div>`;
 }

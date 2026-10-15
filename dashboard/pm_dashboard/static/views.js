@@ -394,7 +394,7 @@ function impact(d, x) {
   return { waiting, top, stalls, milestone: waiting.length ? d.milestoneOfTask(waiting[0]) : null };
 }
 
-function PendingGroups({ d, xs }) {
+function pendingGroups(d, xs) {
   const items = xs.map((x) => ({ x, ...impact(d, x) }))
     .sort((a, b) => (b.stalls - a.stalls) || ((b.top ?? -1e9) - (a.top ?? -1e9)) || (b.waiting.length - a.waiting.length) || a.x.id - b.x.id);
   const groups = new Map();
@@ -402,6 +402,20 @@ function PendingGroups({ d, xs }) {
     const k = it.milestone ? it.milestone.id : 0;
     (groups.get(k) || groups.set(k, []).get(k)).push(it);
   }
+  return groups;
+}
+
+// The pending decision after x in the Decisions list (sign-offs, then questions), else the first other one; null if none.
+function nextPending(d, x) {
+  const pending = d.decisions.filter((y) => y.status === "pending");
+  const ids = [pending.filter((y) => y.signoff), pending.filter((y) => !y.signoff)]
+    .flatMap((xs) => [...pendingGroups(d, xs).values()].flat().map((it) => it.x.id));
+  const i = ids.indexOf(x.id);
+  return ids.slice(i + 1).concat(ids.slice(0, Math.max(i, 0))).find((id) => id !== x.id) ?? null;
+}
+
+function PendingGroups({ d, xs }) {
+  const groups = pendingGroups(d, xs);
   return html`${[...groups].map(([k, its]) => html`<h3>${k ? html`<${NamedLink} kind="milestone" r=${d.milestone.get(k)} />` : "No open task waits"}</h3>
     <div class="tablewrap"><table><tbody>${its.map(({ x, waiting, top, stalls }) => html`<tr>
       <td style="width:56px"><${Id} kind="decision" id=${x.id} /></td>
@@ -480,7 +494,7 @@ export function Decision({ d, id }) {
     ${x.options.length && !pending ? html`<h3>Options</h3><ol class="options">${x.options.map((o, i) => html`<li class=${i === 0 ? "rec" : ""}><${InlineMd} text=${o} /></li>`)}</ol>` : null}
     ${x.body.trim() || !x.signoff_view ? html`<div class="card" style="margin-top:12px"><${Markdown} text=${x.body} empty="No body." /></div>` : null}
     ${x.signoff_view ? html`<h2>What it approves</h2><div class="card"><${Markdown} text=${x.signoff_view} /></div>` : null}
-    ${pending ? html`<${Resolve} key=${x.id} d=${d} x=${x} />` : null}
+    ${pending ? html`<${Resolve} key=${x.id} d=${d} x=${x} next=${nextPending(d, x)} />` : null}
     <h2>Tasks waiting for it (${waiting.length})</h2>
     ${waiting.length ? html`<div class="tablewrap"><${TaskRows} d=${d} tasks=${waiting} /></div>` : html`<div class="empty">None.</div>`}`;
 }
