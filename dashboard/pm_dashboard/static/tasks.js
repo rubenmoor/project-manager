@@ -12,17 +12,17 @@ function Blocking({ d }) {
   const [top] = bs;
   return html`${top.alone.length ? html`<div class="banner warn">Answer <a href=${`#/decision/${top.x.id}`}>decision ${top.x.id}: ${top.x.subject}</a>${" "}
       to unblock ${n(top.alone.length, "task")} at once.</div>` : null}
-    ${bs.map((b, i) => html`<details class="plan">
-      <summary><a href=${`#/decision/${b.x.id}`} onClick=${(e) => e.stopPropagation()}><b><${Named} kind="decision" r=${b.x} /></b></a>
+    ${bs.map((b) => html`<div class="plan">
+      <div class="plan-head"><a href=${`#/decision/${b.x.id}`}><b><${Named} kind="decision" r=${b.x} /></b></a>
         ${b.x.signoff ? html`<span class="tag signoff">${b.x.signoff}</span>` : null}
-        <span class="muted">unblocks ${b.alone.length} · ${b.waiting.length} waiting</span></summary>
+        <span class="muted">unblocks ${b.alone.length} · ${b.waiting.length} waiting</span></div>
       <div class="tasks"><table><tbody>${b.waiting.map((t) => {
         const m = d.milestoneOfTask(t);
         const others = d.blockers(t).filter((x) => x.id !== b.x.id);
         return html`<tr><td class="subject"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /></td>
           <td class="muted">${m ? html`<${Named} kind="milestone" r=${m} />` : "executive intervention"}</td>
           <td class="muted" style="width:200px">${others.length ? `also waits for ${others.map((x) => `d${x.id}`).join(", ")}` : "only this one"}</td></tr>`;
-      })}</tbody></table></div></details>`)}`;
+      })}</tbody></table></div></div>`)}`;
 }
 
 export function Tasks({ d }) {
