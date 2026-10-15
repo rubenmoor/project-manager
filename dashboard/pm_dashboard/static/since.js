@@ -1,6 +1,6 @@
 // "Since you last looked": rows changed between the commit you marked as seen and now.
 import { html, useState, useEffect } from "/vendor/preact-htm.js";
-import { Pill, Time, Named } from "/ui.js";
+import { Pill, Time, Named, InlineMd } from "/ui.js";
 import { usd, stamp } from "/data.js";
 
 // Per project (its root), like celebrate.js: two projects served on the same port don't share it.
@@ -105,11 +105,11 @@ export function Since({ since, mark, state }) {
     ${!n && !runs.length ? html`<div class="empty" style="margin-top:12px">Nothing changed.</div>` : null}
     ${closedDecisions.length ? html`<h2>Decisions answered (${closedDecisions.length})</h2>
       <div class="tablewrap"><table><tbody>${closedDecisions.map((c) => html`<tr><td class="subject"><a href=${`#/decision/${c.row.id}`}>${c.row.subject}</a></td>
-        <td><${Pill} status=${c.row.status} /></td><td>${c.row.answer || c.row.reason}</td></tr>`)}</tbody></table></div>` : null}
+        <td><${Pill} status=${c.row.status} /></td><td><${InlineMd} text=${c.row.answer || c.row.reason} /></td></tr>`)}</tbody></table></div>` : null}
     ${recorded.length ? html`<h2>Choices workers made (${recorded.length})</h2>
       <div class="sub">Recorded without asking you; override one by answering a new decision that supersedes it.</div>
       <div class="tablewrap"><table><tbody>${recorded.map((r) => html`<tr><td class="subject"><a href=${`#/decision/${r.id}`}>${r.subject}</a></td>
-        <td>${r.answer}</td><td class="muted"><a href=${`#/task/${r.decided_by_task}`}>task ${r.decided_by_task}</a></td></tr>`)}</tbody></table></div>` : null}
+        <td><${InlineMd} text=${r.answer} /></td><td class="muted"><a href=${`#/task/${r.decided_by_task}`}>task ${r.decided_by_task}</a></td></tr>`)}</tbody></table></div>` : null}
     ${["milestone", "plan", "task", "decision"].filter((k) => t[k]).map((k) => {
       const x = t[k];
       const changed = k === "decision" ? x.changed.filter((c) => !closedDecisions.includes(c)) : x.changed;

@@ -1,5 +1,5 @@
 import { html, useState, useEffect, useRef } from "/vendor/preact-htm.js";
-import { Markdown, Pill, Kind, Prio, TaskLink, Id, Ref, Named, NamedLink, Titled, Time, Elapsed, Tile, Progress, Bars, Fold } from "/ui.js";
+import { Markdown, InlineMd, Pill, Kind, Prio, TaskLink, Id, Ref, Named, NamedLink, Titled, Time, Elapsed, Tile, Progress, Bars, Fold } from "/ui.js";
 import { usd, tokens, stamp, duration, seconds, day } from "/data.js";
 import { EditableBody, EditableLine, PrioEdit, post, autofocus } from "/editor.js";
 import { AddButton, Welcome } from "/add.js";
@@ -440,7 +440,7 @@ export function Decisions({ d, query }) {
     <td style="width:56px"><${Id} kind="decision" id=${x.id} /></td>
     <td class="subject"><a href=${`#/decision/${x.id}`}>${x.subject}</a> ${x.signoff ? html`<span class="tag signoff">${x.signoff}</span>` : null}
       <${DecisionTags} d=${d} x=${x} />
-      ${x.status !== "pending" ? html`<div class="muted" style="font-size:12px">${x.answer || x.reason}</div>` : null}</td>
+      ${x.status !== "pending" ? html`<div class="muted" style="font-size:12px"><${InlineMd} text=${x.answer || x.reason} /></div>` : null}</td>
     <td style="width:110px"><${Pill} status=${x.status} /></td>
     <td class="muted" style="width:140px">${(d.tasksWaiting.get(x.id) || []).length} task(s)</td>
     <td class="muted" style="width:110px"><${Time} ts=${x.closed_at || x.created_at} /></td></tr>`)}</tbody></table></div>`;
@@ -473,10 +473,11 @@ export function Decision({ d, id }) {
       ${!x.signoff ? html`<span class="tag">${x.kind === "once" ? "once: not in the log" : "rule"}</span>` : null}
       ${extra.map(([k, v]) => html`<span class="tag">${k}: ${String(v)}</span>`)}</div>
     ${links(d, d.supersededBy.get(x.id) || [], "Superseded by")}${links(d, d.supersedes.get(x.id) || [], "Supersedes")}
-    ${x.status !== "pending" ? html`<div class="card" style="margin:12px 0"><b>${x.status === "answered" ? "Answer" : "Irrelevant"}</b>
-      (${stamp(x.closed_at)}${x.decided_by_task != null ? html`, the own choice of <a href=${`#/task/${x.decided_by_task}`}>task ${x.decided_by_task}</a>` : null}): ${x.answer || x.reason}</div>` : null}
+    ${x.status !== "pending" ? html`<h3>${x.status === "answered" ? "Answer" : "Irrelevant"}</h3>
+      <div class="sub">${stamp(x.closed_at)}${x.decided_by_task != null ? html`, the own choice of <a href=${`#/task/${x.decided_by_task}`}>task ${x.decided_by_task}</a>` : null}</div>
+      <div class="card"><${Markdown} text=${x.answer || x.reason} /></div>` : null}
     ${x.consequences ? html`<h3>Consequences</h3><div class="card"><${Markdown} text=${x.consequences} /></div>` : null}
-    ${x.options.length && !pending ? html`<h3>Options</h3><ol class="options">${x.options.map((o, i) => html`<li class=${i === 0 ? "rec" : ""}>${o}</li>`)}</ol>` : null}
+    ${x.options.length && !pending ? html`<h3>Options</h3><ol class="options">${x.options.map((o, i) => html`<li class=${i === 0 ? "rec" : ""}><${InlineMd} text=${o} /></li>`)}</ol>` : null}
     ${x.body.trim() || !x.signoff_view ? html`<div class="card" style="margin-top:12px"><${Markdown} text=${x.body} empty="No body." /></div>` : null}
     ${x.signoff_view ? html`<h2>What it approves</h2><div class="card"><${Markdown} text=${x.signoff_view} /></div>` : null}
     ${pending ? html`<${Resolve} key=${x.id} d=${d} x=${x} />` : null}

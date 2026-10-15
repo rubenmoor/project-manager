@@ -12,6 +12,12 @@ export function Markdown({ text, empty = "No body." }) {
   return html`<div class="md" dangerouslySetInnerHTML=${{ __html: out }}></div>`;
 }
 
+// One line of Markdown (an option, a table cell): emphasis, code and links, no blocks.
+export function InlineMd({ text }) {
+  const out = useMemo(() => marked.parseInline(text || ""), [text]);
+  return html`<span class="md" dangerouslySetInnerHTML=${{ __html: out }}></span>`;
+}
+
 export const Pill = ({ status, label }) => html`<span class="pill ${status}"><span class="dot"></span>${label || status.replace("-", " ")}</span>`;
 export const Kind = ({ kind }) => (kind && kind !== "work" ? html`<span class="tag">${kind}</span>` : null);
 

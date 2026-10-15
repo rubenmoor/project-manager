@@ -1,7 +1,7 @@
 // What a task's commit did to tasks.sql, one line per row it touched: tasks created first, then tasks, plans, decisions
 // and milestones changed. The task itself is left out; the task view around it shows it.
 import { html } from "/vendor/preact-htm.js";
-import { Named, Kind } from "/ui.js";
+import { Named, Kind, InlineMd } from "/ui.js";
 
 const ORDER = ["task", "plan", "decision", "milestone"];
 const QUIET = new Set(["status", "retired_at", "closed_at", "implemented_at", "note", "answer", "reason", "consequences"]);
@@ -49,7 +49,7 @@ function Detail({ d, e }) {
   }
   if (how === "created" && k === "task") return html`<${Kind} kind=${r.kind} />`;
   if (how === "dropped" && r.note) return html`<span class="muted">${r.note}</span>`;
-  if (how === "answered" || how === "recorded") return html`<span class="muted">${r.answer}</span>`;
+  if (how === "answered" || how === "recorded") return html`<span class="muted"><${InlineMd} text=${r.answer} /></span>`;
   if (how === "irrelevant") return html`<span class="muted">${r.reason}</span>`;
   const f = before ? edits(before) : [];
   if (!f.length) return null;

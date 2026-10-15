@@ -2,7 +2,7 @@
 // Markdown draft (rendered; a click: source; Esc: rendered again), sent with a button or Ctrl-Enter.
 import { html, useState, useRef, useEffect } from "/vendor/preact-htm.js";
 import { CodeEditor, post, useEditTrigger } from "/editor.js";
-import { Markdown } from "/ui.js";
+import { Markdown, InlineMd } from "/ui.js";
 
 const store = {
   get: (k) => { try { return sessionStorage.getItem(k) || ""; } catch { return ""; } },
@@ -65,7 +65,7 @@ export function Resolve({ d, x }) {
     <h2>Your answer</h2>
     ${x.options.length ? html`<ol class="options pick">${x.options.map((o, i) => html`<li class=${i === 0 ? "rec" : ""}>
       <button class=${"option" + (answer.value === o ? " chosen" : "")} title="use this option as the answer"
-        onClick=${() => answer.set(o)}>${o}</button></li>`)}</ol>` : null}
+        onClick=${() => answer.set(o)}><${InlineMd} text=${o} /></button></li>`)}</ol>` : null}
     <${Draft} value=${answer.value} set=${answer.set}
       empty=${x.options.length ? "Pick an option, or click or press i to write your own answer." : "Click or press i to write your answer."} />
     <div class="row" style="margin-top:10px">
