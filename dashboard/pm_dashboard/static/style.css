@@ -89,7 +89,8 @@ h3 { font-size: 14px; margin: 16px 0 6px; font-weight: 600; }
 .brand small { color: var(--muted); font-weight: 400; margin-left: 6px; }
 .top .grow { flex: 1; min-width: 0; }
 .head { color: var(--ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: 13px; }
-.nav { padding: 12px 8px; border-right: 1px solid var(--border); background: var(--surface); }
+.nav { padding: 12px 8px; border-right: 1px solid var(--border); background: var(--surface);
+       position: sticky; top: 49px; align-self: start; height: calc(100vh - 49px - 29px); overflow-y: auto; box-sizing: border-box; }
 .nav a { display: flex; justify-content: space-between; align-items: center; padding: 6px 10px; border-radius: 6px;
          color: var(--ink-2); }
 .nav a:hover { background: var(--surface-2); text-decoration: none; }
@@ -97,7 +98,8 @@ h3 { font-size: 14px; margin: 16px 0 6px; font-weight: 600; }
 .main { padding: 20px 24px 48px; min-width: 0; max-width: 1200px; }
 @media (max-width: 760px) {
   .app { grid-template-columns: 1fr; }
-  .nav { display: flex; overflow-x: auto; padding: 6px 8px; border-right: 0; border-bottom: 1px solid var(--border); }
+  .nav { display: flex; overflow-x: auto; padding: 6px 8px; border-right: 0; border-bottom: 1px solid var(--border);
+         position: static; height: auto; }
   .main { padding: 16px; }
   .head { display: none; }
 }
