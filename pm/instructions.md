@@ -8,7 +8,7 @@
 2. **Commands that create something print the new integer id on stdout**, and nothing else. Capture it: `tid=$(pm task add 4 "…" <<'EOF' … EOF)`.
 3. **IDs are plain integers**, unique per kind: `pm show 12` is task 12, `pm plan edit 3` is plan 3.
 4. **Never edit `tasks.sql` by hand** unless the human asks. If you do, run `pm validate` before committing.
-5. **Commits:** outside `pm run`, each `pm` command commits `tasks.sql` itself (`pm: …`). As a worker inside `pm run` (environment `PM_WORKER=1`): stage (`git add`) the changes meant to stay, delete temporary files, don't commit; `pm run` commits what is staged with `tasks.sql` as `task <id>: <subject>`. Never push.
+5. **Commits:** outside `pm run`, each `pm` command commits `tasks.sql` itself (`pm: …`). As a worker inside `pm run` (environment `PM_WORKER=1`): stage (`git add`) the changes meant to stay, delete temporary files, don't commit; `pm run` commits what is staged with `tasks.sql` as `task <id>: <subject>`. Unstaged leftovers: of a task waiting for a decision, stashed for its next run; of a closed task, put on a branch with a decision to investigate. Never push.
 6. **Bodies are Markdown**, written for an engineer who knows the code but not the intentions: what, why, which files, how to tell it's done.
 
 ## Model
@@ -23,7 +23,7 @@
   - `plan`: writes a plan (`pm task add … --kind plan`)
   - made by pm only: `masterplan` ("write the masterplan of milestone N: …"), `split` ("create tasks for plan N: …"), `cleanup` ("post-milestone cleanup of milestone N: …"), `revise` ("revise the masterplan of milestone N: …", "revise plan N: …")
   - `plan`, `masterplan`, `split`: priority `planning_priority` (1000) unless given
-  - checked by `pm run` when done: `plan` and `masterplan` must add or change a plan (except "revise …", which may leave it as it is), `split` must leave its plan with tasks; otherwise the task is committed and the run stops
+  - checked by `pm run` when done: `plan` and `masterplan` must add or change a plan (except "revise …", which may leave it as it is), `split` must leave its plan with tasks; otherwise the task fails
 - **Decision:** subject (the question), body (context), options (the recommended one first), status `pending` | `answered` | `irrelevant`. A task linked to a pending decision waits. When the human answers, the task becomes workable again and its worker sees the answer in `pm show`. When a decision is marked irrelevant, the open tasks waiting for it are dropped.
 - **Decision log:** answered decisions are the project's decision log (`pm decision list --answered`). Also:
   - kind `rule` (default, lasting, in the log) | `once` (a go-ahead or check, not in the log)
@@ -248,7 +248,7 @@ pm decision consequences 32 "RAE number style in all prompts (prompts/*.md); sca
 
 ```sh
 pm init              # once per project: project-manager.toml, committed; the database is written on first use
-pm run               # work the queue until it is empty, a worker fails or the tree is dirty
+pm run               # work the queue until it is empty, 2 tasks fail in a row or the tree is dirty
 pm run --once        # one task
 pm run --dry-run     # print the next worker command; change nothing
 pm decide            # answer pending decisions: a number, own text, o <answer> = one-off, s = skip, x <reason> = irrelevant; sign-offs: a = approve

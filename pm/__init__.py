@@ -24,7 +24,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 33  # bump by one with every commit (AGENTS.md)
+VERSION = 34  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -1663,7 +1663,8 @@ class Project:
 
     def work(self, tid):
         """Run the worker for a task until no usage limit stops it; record each run and commit the task.
-        Returns ("done" | "blocked" | "failed", message)."""
+        Returns ("done" | "blocked" | "failed" | "error" | "limit", message); "failed": the task's own failure, "error": one that stops
+        the run (the database, git, the worker never got going)."""
         cmd, prompt = self.worker_command(tid)
         before = self.planning_snapshot()
         while True:
@@ -1681,8 +1682,8 @@ class Project:
                 break
             reset = limit_reset(limit)
             if reset is None:
-                return self.failed(tid, rid, f"usage limit without a readable reset time: {limit.strip()}", code, info,
-                                   started, log)
+                return "error", self.failed(tid, rid, f"usage limit without a readable reset time: {limit.strip()}",
+                                            code, info, started, log)[1]
             self.record_run(rid, code, info, "limit", limit.strip())
             margin = datetime.timedelta(minutes=self.config["limit_margin_minutes"])
             until = max(reset + margin, datetime.datetime.now(reset.tzinfo) + margin)
@@ -1698,10 +1699,14 @@ class Project:
                 msg += "\nthe run is not recorded"
             if stash := self.stash_leftovers(f"pm: task {tid} run {rid} failed"):
                 msg += "\n" + stash
-            return "failed", msg
+            return "error", msg
         left = self.unstaged()
         if code != 0 and (left or self.task_status(tid) == "open"):
-            return self.failed(tid, rid, exit_text(code), code, info, started, log)
+            result = self.failed(tid, rid, exit_text(code), code, info, started, log)
+            if not info.get("last_tool"):
+                return "error", result[1] + "\nthe worker made no tool call: likely not the task's fault (auth, " \
+                                            "network, the worker command)"
+            return result
         with self.connect() as db:
             t = self.get(db, "task", tid)
             blocked = [str(r[0]) for r in db.execute(
@@ -1717,21 +1722,70 @@ class Project:
                                cause=f"the worker ended without `pm task done|drop {tid}` or a pending decision"
                                + (f"; its last message: {info['last_text'].splitlines()[-1][:200]}"
                                   if info.get("last_text") else ""))
-        problem = None
-        if left:
-            problem = "the worker left changes that are not staged:\n" + "\n".join(left)
-        elif t["status"] == "done" and (missing := self.planning_missing(t, before)):
-            problem = f"task {tid} is done, but it {missing}"
-        self.record_run(rid, code, info, "failed" if problem else result[0], problem)
+        if t["status"] == "done" and (missing := self.planning_missing(t, before)):
+            return self.failed(tid, rid, f"task {tid} is done, but it {missing}", code, info, started, log)
+        self.record_run(rid, code, info, result[0])
         try:
             self.commit_task(tid, t["subject"], result[1])
         except subprocess.CalledProcessError as e:
-            return "failed", f"git commit failed:\n{(e.stdout or '') + (e.stderr or '')}".rstrip()
-        if problem and (stash := self.stash_leftovers(f"pm: task {tid} run {rid} left")):
-            problem += "\n" + stash
+            return "error", f"git commit failed:\n{(e.stdout or '') + (e.stderr or '')}".rstrip()
         if t["status"] != "open" and (dropped := self.drop_task_stashes(tid)):
-            self.say(f"dropped the stash(es) of task {tid}'s failed runs: {', '.join(dropped)}")
-        return ("failed", f"committed task {tid}; {problem}") if problem else result
+            self.say(f"dropped the stash(es) of task {tid}'s earlier runs: {', '.join(dropped)}")
+        if left:
+            note = self.put_aside_leftovers(tid, rid, t["status"], left)
+            if note.startswith("stashing failed") or note.startswith("branching failed"):
+                return "error", f"committed task {tid}; the worker left changes that are not staged, {note}"
+            result = result[0], f"{result[1]}; {note}"
+        return result
+
+    def put_aside_leftovers(self, tid, rid, status, left):
+        """Changes a worker left unstaged after a task it closed or that waits for a decision. Waiting: stashed for
+        the task's next run (task_stashes). Closed: committed on a branch, with a decision to look into it. Notes it
+        on the run, commits the database; returns the note."""
+        n = f"{len(left)} file{'s' if len(left) > 1 else ''}"
+        if status == "open":
+            stash = self.stash_leftovers(f"pm: task {tid} run {rid} left")
+            if not stash:
+                return "nothing left to stash"
+            if "stashed as" not in stash:
+                return stash.split(", ", 1)[1]
+            note = f"left {n} unstaged, stashed as {re.search(r'stashed as (\w+)', stash)[1]} for the task's next run"
+        else:
+            branch, closed = f"pm/task-{tid}-run-{rid}-left", "drop" if status == "dropped" else status
+            try:
+                self.branch_leftovers(branch, f"task {tid} run {rid}: changes left unstaged after `pm task {closed}`")
+            except subprocess.CalledProcessError as e:
+                return f"branching failed: {e.stderr.strip()}"
+            did = self.decision_add(
+                f"Task {tid} left unstaged changes after `pm task {closed}`: investigate",
+                f"Run {rid} of task {tid} closed the task but left {n} unstaged. pm committed them on the branch "
+                f"`{branch}` and cleaned the tree.\n\n" + "\n".join(f"    {l}" for l in left[:30])
+                + (f"\n    … and {len(left) - 30} more" if len(left) > 30 else "")
+                + f"\n\nLook: `git show {branch}`. Keep: `git merge {branch}`. Then `git branch -D {branch}`.",
+                kind="once")
+            note = f"left {n} unstaged, committed on branch {branch}; decision {did}: investigate"
+        with self.connect(write=True) as db:
+            db.execute("UPDATE run SET reason = ? WHERE id = ?", (note, rid))
+        self.commit_db(f"task {tid}: {note}", running=None)
+        return note
+
+    def branch_leftovers(self, branch, message):
+        """Commit the working tree's changes, the database aside, on a new branch off HEAD, then clean the tree;
+        HEAD and the checkout stay."""
+        index = self.git_dir / "pm-leftovers.index"
+        env = os.environ | {"GIT_INDEX_FILE": str(index)}
+        git = lambda *a: subprocess.run(["git", *a], cwd=self.root, env=env, capture_output=True, text=True,
+                                        check=True).stdout.strip()
+        rest = ["--", ".", f":(exclude){self.db}"]
+        try:
+            git("read-tree", "HEAD")
+            git("add", "-A", *rest)
+            sha = git("commit-tree", git("write-tree"), "-p", "HEAD", "-m", message)
+        finally:
+            index.unlink(missing_ok=True)
+        self.git("branch", branch, sha)
+        self.git("restore", "-SW", *rest)
+        self.git("clean", "-fdq", *rest)
 
     def unstaged(self):
         """`git status` lines of changes not staged (untracked included), the database aside."""
@@ -1795,13 +1849,13 @@ class Project:
         return "failed", summary
 
     def task_stashes(self, tid):
-        """[(ref, sha)] of the stashes failed runs of task tid left (stash_leftovers), newest first."""
+        """[(ref, sha)] of the stashes runs of task tid left (stash_leftovers), newest first."""
         try:
             lines = self.git("stash", "list", "--format=%gd%x00%H%x00%s").splitlines()
         except subprocess.CalledProcessError:
             return []
         return [(ref, sha) for ref, sha, subject in (l.split("\0", 2) for l in lines)
-                if re.search(rf"pm: task {tid} run \d+ failed$", subject)]
+                if re.search(rf"pm: task {tid} run \d+ (failed|left)$", subject)]
 
     def drop_task_stashes(self, tid):
         """Drop task tid's stashes (its work is committed or dropped); returns their short shas."""
@@ -1814,7 +1868,7 @@ class Project:
 
     def earlier_failure(self, tid):
         """For the worker's prompt: the last failed run's summary, if the task's last run failed, and the stashes
-        failed runs left. Empty if neither."""
+        earlier runs left. Empty if neither."""
         last = (self.rows("SELECT id, result, reason FROM run WHERE task_id = ? AND result NOT IN ('running', 'limit') "
                           "ORDER BY id DESC LIMIT 1", tid) or [None])[0]
         stashes = self.task_stashes(tid)
@@ -1823,7 +1877,7 @@ class Project:
             out += [f"# Run {last['id']} of this task failed", "",
                     *[f"    {l}" for l in (last["reason"] or "no reason recorded").splitlines()], ""]
         if stashes:
-            out.append("Failed runs of this task left their work in git stashes, newest first:")
+            out.append("Earlier runs of this task left work in git stashes, newest first:")
             for _, sha in stashes:
                 try:
                     files = self.git("stash", "show", "--name-only", "--include-untracked", sha).split()
@@ -1903,6 +1957,7 @@ class Project:
     def work_queue(self, once, dry_run):
         for w in self.worker_warnings():
             self.say(w)
+        failures = 0
         while True:
             errors = self.validate()
             if errors:
@@ -1942,16 +1997,34 @@ class Project:
                 return 1
             tid = q[0][1]
             result, message = self.work(tid)
-            if result == "failed":
-                self.say(f"\ntask {tid} failed: {message}")
+            if result == "error":
+                self.say(f"\ntask {tid} failed: {message}\nStopping: this may hit every task.")
                 return 1
-            self.say(f"\ntask {tid}: {result} ({message})")
+            if result == "failed":
+                failures += 1
+                did = self.park(tid, message)
+                self.say(f"\ntask {tid} failed: {message}\ntask {tid} waits for decision {did}")
+                if failures >= 2:
+                    self.say(f"Stopping: {failures} tasks failed in a row; something may be wrong for every task.")
+                    return 1
+            else:
+                failures = 0
+                self.say(f"\ntask {tid}: {result} ({message})")
             self.close_and_commit()
             if once:
-                return 0
+                return int(result == "failed")
             if self.stopping:
                 self.say("Stopped as asked; `pm run` continues with the queue.")
                 return 0
+
+    def park(self, tid, summary):
+        """A failed task waits for a decision pm adds (kind once: not in the log), so the queue goes on."""
+        did = self.decision_add(f"Task {tid} failed: how to go on?", summary,
+                                ["retry as is", "retry after a fix (say which)", "drop the task"], kind="once")
+        with self.connect(write=True) as db:
+            self.block(db, tid, did)
+        self.commit_db(f"task {tid} failed: decision {did}", running=None)
+        return did
 
     def stop(self):
         """Ask the running `pm run` to stop after its current task."""
