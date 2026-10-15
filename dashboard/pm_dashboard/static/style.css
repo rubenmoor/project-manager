@@ -412,6 +412,16 @@ del { color: var(--critical); text-decoration: line-through; }
 .fx-dropped .fx-what > a, .fx-irrelevant .fx-what > a { color: var(--muted); text-decoration: line-through; }
 .fx-deleted .fx { background: var(--critical-wash); color: var(--critical); }
 .fx-deleted .fx-what { color: var(--muted); text-decoration: line-through; }
+.conseq + .conseq { margin-top: 8px; }
+.conseq > .sub { margin-bottom: 4px; }
+.fx-group { margin: 8px 0 10px; padding-left: 10px; border-left: 3px solid var(--grid); }
+.fx-group.fx-task { border-left-color: var(--accent); }
+.fx-group.fx-plan { border-left-color: var(--good); }
+.fx-group.fx-decision { border-left-color: var(--decision); }
+.fx-group.fx-milestone { border-left-color: var(--warning); }
+.fx-kind { font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-2); margin-bottom: 2px; }
+.fx-ask { margin: 8px 0 12px; padding: 8px 12px; border-radius: 6px; background: var(--decision-wash); border: 1px solid var(--decision); }
+.fx-ask > b { color: var(--decision); }
 
 /* reports */
 .ask { display: grid; gap: 8px; }

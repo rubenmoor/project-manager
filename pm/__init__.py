@@ -29,7 +29,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 51  # bump by one with every commit (AGENTS.md)
+VERSION = 52  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -1054,6 +1054,8 @@ class Project:
         if not (text := (text or "").strip()):
             raise FormatError("no consequences given")
         head = now()[:10] + (f", task {creator()}" if creator() else "")
+        while text.startswith(head + ":"):
+            text = text[len(head) + 1:].strip()
         db.execute("UPDATE decision SET consequences = ? WHERE id = ?",
                    ("\n\n".join(x for x in (d["consequences"], f"{head}: {text}") if x), did))
 

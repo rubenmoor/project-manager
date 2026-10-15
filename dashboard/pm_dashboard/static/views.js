@@ -473,6 +473,21 @@ const KNOWN = new Set(["id", "subject", "status", "options", "body", "answer", "
 
 const links = (d, xs, verb) => xs.map((s) => html`<div class="sub">${(s.note ? "Partly " + verb.toLowerCase() : verb) + " "}<a href=${`#/decision/${s.id}`}>decision ${s.id}: ${(d.decision.get(s.id) || {}).subject}</a>${s.note ? ` (${s.note})` : ""}</div>`);
 
+// pm appends each entry as "<date>[, task N]: <text>"; a worker sometimes repeats that head in its text.
+const HEAD = /^(\d{4}-\d{2}-\d{2})(?:, task (\d+))?: /;
+function Consequences({ text }) {
+  const entries = text.split(/\n\n(?=\d{4}-\d{2}-\d{2}(?:, task \d+)?: )/).map((e) => {
+    const m = e.match(HEAD);
+    if (!m) return { body: e };
+    let body = e.slice(m[0].length);
+    while (body.startsWith(m[0])) body = body.slice(m[0].length);
+    return { date: m[1], task: m[2], body };
+  });
+  return html`<h3>Consequences</h3>${entries.map((e) => html`<div class="card conseq">
+    ${e.date ? html`<div class="sub">${e.date}${e.task ? html`, <a href=${`#/task/${e.task}`}>task ${e.task}</a>` : null}</div>` : null}
+    <${Markdown} text=${e.body} /></div>`)}`;
+}
+
 export function Decision({ d, id }) {
   const x = d.decision.get(id);
   if (!x) return html`<div class="empty">No decision ${id}.</div>`;
@@ -490,7 +505,7 @@ export function Decision({ d, id }) {
     ${x.status !== "pending" ? html`<h3>${x.status === "answered" ? "Answer" : "Irrelevant"}</h3>
       <div class="sub">${stamp(x.closed_at)}${x.decided_by_task != null ? html`, the own choice of <a href=${`#/task/${x.decided_by_task}`}>task ${x.decided_by_task}</a>` : null}</div>
       <div class="card"><${Markdown} text=${x.answer || x.reason} /></div>` : null}
-    ${x.consequences ? html`<h3>Consequences</h3><div class="card"><${Markdown} text=${x.consequences} /></div>` : null}
+    ${x.consequences ? html`<${Consequences} text=${x.consequences} />` : null}
     ${x.options.length && !pending ? html`<h3>Options</h3><ol class="options">${x.options.map((o, i) => html`<li class=${i === 0 ? "rec" : ""}><${InlineMd} text=${o} /></li>`)}</ol>` : null}
     ${x.body.trim() || !x.signoff_view ? html`<div class="card" style="margin-top:12px"><${Markdown} text=${x.body} empty="No body." /></div>` : null}
     ${x.signoff_view ? html`<h2>What it approves</h2><div class="card"><${Markdown} text=${x.signoff_view} /></div>` : null}

@@ -56,19 +56,31 @@ function Detail({ d, e }) {
   return html`<span class="muted">${how === "edited" ? "" : "also "}${f.join(", ")}${before.subject ? html` (was <del>${before.subject}</del>)` : null}</span>`;
 }
 
+const GROUP = { task: "Tasks", plan: "Plans", decision: "Decisions", milestone: "Milestones" };
+const asks = (e) => e.k === "decision" && (e.how === "asked" || e.how === "sign-off");
+
+function Line({ d, e }) {
+  const live = d[e.k].get(e.r.id);
+  const r = e.r.subject ? e.r : live || { id: e.r.id, subject: "" };
+  return html`<li class=${`fx-${e.how}`}><span class="fx">${LABEL[e.how] || e.how}</span>
+    <span class="fx-what">${e.how === "deleted" || !live ? html`<${Named} kind=${e.k} r=${r} />`
+      : html`<a href=${`#/${e.k}/${r.id}`}><${Named} kind=${e.k} r=${r} /></a>`}
+    <${Detail} d=${d} e=${e} /></span></li>`;
+}
+
 export function Affected({ d, t, rows }) {
   if (rows === undefined) return html`<h2>Affected</h2><div class="muted">Restart pm-dashboard to see the rows this commit changed.</div>`;
   const list = effects(rows, t.id);
   if (!list.length) return html`<h2>Affected</h2><div class="muted">${rows ? "Nothing else: in tasks.sql the commit changed only this task and its runs."
     : "Nothing: the commit didn't change tasks.sql."}</div>`;
   const made = list.filter((e) => e.k === "task" && e.how === "created").length;
+  const waiting = list.filter((e) => asks(e) && (d.decision.get(e.r.id) || e.r).status === "pending");
   return html`<h2>Affected${made ? html` <span class="muted">· ${made} task${made > 1 ? "s" : ""} created</span>` : null}</h2>
-    <ul class="plain affected">${list.map((e) => {
-      const live = d[e.k].get(e.r.id);
-      const r = e.r.subject ? e.r : live || { id: e.r.id, subject: "" };
-      return html`<li class=${`fx-${e.how}`}><span class="fx">${LABEL[e.how] || e.how}</span>
-        <span class="fx-what">${e.how === "deleted" || !live ? html`<${Named} kind=${e.k} r=${r} />`
-          : html`<a href=${`#/${e.k}/${r.id}`}><${Named} kind=${e.k} r=${r} /></a>`}
-        <${Detail} d=${d} e=${e} /></span></li>`;
-    })}</ul>`;
+    ${waiting.length ? html`<div class="fx-ask"><b>${waiting.length} new decision${waiting.length > 1 ? "s" : ""} waiting for you</b>
+      <ul class="plain affected">${waiting.map((e) => html`<${Line} d=${d} e=${e} />`)}</ul></div>` : null}
+    ${ORDER.map((k) => {
+      const xs = list.filter((e) => e.k === k && !waiting.includes(e));
+      return xs.length ? html`<div class=${`fx-group fx-${k}`}><div class="fx-kind">${GROUP[k]}</div>
+        <ul class="plain affected">${xs.map((e) => html`<${Line} d=${d} e=${e} />`)}</ul></div>` : null;
+    })}`;
 }
