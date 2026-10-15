@@ -1,58 +1,65 @@
 # pm: instructions for agents
 
-`pm` keeps a project's work as **milestones → plans → tasks**, plus **decisions** that only the human can make. Everything lives in `tasks.sql` (SQL text, tracked by git) and is changed only through `pm` commands. `pm run` works the queue one task at a time with a `claude -p` worker.
+`pm` keeps a project's work as **milestones → plans → tasks**, plus **decisions** that only the human can make. Everything lives in `tasks.sql` (SQL text, tracked by git) and is read and changed only through `pm` commands. `pm run` works the queue one task at a time with a `claude -p` worker; as a worker you are one task of that run (environment `PM_TASK=<your task>`).
 
 ## Rules
 
-1. **Give every subject on the command line and pipe the body on stdin.** Without a subject, `pm milestone|plan|task add` opens an editor and fails without a terminal. Use a heredoc with a quoted delimiter (`<<'EOF'`), so `$`, backticks and `\` in Markdown stay as written.
-2. **Commands that create something print the new integer id on stdout**, and nothing else. Capture it: `tid=$(pm task add 4 "…" <<'EOF' … EOF)`.
-3. **IDs are plain integers**, unique per kind: `pm show 12` is task 12, `pm plan edit 3` is plan 3.
-4. **Never edit `tasks.sql` by hand** unless the human asks. If you do, run `pm validate` before committing.
-5. **Commits:** outside `pm run`, each `pm` command commits `tasks.sql` itself (`pm: …`). As a worker inside `pm run` (environment `PM_WORKER=1`): stage (`git add`) the changes meant to stay, delete temporary files, don't commit; `pm run` commits what is staged with `tasks.sql` as `task <id>: <subject>`. Unstaged leftovers: of a task waiting for a decision, stashed for its next run; of a closed task, put on a branch with a decision to investigate. Never push.
-6. **Bodies are Markdown**, written for an engineer who knows the code but not the intentions: what, why, which files, how to tell it's done.
+1. **Subject on the command line, body on stdin.** Without a subject, `pm milestone|plan|task add` opens an editor and fails without a terminal. Use a heredoc with a quoted delimiter (`<<'EOF'`), so `$`, backticks and `\` in Markdown stay as written. `--body -` reads stdin too.
+2. **Creating commands print the new integer id on stdout**, nothing else: `tid=$(pm task add 4 "…" <<'EOF' … EOF)`.
+3. **IDs are integers, unique per kind:** `pm show 12` is task 12, `pm plan edit 3` is plan 3; `pm show` also takes `d32` (decision), `p3`, `m1`, `s2` (summary), `r2` (report).
+4. **`tasks.sql` is pm's:** query it with pm (`pm show`, `pm queue`, `pm decision list`), never read, grep or edit the file; in a worker, pm's hooks block reading it. Edit it by hand only when the human asks, then run `pm validate`.
+5. **References:** a milestone, plan, task or decision always by id and full subject, e.g. `plan 2: Backend endpoint`: plain in a subject, in backticks in a body, note or decision text. Renaming an item updates its references in open tasks that aren't running and in pending decisions.
+6. **Bodies are Markdown**, for an engineer who knows the code but not the intentions: what, why, which files, how to tell it's done.
+7. **Closed is final:** an implemented milestone, a done plan, a closed (done or dropped) task and a running task's subject and body can't be changed. Add a new milestone, plan or task instead.
+8. **The human's, refused in a worker:** adding or changing milestones (`pm milestone add|set|hold|resume`); answering decisions (`pm decision answer|approve|irrelevant|kind`); exec tasks (`pm task add --exec`). A worker that needs one of these raises a decision. Agents never start `pm run`.
+9. **Commits:** outside `pm run`, each `pm` command commits `tasks.sql` itself (`pm: …`). In a worker: stage (`git add`) the changes meant to stay, delete temporary files, don't commit; `pm run` commits what is staged with `tasks.sql` as `task <id>: <subject>`. Unstaged leftovers: of a task waiting for a decision, stashed for its next run; of a closed task, committed on a branch with a decision to look into it. Never push.
 
 ## Model
 
-- **Milestone:** subject, body (Markdown), status `open` | `on-hold` | `implemented`, queue index (default 0; its tasks are queued lowest index first, before priority), created date. `pm milestone add` also creates its first plan, the **masterplan** (body "tbd."), and the task "write the masterplan of milestone N: …". Once a milestone has no open task, `pm run` queues the task "post-milestone cleanup of milestone N: …" in its first plan (body: `cleanup_prompt` in project-manager.toml); when that is closed too, the milestone becomes `implemented`. Changing its subject or body queues "revise the masterplan of milestone N: …" in the masterplan, unless a masterplan task is open; refused once the milestone is implemented or every plan of it is done: add a new milestone. On hold (`pm milestone hold`): its plans and tasks stay out of the queue until `pm milestone resume`; a running task finishes. Only the human adds or changes milestones: `pm milestone add|set|hold|resume` is refused in a worker (`PM_TASK` set).
-- **Plan:** belongs to a milestone; subject, body (required), priority (optional; the masterplan: `planning_priority`, 1000). Adding a plan, or changing its subject or body, queues the task "create tasks for plan N: …" (priority `planning_priority`, 1000), unless one is waiting (it gets the new subject and body; a running one doesn't count: it may have read the old text). The same holds for the revision tasks below.
-- **Plan tree:** a plan's parent is the plan of the task that wrote it (same milestone), else the masterplan. Changing a plan's subject or body also queues "revise plan M: …" in each child plan that isn't done (an open one gets the new parent text).
-- **Done plan:** has tasks, none open, and every child plan is done; the masterplan is done when every plan of its milestone is. A done plan can't be changed and takes no new tasks: add a new plan. A closed (done or dropped) task can't be changed.
-- **Task:** belongs to a plan (an `exec` task: none); subject, body (required while open), kind, status `open` | `done` | `dropped`, note (done: date and files or commit; dropped: the reason), priority (optional; default: the plan's, else 0).
-- **Task kind:**
-  - `work` (default): anything else
-  - `plan`: writes a plan (`pm task add … --kind plan`)
-  - made by pm only: `masterplan` ("write the masterplan of milestone N: …"), `split` ("create tasks for plan N: …"), `cleanup` ("post-milestone cleanup of milestone N: …"), `revise` ("revise the masterplan of milestone N: …", "revise plan N: …"), `investigate` ("investigate the failure of task N: …": queued above a task that failed; adds fix tasks between the two, or changes or drops the task, or raises a decision)
-  - made by the human only: `exec`, an executive intervention (`pm task add --exec "<subject>" [--priority N]`, or on the dashboard): the only kind without a plan, so in no milestone; queued as if at milestone queue index 0, by priority; no task-queue sign-off; failed: dropped, not investigated. Refused in a worker
-  - `plan`, `masterplan`, `split`: priority `planning_priority` (1000) unless given
-  - checked by `pm run` when done: `plan` and `masterplan` must add or change a plan (except "revise …", which may leave it as it is), `split` must leave its plan with tasks; otherwise the task fails
-- **Decision:** subject (the question), body (context), options (the recommended one first), status `pending` | `answered` | `irrelevant`. A task linked to a pending decision waits. When the human answers, the task becomes workable again and its worker sees the answer in `pm show`. When a decision is marked irrelevant, the open tasks waiting for it are dropped.
-- **Decision log:** answered decisions are the project's decision log (`pm decision list --answered`). Also:
-  - kind `rule` (default, lasting, in the log) | `once` (a go-ahead or check, not in the log)
-  - `decided_by_task`: set when a worker recorded its own choice (`pm decision record`); empty: the human decided
-  - consequences: what changed because of the answer, appended by the tasks that implement it
-  - supersede links: a newer answer replaces an older one, wholly or partly (with a note)
-  - cite a decision in code, prompts and docs as `decision 32: <subject>`; `pm show d32` finds it
-- **References:** refer to a milestone, plan, task or decision always by id and full subject, e.g. `plan 2: Backend endpoint`. Plain in a subject (`pm task add 2 "Fix the encoding of plan 2: Backend endpoint"`), in backticks in a body, note or decision text. pm's own tasks and sign-offs follow it; renaming a milestone, plan or task updates its references in open tasks that aren't running and in pending decisions.
-- **Sign-off:** a decision pm makes, per `signoff` in project-manager.toml, before a plan is split into tasks, before work tasks run, or before a task marked web gets web access; its only answer is approve. Shown as `Decision 4 (answered, sign-off): …`. Not for agents to create or answer.
-- **Recorded by pm, not set by you:** `created_at` everywhere, `retired_at` of tasks, `implemented_at`, `closed_at`; `created_by_task` (your task, when you create a plan, task or decision as a worker); one **run** per worker run, with result, time, tokens and cost.
-- **Executive summary:** the human requests one (`pm summary request`, or the dashboard's button): pm queues the `exec` task "write an executive summary" at priority 10000 (body: `summary_prompt` in project-manager.toml), unless one is open. Its worker reads the previous summary (`pm summary show`: body, date, the commit it was written at), reports the delta since then and stores the new one: `pm summary add < summary.md` (only in an `exec` task). `pm summary list`, `pm show s2`.
-- **Resource use report:** the human requests one (`pm report request`, or the dashboard's button): pm queues the `exec` task "write a resource use report" at priority 10000 (body: `report_prompt`). Its worker lists the done tasks (`pm report tasks`: id, kind, commits, subject, note), reads every diff and notes candidate categories in the project's own terms (first pass), fixes a set of mutually exclusive categories with one sentence of criteria each, from scratch, then puts every done task in exactly one (second pass): `pm report add < report.json`, `{"categories": [{"name": "…", "criteria": "…", "tasks": [3, 7]}]}`; refused unless every done task is in exactly one category. pm sums each category's time, tokens and cost from the runs. `pm report show`, `pm report list`, `pm show r2`.
-- **Queue:** open tasks of open milestones, and open `exec` tasks, that no pending decision blocks; by the milestone's queue index (lowest first; `exec`: 0), then highest priority first, then by milestone, plan and task id. `pm run` takes the first one.
+- **Milestone:** subject, body, status `open` | `on-hold` | `implemented` (set by pm), queue index (default 0). On hold: its tasks stay out of the queue until resumed; a running task finishes.
+- **Plan:** belongs to a milestone; subject, body, priority. The milestone's first plan is its **masterplan**. A plan's parent is the plan of the task that wrote it, else the masterplan. **Done:** it has tasks, none open, and every child plan is done; the masterplan, when every plan of its milestone is.
+- **Task:** belongs to a plan (an `exec` task: none); subject, body (required while open), kind, status `open` | `done` | `dropped`, note (done: date and files; dropped: the reason), priority (default: the plan's, else 0), web (see "Web access").
+- **Task kinds:**
+  - `work` (default)
+  - `plan`: writes a plan (`--kind plan`)
+  - pm's own (see "What pm queues"): `masterplan`, `split`, `revise`, `cleanup`, `investigate`
+  - `exec`: the human's direct intervention; no plan, so no milestone; queued as if at milestone queue index 0; no task-queue sign-off; if it fails, dropped, not investigated
+- **Decision:** subject (the question), body (context), options (the recommended one first), status `pending` | `answered` | `irrelevant`, kind `rule` (default: lasting, in the log) | `once` (a go-ahead or check). A task linked to a pending decision waits; answered, its worker sees the answer in `pm show`; irrelevant, the open tasks waiting for it are dropped. Also: `decided_by_task` (a worker's own choice, `pm decision record`; empty: the human's), consequences (what changed because of the answer), supersede links (a newer answer replaces an older one, wholly or partly).
+- **Sign-off:** a decision pm makes itself, per `signoff` in project-manager.toml: before a masterplan or plan is split into tasks, before work tasks run, or before a web task gets the web. Its only answer is approve; shown as `Decision 4 (answered, sign-off): …`. Not for agents to create or answer.
+- **Queue:** open tasks of open milestones, and open `exec` tasks, that no pending decision blocks; by milestone queue index (lowest first), then highest priority first, then milestone, plan and task id. `pm run` takes the first.
+- **Recorded by pm:** `created_at`, `retired_at`, `implemented_at`, `closed_at`; `created_by_task` (your task, for what you create as a worker); one run per worker run, with result, time, tokens and cost.
+
+## What pm queues
+
+pm adds these tasks itself; their bodies are the prompts of the same name in project-manager.toml. A queued one that isn't running yet gets the new text instead of a second task (a running one may have read the old text).
+
+| Trigger | Task (kind) | Plan |
+|---|---|---|
+| `pm milestone add` | "write the masterplan of milestone N: …" (`masterplan`, priority 1000) | masterplan, body "tbd." |
+| plan added, or its subject or body changed | "create tasks for plan N: …" (`split`, priority 1000) | that plan |
+| milestone's subject or body changed, no masterplan task waiting | "revise the masterplan of milestone N: …" (`revise`) | masterplan |
+| plan's subject or body changed | "revise plan M: …" (`revise`), parent quoted | each child plan that isn't done |
+| a milestone's last open task closed | "post-milestone cleanup of milestone N: …" (`cleanup`); closed too: milestone implemented | masterplan |
+| a task failed | "investigate the failure of task N: …" (`investigate`), above the failed task | the failed task's |
+| `pm summary request` | "write an executive summary" (`exec`, priority 10000) | none |
+| `pm report request` | "write a resource use report" (`exec`, priority 10000) | none |
+
+A priority change queues nothing. When done, pm checks: `plan` and `masterplan` tasks added or changed a plan (`revise` may leave it as it is), `split` left its plan with tasks; otherwise the task fails.
 
 ## Inspect
 
 ```sh
-pm status        # open and on-hold milestones, the first 10 queued tasks, pending decisions
-pm queue         # the whole queue
-pm show 7        # task 7 with its plan, its milestone, the plan's other tasks, its decisions and runs
-pm show d32      # decision 32 (also `decision 32`); p3: plan 3, m1: milestone 1
+pm status            # open and on-hold milestones, the first 10 queued tasks, pending decisions
+pm queue             # the whole queue
+pm show 7            # task 7 with its plan, milestone, the plan's other tasks, its decisions and runs
 pm milestone list    # every milestone: id, queue index, status, closed/all tasks, subject
-pm milestone show 1  # milestone 1: body, plans with their open tasks (same as `pm show m1`)
-pm runs          # worker runs: start, duration, result, turns, tokens, cost; totals per task kind
-pm validate      # check tasks.sql; exit 1 with the problems
+pm milestone show 1  # body, plans with their open tasks (= pm show m1)
+pm plan list         # plans with open tasks in open milestones, by queue index, then highest priority
+pm runs              # worker runs: start, duration, result, turns, tokens, cost; totals per task kind
+pm validate          # check tasks.sql; exit 1 with the problems
 ```
 
-`pm queue` prints one line per task; the priority appears only when it isn't 0:
+`pm queue` shows a priority only when it isn't 0:
 
 ```
 Queue (3):
@@ -61,31 +68,12 @@ Queue (3):
     +700  task 4: stream one table as CSV
 ```
 
-`pm milestone list` (or `pm milestones list`), implemented ones included:
+`pm show <task>` is what a worker gets in its prompt: the milestone, plan and task as Markdown, then its decisions, e.g. `Decision 1 (answered): Which delimiter? → semicolon`.
 
-```
-  id  queue  status       tasks    subject
-   1      0  implemented  12/12    CSV export
-   2      0  open         3/8      Import from CSV
-```
-
-`pm plans list` (or `pm plan list`): plans with open tasks in open milestones, one per line, by the milestone's queue index, then highest priority first:
-
-```
-  id   prio  subject
-   1   1000  masterplan
-   3    900  Database schema
-   2    700  Export endpoint
-```
-
-`pm plan add` prints the new id on stdout, then this list on stderr with the new plan marked: compare it with the others and fix its priority with `pm plan edit`.
-
-`pm show` is what a worker gets in its prompt: Markdown headings for the milestone, plan and task, then the decisions, for example `Decision 1 (answered): Which delimiter? → semicolon`.
-
-## Milestones
+## Milestones (the human's)
 
 ```sh
-pm milestone add "Users can export their data as CSV" <<'EOF'
+pm milestone add "Users can export their data as CSV" [--queue N] <<'EOF'
 Users ask for their data outside the app; support exports it by hand today.
 
 ## Outcome
@@ -97,46 +85,29 @@ Users ask for their data outside the app; support exports it by hand today.
 ## Done when
 - Covered by tests, including an account with no data.
 EOF
-# prints the milestone id, e.g. 1; also creates plan "masterplan" and the task "write the masterplan of milestone 1: …"
-
-pm milestone set 1 --subject "CSV export"
-pm milestone set 1 --body - <<'EOF'
-New body, replacing the old one.
-EOF
-pm milestone set 1 --status on-hold         # or open; pm marks it implemented itself
-pm milestone hold 1                         # its tasks leave the queue
-pm milestone resume 1
+pm milestone set 1 [--subject …] [--body -] [--queue N]
+pm milestone hold 1 ; pm milestone resume 1
 ```
 
-Milestones are the human's: a worker never adds or changes one (refused in a worker). A milestone that is contradictory, incomplete or out of date gets a decision (`pm decision add`); the human answers it and edits the milestone.
+A worker that finds a milestone contradictory, incomplete or out of date raises a decision; the human answers it and edits the milestone.
 
 ## Plans
 
 ```sh
-pm plan add 1 "Backend endpoint" <<'EOF'
+pm plan add 1 "Backend endpoint" --priority 700 <<'EOF'
 `GET /api/export/<table>.csv` streams the rows of one table as CSV.
 
 - Files: `app/api/export.py` (new), `app/api/routes.py`.
 - Columns named as in the API, not the database.
 EOF
-# prints the plan id, e.g. 2, and queues "create tasks for plan 2: Backend endpoint"
-
-pm plan add 1 "UI button" --priority 400 <<'EOF'
+pm plan edit 2 --body - <<'EOF'
 …
 EOF
-
-pm plan edit 1 --body - <<'EOF'
-The masterplan, divided into parts:
-
-1. Backend endpoint
-2. UI button
-EOF
 pm plan edit 2 --subject "Export endpoint"
-pm plan edit 2 --priority 910    # its tasks without their own priority move up
-pm plan edit 2 --priority none   # back to 0
+pm plan edit 2 --priority 910    # its tasks without their own priority move with it; none: back to 0
 ```
 
-A new subject or body queues "create tasks for plan N: …" again, unless one is waiting (it gets the new subject), and "revise plan M: …" in each child plan that isn't done; it prints what it queued. A priority change queues nothing. A done plan refuses every edit.
+`pm plan add` prints the id on stdout and `pm plan list` on stderr with the new plan marked: compare and fix its priority. An edit prints what it queued.
 
 ## Tasks
 
@@ -146,43 +117,31 @@ Implement `GET /api/export/<table>.csv` in `app/api/export.py` with the stdlib `
 
 Done when: a test exports a table with 3 rows and an empty table.
 EOF
-# prints the task id, e.g. 5
-
 pm task add 1 "write plan: Export endpoint" --kind plan <<'EOF'
 Write the plan for part 1 of the masterplan.
 EOF
-# a plan-writing task: priority 1000 (planning_priority)
-
 pm task add 2 "Docs for the export endpoint" --priority 690 <<'EOF'
 …
 EOF
-
+pm task set 6 [--subject …] [--body -] [--priority N|none] [--web|--no-web]   # open, not running
+pm task priority 6 710          # none: back to the plan's
 pm task done 5 "2026-10-10, app/api/export.py, tests/test_export.py"
 pm task drop 6 "covered by task 5"
-pm task priority 6 710      # earlier than the plan's other tasks (plan priority 700)
-pm task priority 6 none     # back to the plan's priority
-pm task set 6 --subject "Stream every table as CSV"
-pm task set 6 --body - <<'EOF'
-…
-EOF
-pm task set 6 --priority 710   # also: none
 ```
 
-`pm task set` changes an open task that isn't running; a closed or running task can't be changed: add a new task instead.
+A task fits one worker run: one change you can describe, check and commit.
 
-**Web access:** workers have no WebSearch or WebFetch, except for a task marked web: `pm task add … --web`, `pm task set <task> --web` (`--no-web` to unmark). Mark only the task that needs it, e.g. "verify the sourced figures". Its worker gets both tools once the human approves the sign-off pm then asks for (if `"web"` is in `signoff`). Your own task needs the web: `pm task set <your task> --web`, then end without `pm task done`; the next run has the tools. Don't ask for web access with a decision, and don't edit settings to grant it.
-
-A task should fit one worker run: one change you can describe, check and commit.
+**Web access:** workers have no WebSearch or WebFetch, except for a task marked web (`--web`). Mark only a task that needs it, e.g. "verify the sourced figures"; its worker gets both tools once the human approves the sign-off (if `"web"` is in `signoff`). Your own task needs the web: `pm task set <your task> --web`, then stop without closing it, even when pm reminds you it is open; the next run has the tools. Don't ask for web access with a decision, and don't edit settings to grant it.
 
 ### Follow-up tasks
 
 Work you find beyond your task is a follow-up task: add it, don't do it, don't leave it in a note.
 
 - A bug or gap your task doesn't cover, a missing test, a part the plan forgot, cleanup your change makes necessary
-- Into the plan it belongs to, usually your task's: `pm show <your task>` names it and lists its tasks; don't add one twice
-- Body: what, where, done when; written for a worker without your context
+- Your task can't be done without it: it's part of your task, do it
+- Into the plan it belongs to, usually your task's; `pm show <your task>` lists the plan's tasks: don't add one twice
+- Body: what, where, done when; for a worker without your context
 - No `--priority` unless it must run earlier or later than its plan's other tasks
-- Your task can't be done without it: do it yourself, it's part of your task
 - It needs the human's answer first: also `pm decision add` and `pm task-pending-decision <new task> <decision>`
 
 ```sh
@@ -195,6 +154,8 @@ EOF
 
 ## Decisions
 
+### Ask the human
+
 ```sh
 did=$(pm decision add "Which CSV delimiter?" \
         --body "German Excel opens ';' files directly, ',' needs an import step." \
@@ -202,98 +163,84 @@ did=$(pm decision add "Which CSV delimiter?" \
 pm task-pending-decision 5 "$did"       # task 5 waits until the human answers
 ```
 
-`--option` is repeatable; put the recommended option first. `--body` takes `-` to read stdin. `decision add` doesn't link tasks: run `pm task-pending-decision <task> <decision>` for every task that waits for the answer, including your own task if it can't go on.
-
-The human answers with `pm decide` (interactive; don't run it yourself), or in a Claude session that runs these for them:
-
-```sh
-pm decision list                 # pending decisions: context, options, blocked tasks
-pm decision answer 3 1           # option 1, or own text: pm decision answer 3 "tabs"
-pm decision irrelevant 3 "<reason>"   # drops the open tasks it blocks
-pm decision approve 4            # sign-offs only
-```
-
-Record only answers the human gave. A worker never answers decisions: pm refuses `answer`, `approve`, `irrelevant` and `kind` in a worker.
+Put the recommended option first. `decision add` links no task: run `pm task-pending-decision` for every task that waits for the answer, your own included. `--once`: a one-off go-ahead or check, not a lasting rule.
 
 ### The decision log
 
-```sh
-pm decision list --answered              # the log: lasting answered decisions, newest first, superseded ones left out
-pm decision list --all --grep delimiter  # every decision that mentions "delimiter": pending, one-off, superseded too
-pm decision show 32                      # one decision: context, options, answer, consequences, tasks, links
-pm show d32                              # the same
-```
-
-Every task, planning ones included, starts here: grep the log for what the task touches (subjects, files, terms; `--grep` repeats, any word matches). Answered decisions are binding until a newer one supersedes them: a plan follows them, a task implements them, neither asks again what is decided. Do the same before every choice the plan doesn't settle. Cite decisions as `decision 32: <subject>`.
+The answered `rule` decisions that nothing fully supersedes. Every task, planning ones included, starts here: grep it for what the task touches (subjects, files, terms; `--grep` repeats, any word matches), and again before every choice the plan doesn't settle. Answered decisions are binding until a newer one supersedes them: a plan follows them, a task implements them, neither asks again. Cite them as `decision 32: <subject>`, in code, prompts and docs too.
 
 ```sh
-pm decision list --answered --grep csv --grep delimiter --grep export
+pm decision list --answered --grep csv --grep delimiter   # the log, newest first
+pm decision list --all --grep delimiter                   # pending, one-off, superseded, irrelevant too
+pm decision show 32                                       # = pm show d32
 ```
 
-**Your own choice:** a lasting choice the plan doesn't make (a design, a format, a rule others must follow), that the human doesn't need to make first: record it, answered. The human overrides it by superseding it.
+**Your own choice:** a lasting choice the plan doesn't make (a design, a format, a rule others must follow) that the human needn't make first: record it, answered. The human overrides it by superseding it. A question only the human can answer stays a question (`pm decision add`). You may supersede only a worker's choice; to change a human's answer, ask with `pm decision add` and name the decision.
 
 ```sh
 pm decision record "Number style in prompts" --answer "RAE: 1 234,5; scan flags dotted thousands" \
     --body "Prompts mixed three styles; RAE is what the data uses."
 pm decision record "Seen counters" --answer "…" --supersedes 41   # replaces decision 41, a worker's own choice
-pm decision supersede 44 28 --note "scope only"                  # partly: decision 44 replaces only the scope of 28
+pm decision supersede 44 28 --note "scope only"                  # decision 44 replaces only the scope of 28
 ```
 
-A question only the human can answer stays a question (`pm decision add`). You may supersede only a worker's choice; to change a human's answer, ask with `pm decision add` and name the decision. `--once` on `add` or `record`: a one-off go-ahead or check that isn't a lasting rule.
-
-**Consequences:** when `pm show` says your task is the last open one that waited for an answered decision, record what changed because of the answer, before `pm task done`:
+**Consequences:** when `pm show` says your task is the last open one that waited for a decision, record what changed because of the answer, before `pm task done`:
 
 ```sh
 pm decision consequences 32 "RAE number style in all prompts (prompts/*.md); scan.py flags dotted thousands"
 ```
 
-## Run (for the human)
-
-```sh
-pm init              # once per project: project-manager.toml, committed; the database is written on first use
-pm run               # work the queue until it is empty, Claude needs the human or the tree is dirty
-pm run --once        # one task
-pm run --dry-run     # print the next worker command; change nothing
-pm decide            # answer pending decisions: a number, own text, o <answer> = one-off, s = skip, x <reason> = irrelevant; sign-offs: a = approve
-pm decision answer 3 1 --once --supersedes 2   # a one-off answer; this one replaces decision 2
-pm decision kind 3 rule   # rule: lasting, in the log; once: a one-off
-pm summary request   # queue an executive summary (an exec task, priority 10000); pm summary show: the newest
-pm report request    # queue a resource use report (an exec task, priority 10000); pm report show: the newest
-```
-
-Agents don't start `pm run`: a worker is already one task of a run.
-
 ## Priorities
 
-- Within the same milestone queue index, higher runs first (a lower queue index runs before any priority); a task without its own priority gets its plan's; planning tasks (`plan`, `masterplan`, `split`) get 1000.
-- Rules for choosing them: `plan_priority_prompt` and `task_priority_prompt` in project-manager.toml, printed at the end of `pm instructions`.
-- `pm run` appends both to every worker prompt.
+- Higher runs first, within the same milestone queue index (a lower queue index runs before any priority)
+- A task without its own priority gets its plan's
+- Planning (`plan`, `masterplan`, `split`): `planning_priority`, 1000, unless given
+- Rules for choosing them: `plan_priority_prompt` and `task_priority_prompt` in project-manager.toml, appended to every worker prompt and printed at the end of `pm instructions`
 
 ## Recipes
 
-**Write the masterplan** (task "write the masterplan of milestone M: …" in plan P): read the milestone (`pm show <task>`) and the code. Write the plan with `pm plan edit P --body -`, divided into parts, and state there that the masterplan's own tasks are not implementation work: each writes the plan for one part. That edit queues "create tasks for plan P: …". Finish with `pm task done`.
+Each pm task's body says what to do; these are the mechanics.
 
-**Revise a plan** (task "revise the masterplan of milestone M: …" or "revise plan P: …"): the milestone or the parent plan (quoted in the task body) changed. If plan P no longer fits, rewrite it with `pm plan edit P --body -`; that queues "create tasks for plan P: …" and the revisions below it. If it still fits, change nothing. Then close your task.
+- **Write the masterplan** (plan P): read the milestone (`pm show <task>`) and the code; `pm plan edit P --body -`, divided into parts, stating that the masterplan's own tasks each write the plan for one part. That queues "create tasks for plan P: …".
+- **Revise a plan** (P): if it no longer fits its milestone or parent plan, `pm plan edit P --body -`; that queues its split and the revisions below it. If it still fits, change nothing.
+- **Split a plan into tasks** (P): keep the done and dropped tasks, drop open ones that no longer fit, add one `pm task add P …` per missing task, in the order they should run; the masterplan's tasks write plans (`--kind plan`). Raise a decision for each question only the human can answer, and link the tasks that wait for it. Note: `"<date>, tasks …"`.
+- **Write a part's plan** (a task of the masterplan): `pm plan list` first, then `pm plan add <milestone> "<part>" --priority N` with the full body.
+- **Post-milestone cleanup:** work through the body for the whole project. For another milestone that needs a change, or a pending decision that seems obsolete: a new decision for the human.
+- **Executive summary** (`exec`): `pm summary show` is the previous one; store the new one with `pm summary add < summary.md` (only in an exec task).
+- **Resource use report** (`exec`): `pm report tasks` lists the done tasks; store with `pm report add < report.json`, `{"categories": [{"name": "…", "criteria": "…", "tasks": [3, 7]}]}`; refused unless every done task is in exactly one category. pm sums each category's time, tokens and cost.
+- **Your task needs an answer first:** `pm decision add`, `pm task-pending-decision <your task> <decision>`, stage what's done, stop. `pm run` goes on with the next task.
+- **Finish:** run the project's checks, stage the changes meant to stay, delete temporary files, then `pm task done <task> "<YYYY-MM-DD, files>"` or `pm task drop <task> "<reason>"`. A worker run ends with its task closed or waiting for a decision (web: see "Web access"); otherwise pm keeps it going once.
 
-**Split a plan into tasks** (task "create tasks for plan P: …"): if P already has tasks, leave the done and dropped ones as they are, drop open ones that no longer fit (`pm task drop`), and add only what the plan asks beyond them. Add one `pm task add P "<subject>"` per task, in the order they should run; for the masterplan, its tasks write plans: `--kind plan`. Priorities: see "Priorities". Raise a decision for each question only the human can answer, and link the tasks that wait for it. Then `pm task done <your task> "<date>, tasks …"`.
+## For the human
 
-**Write a part's plan** (a task of the masterplan): `pm plan list` first, then `pm plan add <milestone> "<part subject>" --priority N` with the full body, N by "Priorities". That queues its "create tasks" task. Then close your task.
+Agents run these only for the human, in the human's own session.
 
-**Post-milestone cleanup** (task "post-milestone cleanup of milestone M: …"): work through its body for the whole project, not just this milestone. For another milestone that needs a change, or a pending decision that seems obsolete, say so in a new decision for the human. Then close your task.
+```sh
+pm init              # once per project: project-manager.toml, committed
+pm run               # work the queue until it is empty, Claude needs the human or the tree is dirty
+pm run --once        # one task;  --dry-run: print the next worker command
+pm stop              # the running `pm run` stops after its current task
+pm decide            # answer pending decisions interactively (don't run it as an agent)
+pm decision list                       # pending decisions: context, options, blocked tasks
+pm decision answer 3 1                 # option 1; or own text: pm decision answer 3 "tabs"
+pm decision answer 3 1 --once --supersedes 2
+pm decision irrelevant 3 "<reason>"    # drops the open tasks it blocks
+pm decision approve 4                  # sign-offs only
+pm decision kind 3 rule                # rule: lasting, in the log; once: a one-off
+pm task add --exec "<subject>" [--priority N] < body.md
+pm summary request ; pm report request # queue an executive summary / resource use report; show, list
+```
 
-**Your task needs an answer first:** add the decision, `pm task-pending-decision <your task> <decision>`, stage what's done, stop. `pm run` reports the task as blocked and goes on with the next.
-
-**Finish a task:** `pm task done <task> "<YYYY-MM-DD, files>"` or `pm task drop <task> "<reason>"`. Run the project's checks, stage the changes meant to stay, delete temporary files. Don't commit or push: `pm run` commits.
+Record only answers the human gave.
 
 ## Errors
 
 | Message | Meaning |
 |---|---|
 | `no plan 9`, `no task 9`, `no milestone 9`, `no decision 9` | No such id; look it up with `pm status`, `pm queue` or `pm show` |
-| `the change breaks the schema, nothing written: … a plan needs a body` | Empty body: stdin was empty or not piped |
-| `… an open task needs a body` | The same for a task |
+| `the change breaks the schema, nothing written: … a plan needs a body` (or `an open task needs a body`) | Empty body: stdin was empty or not piped |
 | `` `pm task add` without a subject needs a terminal `` | Give the subject on the command line |
-| `task 6 is running; its subject and body can't be changed`, `task 6 is done; a closed task can't be changed` | Add a new task instead: `pm task add <plan>` |
-| `decision 3 is not pending` | It was answered or marked irrelevant already |
-| `the database has errors (pm validate)` | `tasks.sql` was edited by hand into an invalid state; `pm validate` lists the problems |
+| `task 6 is running; its subject and body can't be changed`, `task 6 is done; a closed task can't be changed` | Add a new task instead |
+| `decision 3 is not pending` | Answered or marked irrelevant already |
+| `the database has errors (pm validate)` | `tasks.sql` was edited into an invalid state; `pm validate` lists the problems |
 | `no project-manager.toml: run pm init first` | The project has no pm yet; that's the human's call |
