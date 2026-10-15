@@ -58,8 +58,10 @@ export function Live({ d }) {
       sub: "Then pm records the run, commits, and starts the next task." }
     : between && between.result === "limit" ? { spin: false, text: "pm run waits for the usage limit to reset",
       sub: (between.reason || "").split("\n")[0] + "; then task " + between.task_id + " again." }
+    : !r && alive && !next ? { spin: false, text: "pm run waits for tasks",
+      sub: "The queue is empty; it starts when a task is queued or a decision answered." }
     : between ? { spin: true, text: `Committing task ${between.task_id}, picking the next task`,
-      sub: next ? `Next in the queue: t${next.id} ${next.subject}` : "The queue is empty: pm run stops." }
+      sub: next ? `Next in the queue: t${next.id} ${next.subject}` : "" }
     : null;
   const [picked, setPicked] = useState(null);
   const sel = picked != null && d.task.get(picked) ? picked : current ? current.id : crashed && crashed.run ? crashed.run.task_id : lastRun ? lastRun.task_id : null;

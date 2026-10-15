@@ -11,7 +11,7 @@ In the project's git repository:
 ```sh
 pm init            # write project-manager.toml, commit it; check and adjust its defaults
 pm milestone add   # editor: first line the subject, the rest the body (Markdown)
-pm run             # work the queue; Ctrl-C: stop after this task, twice: stop now; `pm run` continues
+pm run             # work the queue, then wait for new tasks; Ctrl-C: stop after this task, twice: stop now; `pm run` continues
 ```
 
 ### Writing a milestone
@@ -73,7 +73,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 - `"plans"`: "create tasks for plan N: …" of every other plan waits for "Sign off plan N: …"
 - `"task-queue"`: work tasks wait for "Sign off the task queue", one decision for all work tasks without a sign-off; asked when the first of them heads the queue, i.e. after all planning work; work tasks added later need a new one
 - `"web"`: a task marked web waits for "Grant task N: … web access (WebSearch, WebFetch)"; without `"web"` in the list, marked tasks get the tools unasked
-- pm creates the decision when such a task heads the queue; `pm run` never asks, it goes on with the unblocked tasks and stops when the queue is empty
+- pm creates the decision when such a task heads the queue; `pm run` never asks, it goes on with the unblocked tasks and waits when the queue is empty
 - the only answer is approve (`pm decide`: `a`, or `pm decision approve <id>`); leave it pending to change plans or tasks first; `pm decision list` shows the plan or the waiting tasks as they are then
 - no `x` (irrelevant) for sign-offs
 
@@ -92,7 +92,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 | `instructions` | The full reference for agents (`pm/instructions.md`): every command with examples, recipes, errors |
 | `status`, `queue`, `milestone list`, `milestone show <id>`, `plans list`, `show <task\|d32\|p3\|m1>`, `validate` | Inspect; `show` also takes `decision 32` |
 | `runs [task]` | Worker runs: start, duration, result, turns, tokens, cost; totals per task kind |
-| `run [--once] [--dry-run]` | Work the queue until it is empty, Claude needs you, or the tree has uncommitted changes |
+| `run [--once] [--dry-run]` | Work the queue; when it is empty, wait for tasks (`--once`: exit). Stops when Claude needs you or the tree has uncommitted changes |
 | `stop` | Have the running `pm run` stop after its current task (SIGUSR1; same as one Ctrl-C) |
 | `milestone add`, `plan add <milestone>`, `task add <plan>` | In your editor (as `git commit`): first line subject, rest body (Markdown); quit unsaved or save empty to abort |
 | `milestone add <subject>`, `plan add <milestone> <subject>`, `task add <plan> <subject>` | Non-interactive: the body from stdin. `plan add` and `task add` also take `--priority`; `task add` `--kind plan`, `--web`; `task add --exec <subject>`: an exec task, no plan |

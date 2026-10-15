@@ -29,7 +29,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 52  # bump by one with every commit (AGENTS.md)
+VERSION = 53  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -370,6 +370,7 @@ NETWORK_ERRORS = ("econnreset", "econnrefused", "etimedout", "eai_again", "enotf
 RETRY_MINUTES = (0, 1, 2, 5, 10, 20, 30, 60)
 # A task that fails again after this many investigations stops `pm run`: else a fix that doesn't fix loops.
 MAX_INVESTIGATIONS = 3
+IDLE_POLL_SECONDS = 3   # `pm run` with an empty queue: how often it looks at tasks.sql
 
 
 def claude_trouble(info, tail):
@@ -583,6 +584,7 @@ class Project:
         self.db_path = self.root / self.db
         self.out = out
         self.stopping = False       # `pm run` stops after the current task
+        self.idle = False           # `pm run` waits for tasks
         self.crash = None           # run_crash() as `pm run` started
         self.cache = None           # (file_key(), the loaded database)
         self.mutex = threading.RLock()
@@ -2247,7 +2249,8 @@ class Project:
                 raise KeyboardInterrupt("SIGINT")
             if not self.stopping:
                 self.stopping = True
-                os.write(2, b"\n== stopping after this task (Ctrl-C again: stop now)\n")  # print() may be mid-write
+                if not self.idle:
+                    os.write(2, b"\n== stopping after this task (Ctrl-C again: stop now)\n")  # print() may be mid-write
         old = {sig: signal.signal(sig, stop_later) for sig in (signal.SIGINT, signal.SIGUSR1)}
         try:
             if dry_run:
@@ -2259,9 +2262,26 @@ class Project:
             for sig, handler in old.items():
                 signal.signal(sig, handler)
 
+    def wait_for_change(self):
+        """Sleep until tasks.sql changes; False if `pm stop` or Ctrl-C came first."""
+        def key():
+            with contextlib.suppress(OSError):
+                st = self.db_path.stat()
+                return st.st_ino, st.st_mtime_ns, st.st_size
+        before, self.idle = key(), True
+        try:
+            while not self.stopping:
+                time.sleep(IDLE_POLL_SECONDS)
+                if key() != before:
+                    return True
+            return False
+        finally:
+            self.idle = False
+
     def work_queue(self, once, dry_run):
         for w in self.worker_warnings():
             self.say(w)
+        waiting = None
         while True:
             errors = self.validate()
             if errors:
@@ -2280,15 +2300,25 @@ class Project:
             self.close_stale_run()
             self.close_and_commit()
             q = self.queue()
-            if not q and not self.rows("SELECT 1 FROM milestone WHERE status = 'open'"):
-                held = [r["id"] for r in self.rows("SELECT id FROM milestone WHERE status = 'on-hold' ORDER BY id")]
-                self.say("No open milestone (`pm milestone add` starts one)." + (
-                    f" On hold: milestone(s) {', '.join(map(str, held))} (`pm milestone resume <id>`)." if held else ""))
-                return 0
             if not q:
-                n = len(self.pending())
-                self.say(f"Queue empty; {n} pending decision(s)." + (" Answer them with `pm decide`." if n else ""))
-                return 0
+                if not self.rows("SELECT 1 FROM milestone WHERE status = 'open'"):
+                    held = [r["id"] for r in self.rows("SELECT id FROM milestone WHERE status = 'on-hold' ORDER BY id")]
+                    msg = "No open milestone (`pm milestone add` starts one)." + (
+                        f" On hold: milestone(s) {', '.join(map(str, held))} (`pm milestone resume <id>`)." if held else "")
+                else:
+                    n = len(self.pending())
+                    msg = f"Queue empty; {n} pending decision(s)." + (" Answer them with `pm decide`." if n else "")
+                if once:
+                    self.say(msg)
+                    return 0
+                if msg != waiting:
+                    self.say(msg + " Waiting for tasks (Ctrl-C or `pm stop` ends it).")
+                    waiting = msg
+                if not self.wait_for_change():
+                    self.say("Stopped as asked.")
+                    return 0
+                continue
+            waiting = None
             if level := self.needs_signoff(q[0][1]):
                 did = self.request_signoff(q[0][1])
                 self.say(f"task {q[0][1]} waits for sign-off: decision {did} ({level})")
