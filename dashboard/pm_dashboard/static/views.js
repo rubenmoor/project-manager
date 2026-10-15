@@ -21,7 +21,7 @@ function TaskPrio({ d, t }) {
     save=${t.status === "open" ? saveTask(t.id, "priority") : null} disabled=${runningId(d) === t.id} />`;
 }
 
-const KINDS = ["work", "plan", "masterplan", "split", "cleanup", "revise", "investigate", "summary"];
+const KINDS = ["work", "plan", "masterplan", "split", "cleanup", "revise", "investigate"];
 
 function Banners({ d }) {
   const s = d.state;
@@ -113,14 +113,14 @@ function QueueTable({ d, ids }) {
       return html`<tr class=${d.queuePos.get(id) === 0 ? "head-row" : ""}>
         <td class="r num muted">${d.queuePos.get(id) + 1}</td><td><${Prio} p=${d.prio(t)} /></td>
         <td class="subject"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /> ${run ? html`<${Pill} status="running" />` : null}</td>
-        <td class="ink2">${p ? html`<a class="ink2" href=${`#/plan/${p.id}`}><${Named} kind="plan" r=${p} /></a>` : html`<a class="ink2" href="#/summary">executive summary</a>`}</td><td class="muted">${m ? html`<${Named} kind="milestone" r=${m} />` : null}</td></tr>`;
+        <td class="ink2">${p ? html`<a class="ink2" href=${`#/plan/${p.id}`}><${Named} kind="plan" r=${p} /></a>` : html`<span class="muted">no plan</span>`}</td><td class="muted">${m ? html`<${Named} kind="milestone" r=${m} />` : null}</td></tr>`;
     })}</tbody></table></div>`;
 }
 
 export function Queue({ d }) {
   const out = d.tasks.filter((t) => t.status === "open" && !d.queuePos.has(t.id));
   return html`<h1>Queue</h1>
-    <div class="sub">What <code>pm run</code> works next: open tasks of open milestones that no pending decision blocks (an executive summary first),
+    <div class="sub">What <code>pm run</code> works next: open tasks of open milestones that no pending decision blocks (tasks without a plan, like the executive summary, first),
       by the milestone's queue index (lowest first), then highest priority first, then milestone, plan and task.</div>
     <${Banners} d=${d} />
     <h2>${d.queue.length} workable</h2>
@@ -326,7 +326,7 @@ export function Task({ d, id, query, embedded = false }) {
   const why = d.excluded(t);
   const last = runs.filter((r) => r.ended_at).pop();
   const fail = t.status === "open" && last && last.result === "failed" ? last : null;
-  return html`<div class="crumbs row"><span class="grow">${p ? html`<a href="#/milestones">Milestones</a> › <${NamedLink} kind="milestone" r=${m} /> › <${NamedLink} kind="plan" r=${p} />` : html`<a href="#/summary">Executive summary</a>`}</span>
+  return html`<div class="crumbs row"><span class="grow">${p ? html`<a href="#/milestones">Milestones</a> › <${NamedLink} kind="milestone" r=${m} /> › <${NamedLink} kind="plan" r=${p} />` : html`<span>No plan: the human's direct call</span>`}</span>
       ${embedded ? html`<a class="btn" href=${`#/task/${t.id}`}>Task page →</a>` : null}</div>
     <${Titled} kind="task" id=${t.id}><${EditableLine} text=${t.subject} save=${t.status === "open" ? saveTask(t.id, "subject") : null} disabled=${running} /></${Titled}>
     <div class="row sub">${running ? html`<${Pill} status="running" />` : html`<${Pill} status=${d.taskState(t)} />`}<${Kind} kind=${t.kind} />

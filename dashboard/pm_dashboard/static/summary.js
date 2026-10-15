@@ -4,8 +4,9 @@ import { Markdown, Pill, Time, TaskLink, Fold } from "/ui.js";
 import { stamp } from "/data.js";
 import { post } from "/editor.js";
 
-// The open summary task, if any.
-export const openSummary = (d) => d.tasks.find((t) => t.kind === "summary" && t.status === "open") || null;
+// The open summary task, if any: pm's SUMMARY_TASK.
+export const isSummary = (t) => t.plan_id == null && t.subject === "write an executive summary";
+export const openSummary = (d) => d.tasks.find((t) => isSummary(t) && t.status === "open") || null;
 
 function Request({ d }) {
   const [busy, setBusy] = useState(false);

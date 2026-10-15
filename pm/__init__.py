@@ -5,9 +5,9 @@ in-memory database (the schema is SCHEMA below). A new milestone comes with a fi
 changed milestone queues the revision of its masterplan, a changed plan that of the plans below it and of its open
 tasks; implemented milestones, done plans and closed tasks can't be changed; a milestone whose tasks are all closed
 gets a last one, the post-milestone cleanup, before it is implemented; a milestone on hold keeps its tasks out of
-the queue until it is resumed. An executive summary (`pm summary request`) is a task without a plan at
-SUMMARY_PRIORITY; its worker reads the previous summary and stores the new one in the summary table. The queue (the `queue` view): open tasks of
-open milestones (and summary tasks) that no pending decision blocks, by the milestone's queue index (lowest first), then highest priority
+the queue until it is resumed. A task without a plan is the human's direct call, queued before every milestone; one is the executive
+summary (`pm summary request`, SUMMARY_PRIORITY): its worker reads the previous summary and stores the new one in the summary table. The queue (the `queue` view): open tasks of
+open milestones, and tasks without a plan, that no pending decision blocks, by the milestone's queue index (lowest first), then highest priority
 first, then by milestone, plan and task.
 Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
 
@@ -26,7 +26,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 37  # bump by one with every commit (AGENTS.md)
+VERSION = 38  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -51,12 +51,12 @@ REVISE_PLAN_SUBJECT = "revise {}"
 INVESTIGATE_SUBJECT = "investigate the failure of {}"
 SUMMARY_SUBJECT = "write an executive summary"
 SUMMARY_PRIORITY = 10000
+SUMMARY_TASK = f"plan_id IS NULL AND subject = '{SUMMARY_SUBJECT}'"  # SQL: the summary tasks
 # Dedupes queued planning tasks: a running one may have read the old text already, so it doesn't count.
 NOT_RUNNING = "AND id NOT IN (SELECT task_id FROM run WHERE result = 'running')"
 # work: the default; plan: writes a plan; made by pm only: masterplan, split ("create tasks for plan N: …"), cleanup,
-# revise ("revise the masterplan of milestone N: …", "revise plan N: …"), investigate (a failed task),
-# summary (an executive summary; the only kind without a plan)
-TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup", "revise", "investigate", "summary")
+# revise ("revise the masterplan of milestone N: …", "revise plan N: …"), investigate (a failed task)
+TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup", "revise", "investigate")
 PLANNING_KINDS = ("plan", "masterplan", "split")
 # `signoff` in project-manager.toml → decision.signoff; a sign-off's only answer is SIGNOFF_ANSWER
 SIGNOFF_LEVELS = {"masterplans": "masterplan", "plans": "plan", "task-queue": "task-queue", "web": "web"}
@@ -67,7 +67,7 @@ SIGNOFF_ANSWER = "approve"
 IN_LOG = ("status = 'answered' AND signoff IS NULL AND kind = 'rule' AND id NOT IN (SELECT superseded_id FROM "
           "decision_supersedes s JOIN decision n ON n.id = s.decision_id WHERE s.note = '' AND n.status = 'answered')")
 
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 # A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
 # run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
 # Columns and tables SCHEMA dropped are left behind, new ones get their defaults; so only renames, moved data and new
@@ -79,7 +79,13 @@ def revise_kind(con):
                 "AND (subject LIKE 'revise the masterplan of %' OR subject LIKE 'revise plan %')")
 
 
-MIGRATIONS = {12: "", 13: "", 14: revise_kind, 15: "", 16: "", 17: ""}
+def drop_summary_kind(con):
+    """18 -> 19: summary tasks are work tasks without a plan."""
+    con.execute("PRAGMA ignore_check_constraints = ON")
+    con.execute("UPDATE task SET kind = 'work' WHERE kind = 'summary'")
+
+
+MIGRATIONS = {12: "", 13: "", 14: revise_kind, 15: "", 16: "", 17: "", 18: drop_summary_kind}
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -105,9 +111,9 @@ CREATE TABLE plan (
 
 CREATE TABLE task (
     id              INTEGER PRIMARY KEY,
-    plan_id         INTEGER REFERENCES plan (id),          -- NULL: a summary
+    plan_id         INTEGER REFERENCES plan (id),          -- NULL: the human's direct call, e.g. a summary
     subject         TEXT NOT NULL CHECK (trim(subject) <> ''),
-    kind            TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'plan', 'masterplan', 'split', 'cleanup', 'revise', 'investigate', 'summary')),
+    kind            TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'plan', 'masterplan', 'split', 'cleanup', 'revise', 'investigate')),
     status          TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done', 'dropped')),
     priority        INTEGER,                               -- NULL: the plan's
     note            TEXT,                                  -- done: date, files; dropped: reason
@@ -118,7 +124,7 @@ CREATE TABLE task (
     web             INTEGER NOT NULL DEFAULT 0 CHECK (web IN (0, 1)),  -- 1: its worker gets WebSearch and WebFetch
     CONSTRAINT "an open task needs a body" CHECK (status <> 'open' OR trim(body) <> ''),
     CONSTRAINT "retired_at is set exactly when done or dropped" CHECK ((status = 'open') = (retired_at IS NULL)),
-    CONSTRAINT "a task has a plan unless it is a summary" CHECK ((kind = 'summary') = (plan_id IS NULL))
+    CONSTRAINT "only a work task has no plan" CHECK (plan_id IS NOT NULL OR kind = 'work')
 ) STRICT;
 
 CREATE TABLE decision (
@@ -201,10 +207,10 @@ SELECT coalesce(t.priority, p.priority, 0) AS priority, t.id AS task_id, t.subje
 FROM task t
 LEFT JOIN plan p ON p.id = t.plan_id
 LEFT JOIN milestone m ON m.id = p.milestone_id
-WHERE (m.status = 'open' OR t.kind = 'summary') AND t.status = 'open'
+WHERE (m.status = 'open' OR t.plan_id IS NULL) AND t.status = 'open'
   AND NOT EXISTS (SELECT 1 FROM task_decision td JOIN decision d ON d.id = td.decision_id
                   WHERE td.task_id = t.id AND d.status = 'pending')
-ORDER BY m.queue_index, priority DESC, m.id, p.id, t.id;  -- NULL first: a summary before every milestone
+ORDER BY m.queue_index, priority DESC, m.id, p.id, t.id;  -- NULL first: no plan, before every milestone
 """
 
 WORKER_PROMPT = """You are the worker for task {id}. Follow the project's own instructions for agents (AGENTS.md, \
@@ -1021,7 +1027,7 @@ class Project:
             master = db.execute("SELECT 1 FROM task WHERE plan_id = ? AND kind = 'masterplan'", (t["plan_id"],))
             levels = ["masterplan" if master.fetchone() else "plan"]
         else:
-            levels = ["task-queue"] if t["kind"] == "work" else []
+            levels = ["task-queue"] if t["kind"] == "work" and t["plan_id"] is not None else []
         levels += ["web"] * bool(t["web"])
         return [x for x in levels if x in [SIGNOFF_LEVELS[c] for c in self.config["signoff"]]]
 
@@ -1100,16 +1106,17 @@ class Project:
         """Queue the task that writes an executive summary, unless one is open. Returns (task id, newly queued)."""
         human_only("request an executive summary")
         with self.connect(write=True) as db:
-            if old := db.execute("SELECT id FROM task WHERE kind = 'summary' AND status = 'open'").fetchone():
+            if old := db.execute(f"SELECT id FROM task WHERE {SUMMARY_TASK} AND status = 'open'").fetchone():
                 return old[0], False
-            return db.execute("INSERT INTO task (subject, kind, priority, body) VALUES (?, 'summary', ?, ?)",
+            return db.execute("INSERT INTO task (subject, priority, body) VALUES (?, ?, ?)",
                               (SUMMARY_SUBJECT, SUMMARY_PRIORITY, self.prompt("summary_prompt"))).lastrowid, True
 
     def summary_add(self, body):
         """Store the summary the running summary task wrote. Returns its id."""
         tid = creator()
         with self.connect(write=True) as db:
-            if tid is None or (t := self.get(db, "task", tid))["kind"] != "summary" or t["status"] != "open":
+            if tid is None or not db.execute(f"SELECT 1 FROM task WHERE id = ? AND {SUMMARY_TASK} AND status = 'open'",
+                                             (tid,)).fetchone():
                 raise FormatError("only the worker of an open summary task adds a summary (`pm summary request`)")
             if not body.strip():
                 raise FormatError("the summary is empty")
@@ -2018,7 +2025,7 @@ class Project:
         if t["kind"] == "split" and not self.rows("SELECT 1 FROM task WHERE plan_id = ? AND kind IN ('work', 'plan')",
                                                   t["plan_id"]):
             return "left its plan without tasks"
-        if t["kind"] == "summary" and not self.rows("SELECT 1 FROM summary WHERE task_id = ?", t["id"]):
+        if t["plan_id"] is None and t["subject"] == SUMMARY_SUBJECT and not self.rows("SELECT 1 FROM summary WHERE task_id = ?", t["id"]):
             return "stored no summary (`pm summary add`)"
         return None
 
@@ -2105,11 +2112,11 @@ class Project:
                 return 1
             if result == "failed":
                 self.say(f"\ntask {tid} failed: {message}")
-                if self.task_kind(tid) == "summary":
+                if self.task_plan(tid) is None:
                     self.task_set(tid, status="dropped", note="failed: " + message.splitlines()[0][:200])
                     self.drop_task_stashes(tid)
                     self.commit_db(f"task {tid} failed: dropped")
-                    self.say(f"task {tid} dropped; request a new summary to try again")
+                    self.say(f"task {tid} has no plan to investigate in: dropped")
                 elif self.task_kind(tid) == "investigate":
                     self.say(f"Stopping: task {tid} investigated a failure; pm doesn't investigate an investigation.")
                     return 1
@@ -2126,6 +2133,10 @@ class Project:
             if self.stopping:
                 self.say("Stopped as asked; `pm run` continues with the queue.")
                 return 0
+
+    def task_plan(self, tid):
+        with self.connect() as db:
+            return self.get(db, "task", tid)["plan_id"]
 
     def task_kind(self, tid):
         with self.connect() as db:

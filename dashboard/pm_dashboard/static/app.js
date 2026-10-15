@@ -4,7 +4,7 @@ import { Pill, Elapsed, Time } from "/ui.js";
 import { Overview, Queue, Milestones, Milestone, Plan, Task, Decisions, Decision, Runs } from "/views.js";
 import { Live } from "/live.js";
 import { MilestoneAdded } from "/add.js";
-import { Summary, openSummary } from "/summary.js";
+import { Summary, openSummary, isSummary } from "/summary.js";
 import { useNotifications, NotifyButton } from "/notify.js";
 import { UsageLine } from "/usage.js";
 import { Celebrate } from "/celebrate.js";
@@ -109,7 +109,7 @@ function App() {
     setHome(d.milestones.length && (d.running || recent) ? "live" : "overview");
   }, [r0.page, !!d]);
   if (r.page === "home") r = { ...r, page: home || "overview" };
-  const page = r.page === "task" && d && d.task.get(r.id)?.kind === "summary" ? "summary" : SECTION[r.page] || r.page;
+  const page = r.page === "task" && d && d.task.get(r.id) && isSummary(d.task.get(r.id)) ? "summary" : SECTION[r.page] || r.page;
   const pending = d ? d.decisions.filter((x) => x.status === "pending").length : 0;
   const summarizing = d && openSummary(d);
   const View = { added: MilestoneAdded, live: Live, summary: Summary, overview: Overview, queue: Queue, milestones: Milestones, milestone: Milestone, plan: Plan, task: Task,

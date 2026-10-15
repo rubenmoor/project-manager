@@ -84,7 +84,7 @@ If earlier investigations of this task are listed below, don't repeat their fix:
 Your note on `pm task done`: the cause and what you queued.
 '''
 
-# Body of the task "write an executive summary" (kind summary, no plan), queued by `pm summary request` or the
+# Body of the task "write an executive summary" (a task without a plan), queued by `pm summary request` or the
 # dashboard's button at priority 10000, so it runs next. Its worker stores the summary with `pm summary add`.
 summary_prompt = '''
 Write an executive summary of the project for the human: where it stands, in a few minutes of reading. Look, don't
