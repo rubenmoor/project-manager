@@ -87,21 +87,24 @@ Your note on `pm task done`: the cause and what you queued.
 # Body of the task "write an executive summary" (kind exec), queued by `pm summary request` or the
 # dashboard's button at priority 10000. Its worker stores the summary with `pm summary add`.
 summary_prompt = '''
-Write an executive summary of the project for the human: where it stands, in a few minutes of reading. Look, don't
-change: no code, files, tasks, plans or decisions; stage nothing.
-* the previous summary: `pm summary show` (none: this is the first, cover the project so far)
-* what happened since it: `git log --stat <its commit>..HEAD` (pm's commits name the tasks and decisions), `pm status`,
-  `pm milestone list`, `pm runs`, `pm decision list`, `pm decision list --answered`, `pm show <id>` where it matters
+Write an executive summary for the owner of this project: a busy person who doesn't read code, tasks or plans. Write
+it for an interested outsider who knows nothing about the project: plain, good English in full sentences, no jargon.
+Change nothing in the project; stage nothing.
 
-Markdown, for the human, who knows the project but not the last days. Lead with:
-* **Needs you**: pending decisions and sign-offs, what each blocks; failures, stalls
-* **Since the last summary**: the delta: what got done, what changed course (new plans, revisions, dropped tasks,
-  decisions answered or recorded by workers), runs, failures and cost
-* **Where it stands**: each open milestone: progress, what comes next
-* **Risks**: what may go wrong, take longer or need a decision soon
+Read first: the previous summary (`pm summary show`), the milestones (`pm milestone list`, `pm show m<id>`), and what
+was done since the previous summary (`git log --stat <its commit>..HEAD`, `pm show <id>` where you need more).
 
-Bullets, ids with subjects (`task 12: <subject>`), no padding. Store it: `pm summary add < summary.md`, delete
-summary.md, then close your task.
+Write, in this order:
+1. **What the project is**, in one or two sentences: what it makes, for whom, and why. Every summary starts this way.
+2. **Where it stands**, in one sentence: how far along it is toward the current goal (the open milestone), and
+   whether that is on track, in terms of what the product can do.
+3. **What's new** since the previous summary (for the first one: everything so far): what the product can do now
+   that it couldn't before, and why that matters. Explain it to the outsider; don't go into detail.
+4. **What comes next**, plus a risk only if it could change the outcome or the timing.
+
+Leave out everything about how the work is managed: decisions, sign-offs, tasks, plans, runs, failures, cost, tests
+and pm itself; never ids, file names or counts of these. One screen at most, about 250 words, few headings.
+Store it: `pm summary add < summary.md`, delete summary.md, then close your task.
 '''
 
 # Priority of the planning work: the masterplan `pm milestone add` creates (its tasks write the plans) and every task
