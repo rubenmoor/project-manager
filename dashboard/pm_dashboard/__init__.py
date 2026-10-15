@@ -10,15 +10,15 @@ Serves the browser client (static/) and a JSON API on 127.0.0.1:
     /api/task/<id>/commit  the commit pm made for the task, with its patch and the rows it changed
     /api/usage           the account's usage limits, from the newest rate_limit_event in the worker logs
     POST /api/edit       {"op": …}: add or change milestones, plans, tasks, resolve decisions, request an
-                         executive summary or a resource use report through pm (edit.py)
+                         executive summary, a resource use report or a custom report through pm (edit.py)
 """
 import argparse, datetime, errno, json, mimetypes, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-PM_MIN_VERSION = 44     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
-                        # summary_request, exec tasks, open_summary, report_request, report_rows)
+PM_MIN_VERSION = 50     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
+                        # summary_request, exec tasks, open_summary, report_request, report_rows, report_ask)
 try:
     import pm
 except ImportError:
@@ -30,7 +30,7 @@ from pm_dashboard import edit
 
 STATIC = Path(__file__).parent / "static"
 TABLES = ("milestone", "plan", "task", "decision", "task_decision", "decision_supersedes", "run", "summary",
-          "resource_use_report")
+          "resource_use_report", "custom_report")
 POLL = 0.5
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "
        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")

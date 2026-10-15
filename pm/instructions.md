@@ -43,6 +43,7 @@ pm adds these tasks itself; their bodies are the prompts of the same name in pro
 | a task failed | "investigate the failure of task N: …" (`investigate`), above the failed task | the failed task's |
 | `pm summary request` | "write an executive summary" (`exec`, priority 10000) | none |
 | `pm report request` | "write a resource use report" (`exec`, priority 10000) | none |
+| `pm report ask "<question>"` | "answer: <question>" (`exec`, priority 10000), a custom report | none |
 
 A priority change queues nothing. When done, pm checks: `plan` and `masterplan` tasks added or changed a plan (`revise` may leave it as it is), `split` left its plan with tasks; otherwise the task fails.
 
@@ -208,6 +209,7 @@ Each pm task's body says what to do; these are the mechanics.
 - **Post-milestone cleanup:** work through the body for the whole project. For another milestone that needs a change, or a pending decision that seems obsolete: a new decision for the human.
 - **Executive summary** (`exec`): `pm summary show` is the previous one; store the new one with `pm summary add < summary.md` (only in an exec task).
 - **Resource use report** (`exec`): `pm report tasks` lists the done tasks; store with `pm report add < report.json`, `{"categories": [{"name": "…", "criteria": "…", "tasks": [3, 7]}]}`; refused unless every done task is in exactly one category. pm sums each category's time, tokens and cost.
+- **Custom report** (`exec`): the owner's question or request, in the task body; answer in one plain paragraph, store with `pm report answer < answer.md`. `pm show c2`.
 - **Your task needs an answer first:** `pm decision add`, `pm task-pending-decision <your task> <decision>`, stage what's done, stop. `pm run` goes on with the next task.
 - **Finish:** run the project's checks, stage the changes meant to stay, delete temporary files, then `pm task done <task> "<YYYY-MM-DD, files>"` or `pm task drop <task> "<reason>"`. A worker run ends with its task closed or waiting for a decision (web: see "Web access"); otherwise pm keeps it going once.
 
@@ -229,6 +231,7 @@ pm decision approve 4                  # sign-offs only
 pm decision kind 3 rule                # rule: lasting, in the log; once: a one-off
 pm task add --exec "<subject>" [--priority N] < body.md
 pm summary request ; pm report request # queue an executive summary / resource use report; show, list
+pm report ask "<question>"             # queue a custom one-paragraph report
 ```
 
 Record only answers the human gave.

@@ -9,7 +9,7 @@ the queue until it is resumed. An exec task (kind exec) is the human's direct in
 queued as if at milestone queue index 0; one is the executive summary (`pm summary request`, SUMMARY_PRIORITY): its
 worker reads the previous summary and stores the new one in the summary table; another is the resource use report
 (`pm report request`): its worker sorts every done task into categories of its own making, pm sums their runs' time,
-tokens and cost. The queue (the `queue` view): open
+tokens and cost; a custom report (`pm report ask`) answers the human's question in one paragraph. The queue (the `queue` view): open
 tasks of open milestones, and open exec tasks, that no pending decision blocks, by the milestone's queue index (lowest
 first; exec: 0), then highest priority first, then by milestone, plan and task.
 Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
@@ -17,7 +17,7 @@ Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
     pm init | status | queue | show <task|d32|p3|m1> | validate | decide | run [--once] [--dry-run] | instructions
     pm milestone add|set|hold|resume|list|show …   pm plan add|edit|list …   pm task add|set|done|drop|priority …
     pm decision add|list|show|answer|approve|irrelevant|record|supersede|consequences|kind …
-    pm summary request|add|show|list   pm report request|tasks|add|show|list
+    pm summary request|add|show|list   pm report request|tasks|add|ask|answer|show|list
     pm task-pending-decision <task> <decision>
 
 Works on the git repository around the current directory. `pm init` writes the settings, project-manager.toml (the
@@ -29,7 +29,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 49  # bump by one with every commit (AGENTS.md)
+VERSION = 50  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -44,7 +44,7 @@ WORKER_ENV = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1", "BASH_MAX_TIMEOUT_MS"
 EPILOG = "Agents (LLMs): read `pm instructions` first, the full reference with examples for every command."
 PROMPT_KEYS = ("masterplan_prompt", "plan_tasks_prompt", "revise_masterplan_prompt", "revise_plan_prompt",
                "cleanup_prompt", "investigate_prompt", "summary_prompt",
-               "report_prompt")
+               "report_prompt", "custom_report_prompt")
 PRIORITY_KEYS = ("plan_priority_prompt", "task_priority_prompt")
 # Items are referred to by id and full subject, `ref()`: plain in a subject, in backticks in a body.
 CLEANUP_SUBJECT = "post-milestone cleanup of {}"
@@ -56,6 +56,7 @@ INVESTIGATE_SUBJECT = "investigate the failure of {}"
 SUMMARY_SUBJECT = "write an executive summary"
 SUMMARY_PRIORITY = 10000
 REPORT_SUBJECT = "write a resource use report"
+CUSTOM_REPORT_SUBJECT = "answer: {}"
 # Dedupes queued planning tasks: a running one may have read the old text already, so it doesn't count.
 NOT_RUNNING = "AND id NOT IN (SELECT task_id FROM run WHERE result = 'running')"
 # work: the default; plan: writes a plan; made by pm only: masterplan, split ("create tasks for plan N: …"), cleanup,
@@ -72,7 +73,7 @@ SIGNOFF_ANSWER = "approve"
 IN_LOG = ("status = 'answered' AND signoff IS NULL AND kind = 'rule' AND id NOT IN (SELECT superseded_id FROM "
           "decision_supersedes s JOIN decision n ON n.id = s.decision_id WHERE s.note = '' AND n.status = 'answered')")
 
-SCHEMA_VERSION = 21
+SCHEMA_VERSION = 22
 # A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
 # run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
 # Columns and tables SCHEMA dropped are left behind, new ones get their defaults; so only renames, moved data and new
@@ -97,7 +98,7 @@ def exec_kind(con):
 
 
 MIGRATIONS = {12: "", 13: "", 14: revise_kind, 15: "", 16: "", 17: "", 18: drop_summary_kind, 19: exec_kind,
-              20: ""}
+              20: "", 21: ""}
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -227,6 +228,16 @@ CREATE TABLE resource_use_task (                           -- each task done whe
     task_id     INTEGER NOT NULL REFERENCES task (id),
     category_id INTEGER NOT NULL REFERENCES resource_use_category (id),
     PRIMARY KEY (report_id, task_id)
+) STRICT;
+
+CREATE TABLE custom_report (                               -- the human's question, answered in one paragraph by an exec task
+    id          INTEGER PRIMARY KEY,
+    task_id     INTEGER NOT NULL UNIQUE REFERENCES task (id),
+    question    TEXT NOT NULL CHECK (trim(question) <> ''),
+    answer      TEXT,                                      -- NULL: not answered yet
+    created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    answered_at TEXT,
+    CONSTRAINT "answered_at is set exactly when answered" CHECK ((answer IS NULL) = (answered_at IS NULL))
 ) STRICT;
 
 CREATE INDEX plan_milestone ON plan (milestone_id);
@@ -1240,6 +1251,37 @@ class Project:
                 db.executemany("INSERT INTO resource_use_task VALUES (?, ?, ?)", [(rid, i, cid) for i in ts])
             return rid
 
+    def report_ask(self, question):
+        """Queue an exec task that answers the human's question in one paragraph. Returns (custom report id, task id)."""
+        question = question.strip()
+        if not question:
+            raise FormatError("the question is empty")
+        line = question.splitlines()[0]
+        tid = self.task_add(None, CUSTOM_REPORT_SUBJECT.format(line if len(line) <= 70 else line[:69].rstrip() + "…"),
+                            self.prompt("custom_report_prompt", question=question), SUMMARY_PRIORITY, "exec")
+        with self.connect(write=True) as db:
+            return db.execute("INSERT INTO custom_report (task_id, question) VALUES (?, ?)", (tid, question)).lastrowid, tid
+
+    def report_answer(self, text):
+        """Store the answer of the running exec task's custom report. Returns its id."""
+        tid = creator()
+        with self.connect(write=True) as db:
+            row = db.execute("SELECT id FROM custom_report WHERE task_id = ?", (tid,)).fetchone() if tid else None
+            if row is None or self.get(db, "task", tid)["status"] != "open":
+                raise FormatError("only the worker of an open custom report's task answers it (`pm report ask`)")
+            if not text.strip():
+                raise FormatError("the answer is empty")
+            db.execute("UPDATE custom_report SET answer = ?, answered_at = ? WHERE id = ?", (text.strip(), now(), row[0]))
+            return row[0]
+
+    def custom_report_show(self, cid):
+        rows = self.rows("SELECT * FROM custom_report WHERE id = ?", cid)
+        if not rows:
+            raise FormatError(f"no custom report {cid}")
+        c = rows[0]
+        return (f"# Custom report {c['id']} ({stamp(c['answered_at'] or c['created_at'])}, by task {c['task_id']})\n\n"
+                f"> {c['question']}\n\n{c['answer'] or 'Not answered yet.'}\n")
+
     def report_rows(self, rid):
         """Per category of report rid, in its order: name, criteria, tasks, seconds, tokens, cost (its tasks' runs)."""
         cats = self.rows("SELECT * FROM resource_use_category WHERE report_id = ? ORDER BY id", rid)
@@ -1279,11 +1321,13 @@ class Project:
         return "\n".join(out) + "\n"
 
     def reports(self):
-        """`pm report list`: id, date, commit, categories; newest first."""
-        rows = self.rows("SELECT r.*, group_concat(c.name, ', ') AS names FROM resource_use_report r "
-                         "JOIN resource_use_category c ON c.report_id = r.id GROUP BY r.id ORDER BY r.id DESC")
-        return "".join(f"{r['id']:4d}  {stamp(r['created_at'])}  {(r['head_commit'] or '')[:7]:<7}  {r['names'][:90]}\n"
-                       for r in rows) or "No resource use report yet.\n"
+        """`pm report list`: resource use reports (r<id>: categories) and custom reports (c<id>: question); newest first."""
+        rows = self.rows("SELECT 'r' || r.id AS ref, r.created_at AS at, group_concat(c.name, ', ') AS text "
+                         "FROM resource_use_report r JOIN resource_use_category c ON c.report_id = r.id GROUP BY r.id "
+                         "UNION ALL SELECT 'c' || id, coalesce(answered_at, created_at), "
+                         "CASE WHEN answer IS NULL THEN '(open) ' ELSE '' END || question FROM custom_report ORDER BY 2 DESC")
+        return "".join(f"{r['ref']:>5}  {stamp(r['at'])}  {r['text'].splitlines()[0][:90]}\n"
+                       for r in rows) or "No report yet.\n"
 
     # --- edit commands -----------------------------------------------------------------------
 
@@ -1574,15 +1618,15 @@ class Project:
 
     def show_ref(self, ref):
         """`pm show`: "7" or "t7" (a task), "d32" or "decision 32", "p3" or "plan 3", "m1" or "milestone 1", "s2" or
-        "summary 2", "r2" or "report 2"."""
-        m = re.fullmatch(r"(?:(t|task|d|decision|p|plan|m|milestone|s|summary|r|report)\s*)?(\d+)",
+        "summary 2", "r2" or "report 2", "c2" (a custom report)."""
+        m = re.fullmatch(r"(?:(t|task|d|decision|p|plan|m|milestone|s|summary|r|report|c)\s*)?(\d+)",
                          " ".join(ref).strip().lower())
         if not m:
             raise FormatError(f"not a task, decision, plan, milestone, summary or report: {' '.join(ref)!r} "
-                              "(e.g. 7, d32, p3, m1, s2, r2)")
+                              "(e.g. 7, d32, p3, m1, s2, r2, c2)")
         rid = int(m[2])
         return {"d": self.decision_show, "p": self.plan_show, "m": self.milestone_show, "s": self.summary_show,
-                "r": self.report_show}.get(
+                "r": self.report_show, "c": self.custom_report_show}.get(
             (m[1] or "t")[0], self.show)(rid)
 
     def plan_show(self, pid):
@@ -2550,8 +2594,11 @@ def main(argv=None):
     rp.add_parser("tasks", help="for its worker: every done task with kind, commits, subject, note")
     rp.add_parser("add", help='in an exec task\'s worker: store the report (JSON, stdin: {"categories": [{"name", '
                   '"criteria", "tasks": [ids]}]}, every done task in exactly one); prints its id')
+    rp.add_parser("ask", help=f"queue an exec task (priority {SUMMARY_PRIORITY}) that answers a question in one "
+                  "plain paragraph; prints the custom report's id").add_argument("question")
+    rp.add_parser("answer", help="in that task's worker: store the answer (Markdown, stdin); also `pm show c2`")
     rp.add_parser("show", help="the newest report, or one (also `pm show r2`)").add_argument("report", type=int, nargs="?")
-    rp.add_parser("list", help="every report, newest first: id, date, commit, categories")
+    rp.add_parser("list", help="resource use (r2) and custom (c2) reports, newest first")
     tpd = sub.add_parser("task-pending-decision", help="the task waits until the decision is answered")
     tpd.add_argument("task", type=int)
     tpd.add_argument("decision", type=int)
@@ -2731,6 +2778,14 @@ def main(argv=None):
                 rid = pm.report_add(sys.stdin.read())
                 print(rid)
                 msg = f"resource use report {rid} added"
+            elif args.action == "ask":
+                cid, tid = pm.report_ask(args.question)
+                print(cid)
+                msg = f"task {tid} queued: custom report {cid}"
+            elif args.action == "answer":
+                cid = pm.report_answer(sys.stdin.read())
+                print(cid)
+                msg = f"custom report {cid} answered"
             elif args.action == "show":
                 print(pm.report_show(args.report), end="")
             else:

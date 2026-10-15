@@ -131,6 +131,22 @@ Store it: write report.json, `{"categories": [{"name": "…", "criteria": "…",
 report.json, then close your task.
 '''
 
+# Body of a custom report's task "answer: …" (kind exec), queued by `pm report ask` or the dashboard's form at
+# priority 10000; {question} is the owner's text. Its worker stores the answer with `pm report answer`.
+custom_report_prompt = '''
+The owner of this project asks:
+
+{question}
+
+Answer in one paragraph for a busy person who doesn't read code, tasks or plans: plain, good English in full
+sentences, pleasant to read, no jargon, like an executive summary. Find out what you need first: the milestones
+(`pm milestone list`, `pm show m<id>`), the code, `git log`, `pm show <id>`, the reports (`pm report list`). Leave out
+how the work is managed (decisions, tasks, plans, runs, pm itself) unless the question is about it; never ids or file
+names. If the question asks for something to be done, don't do it: say in the paragraph what it would take.
+Change nothing in the project; stage nothing.
+Store it: `pm report answer < answer.md`, delete answer.md, then close your task.
+'''
+
 # Priority of the planning work: the masterplan `pm milestone add` creates (its tasks write the plans) and every task
 # "create tasks for plan N: …". Above every other plan, so all plans and their tasks exist before implementation starts;
 # within one milestone queue index: a higher index waits, planning included.

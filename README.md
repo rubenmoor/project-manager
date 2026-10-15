@@ -60,6 +60,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 - task: belongs to a plan, except kind `exec`; subject, body, kind (`work`, `plan`: writes a plan; `exec`: an executive intervention by the human, no plan or milestone, queued as if at queue index 0, by priority; made by pm: `masterplan`, `split` for "create tasks for plan N: …", `cleanup`, `revise` for "revise the masterplan of …" and "revise plan N: …", `investigate` for "investigate the failure of task N: …"), status, priority, note, `created_at`, `retired_at` (done or dropped), `created_by_task`
 - summary: an executive summary (Markdown), the task that wrote it, `head_commit` (where the next one's delta starts), `created_at`
 - resource_use_report: the task that wrote it, `head_commit`, `created_at`; `resource_use_category`: its mutually exclusive categories (name, one sentence of criteria); `resource_use_task`: each task done when it was written, in one category
+- custom_report: the human's question, its task, the one-paragraph answer (empty until answered), `created_at`, `answered_at`
 - decision: subject, body, options, status, answer or reason, `created_at`, `closed_at`, `created_by_task`, `signoff` (made by pm, see below), `kind` (`rule` | `once`), `decided_by_task` (a worker's own choice), `consequences`; `task_decision` links tasks to the decisions they wait for; `decision_supersedes` links a decision to the ones it replaces (note: only partly)
 - run: one worker run of `pm run`: task, start, end, result (`running`, `done`, `blocked`, `failed`, `limit`), reason, exit code, `base_commit` (HEAD at the start), `pid` of `pm run`; from claude's JSON output: model, session, turns, tokens (input, output, cache read, cache creation), cost in USD; while it runs, `running` (at most one, uncommitted); a `pm run` that died leaves it, the next `pm run` marks it `failed` (`interrupted`), or refuses while that process lives
 - timestamps in UTC; `created_by_task`: the task whose worker created the row (`PM_TASK`), empty for the human or pm
@@ -106,7 +107,8 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 | `decision show <id>` | One decision: context, options, answer, consequences, tasks, supersede links (also `pm show d<id>`) |
 | `decision record <subject> --answer …` | A decision nobody asked, added answered; `--body`, `--once`, `--supersedes <id>`, `--consequences`. In a worker: its own choice (`decided_by_task`) |
 | `summary request`, `summary show [id]`, `summary list` | Queue an executive summary (an exec task, priority 10000; it reads the previous summary and reports the delta); show the newest or one; list them |
-| `report request`, `report show [id]`, `report list` | Queue a resource use report (an exec task, priority 10000; two passes over all done tasks and their diffs: draw up mutually exclusive categories with criteria, then put each task in one; pm sums time, tokens and cost per category); show the newest or one; list them |
+| `report request`, `report show [id]`, `report list` | Queue a resource use report (an exec task, priority 10000; two passes over all done tasks and their diffs: draw up mutually exclusive categories with criteria, then put each task in one; pm sums time, tokens and cost per category); show the newest or one; list them (with custom reports) |
+| `report ask <question>`, `report answer` | A custom report: queue an exec task (priority 10000) that answers the question in one plain paragraph; in its worker, store the answer (stdin); `pm show c2` |
 | `decision supersede <new> <old>`, `decision consequences <id> <text>`, `decision kind <id> rule\|once` | Link a replaced decision (`--note`: only partly); append what changed because of an answer; lasting rule or one-off |
 | `decision answer <id> <n\|text>`, `decision approve <id>`, `decision irrelevant <id> <reason>` | Close a decision (`answer`: `--once`, `--supersedes <id>`); irrelevant drops the open tasks it blocks; approve: sign-offs only. Refused in a worker |
 | `task-pending-decision <task> <decision>` | The task waits until the decision is answered |
@@ -115,7 +117,7 @@ Global: `--root <repo>`. A text value `-` reads stdin.
 
 ## Dashboard
 
-`dashboard/` holds `pm-dashboard`, an optional local web view and editor of `tasks.sql`: the running worker and its output, queue, milestones, decisions, reports (executive summaries and resource use reports, a button queues each), runs and cost, live; subjects, bodies and priorities edited in place; pending decisions answered, approved or closed. A separate package, not installed with `pm`: `nix run .#dashboard` (details: `dashboard/README.md`).
+`dashboard/` holds `pm-dashboard`, an optional local web view and editor of `tasks.sql`: the running worker and its output, queue, milestones, decisions, reports (executive summaries, resource use reports and custom one-paragraph reports; a button or form queues each), runs and cost, live; subjects, bodies and priorities edited in place; pending decisions answered, approved or closed. A separate package, not installed with `pm`: `nix run .#dashboard` (details: `dashboard/README.md`).
 
 ## Workers
 

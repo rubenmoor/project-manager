@@ -410,3 +410,9 @@ del { color: var(--critical); text-decoration: line-through; }
 .fx-dropped .fx-what > a, .fx-irrelevant .fx-what > a { color: var(--muted); text-decoration: line-through; }
 .fx-deleted .fx { background: var(--critical-wash); color: var(--critical); }
 .fx-deleted .fx-what { color: var(--muted); text-decoration: line-through; }
+
+/* reports */
+.ask { display: grid; gap: 8px; }
+.ask textarea { width: 100%; box-sizing: border-box; font: inherit; color: var(--ink); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; resize: vertical; }
+.question { margin: 8px 0; padding-left: 10px; border-left: 3px solid var(--border); color: var(--ink-2); white-space: pre-wrap; }

@@ -107,6 +107,9 @@ def apply(project, op):
     if kind == "summary_request":
         tid, new = project.summary_request()
         return (f"task {tid} queued: {pm.SUMMARY_SUBJECT}" if new else f"task {tid} already queued"), tid
+    if kind == "report_ask":
+        cid, tid = project.report_ask(text(op.get("question"), "the question"))
+        return f"task {tid} queued: custom report {cid}", tid
     if kind == "report_request":
         tid, new = project.report_request()
         return (f"task {tid} queued: {pm.REPORT_SUBJECT}" if new else f"task {tid} already queued"), tid

@@ -27,7 +27,8 @@ In the project's git repository (the one with `project-manager.toml`):
   - runs, worker log (live while it runs, following its end)
   - diff and log start hidden; "show" shows them in full, no inner scroll box (the log open via `?log`)
 - **Decisions**: pending sign-offs and questions by milestone, the ones holding up the most important work first; closed ones: the decision log (as `pm decision list --answered`) or all; tags for one-offs, workers' own choices, superseded ones; a decision's page shows consequences and supersede links; a pending one is resolved there (below)
-- **Reports**: on top a button per kind, `pm summary request` and `pm report request` (exec tasks, priority 10000); while one is open its button is disabled and links to it; below every report of every kind, newest first
+- **Reports**: on top a button per kind, `pm summary request` and `pm report request` (exec tasks, priority 10000); while one is open its button is disabled and links to it; then the custom report form, `pm report ask` (open questions listed with their task); below every report of every kind, newest first
+  - custom report: the question quoted, then the one-paragraph answer
   - executive summary: reads the previous one and reports the delta
   - resource use report: per category (criteria below its name) tasks, time, tokens, cost and shares, bars by time
 - **Runs**: cost per day, per task kind, per milestone; done and dropped tasks per cost bracket (total over their runs); every run
