@@ -21,6 +21,8 @@ const WHAT = {
   milestone: { title: "New milestone", ph: "Users can export their data as CSV", body: MILESTONE_TEMPLATE,
     hint: "The milestone is the only text a worker gets from you: what should be true afterwards, why, what is fixed, what is out of scope, how to tell it's done. pm adds the masterplan and the task that writes it." },
   task: { title: "New task", ph: "Add the export endpoint", body: "", hint: "" },
+  exec: { title: "New executive intervention", ph: "Check the CI config before the next release", body: "",
+    hint: "A task of yours outside every plan and milestone: queued as if at milestone queue index 0, by priority." },
 };
 
 export function AddForm({ kind, parent, onClose }) {
@@ -34,8 +36,9 @@ export function AddForm({ kind, parent, onClose }) {
   const body = useRef(w.body);
   const submit = async () => {
     if (busy) return;
-    const op = { op: `${kind}_add`, subject, body: body.current };
+    const op = { op: `${kind === "exec" ? "task" : kind}_add`, subject, body: body.current };
     if (kind === "task") { op.plan = parent; op.kind = taskKind; }
+    if (kind === "exec") op.kind = "exec";
     if (kind === "milestone" && queue.trim() !== "") {
       if (!/^-?\d+$/.test(queue.trim())) { setError("the queue index is a whole number, or empty"); return; }
       op.queue_index = Number(queue);
@@ -48,7 +51,7 @@ export function AddForm({ kind, parent, onClose }) {
     try {
       const r = await post(op);
       onClose && onClose();
-      location.hash = kind === "milestone" ? `#/added/${r.id}` : `#/${kind}/${r.id}`;
+      location.hash = kind === "milestone" ? `#/added/${r.id}` : `#/${kind === "exec" ? "task" : kind}/${r.id}`;
     } catch (e) { setError(e.message); setBusy(false); }
   };
   const keys = (e) => {
@@ -63,13 +66,13 @@ export function AddForm({ kind, parent, onClose }) {
     <div class="row" style="margin-top:10px">
       ${kind === "milestone" ? html`<label class="sub" title="tasks of milestones with a lower queue index are worked first">queue index
         <input class="small" value=${queue} placeholder="0" onInput=${(e) => setQueue(e.target.value)} /></label>` : null}
-      ${kind !== "milestone" ? html`<label class="sub">priority <input class="small" value=${prio} placeholder=${kind === "task" ? "plan's" : "none"}
+      ${kind !== "milestone" ? html`<label class="sub">priority <input class="small" value=${prio} placeholder=${kind === "task" ? "plan's" : kind === "exec" ? "0" : "none"}
         onInput=${(e) => setPrio(e.target.value)} /></label>` : null}
       ${kind === "task" ? html`<label class="sub">kind <select class="small" value=${taskKind} onChange=${(e) => setTaskKind(e.target.value)}>
         <option value="work">work</option><option value="plan">plan (writes a plan)</option></select></label>` : null}
       <span class="grow"></span>
       ${error ? html`<span class="err">${error}</span>` : null}
-      <button class="btn primary" onClick=${submit} disabled=${busy}>Add ${kind}</button>
+      <button class="btn primary" onClick=${submit} disabled=${busy}>Add ${kind === "exec" ? "exec task" : kind}</button>
     </div>
     <div class="edit-hint">Markdown supported · Ctrl-Enter: add</div>
   </div>`;

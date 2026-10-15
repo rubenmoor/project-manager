@@ -17,8 +17,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-PM_MIN_VERSION = 38     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
-                        # summary_request)
+PM_MIN_VERSION = 40     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
+                        # summary_request, exec tasks)
 try:
     import pm
 except ImportError:

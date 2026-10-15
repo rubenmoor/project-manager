@@ -4,28 +4,23 @@ import { Markdown, Pill, Time, TaskLink, Fold } from "/ui.js";
 import { stamp } from "/data.js";
 import { post } from "/editor.js";
 
-// The open summary task, if any: pm's SUMMARY_TASK.
-export const isSummary = (t) => t.plan_id == null && t.subject === "write an executive summary";
-export const openSummary = (d) => d.tasks.find((t) => isSummary(t) && t.status === "open") || null;
-
+// The task the button queued (this page's own; the Tasks page lists every exec task).
 function Request({ d }) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  const open = openSummary(d);
+  const [queued, setQueued] = useState(null);
   const go = () => {
     setBusy(true); setError(null);
-    post({ op: "summary_request" }).catch((e) => setError(e.message)).finally(() => setBusy(false));
+    post({ op: "summary_request" }).then((r) => setQueued(r.id)).catch((e) => setError(e.message)).finally(() => setBusy(false));
   };
-  if (open) {
-    const running = d.running && d.running.task_id === open.id;
-    const pos = d.queuePos.get(open.id);
-    return html`<div class="card"><div class="row"><${Pill} status=${running ? "running" : "open"} label=${running ? "writing" : "queued"} />
-      <span class="sub"><${TaskLink} t=${open} />${running ? html` · <a href=${`#/task/${open.id}?log`}>live log</a>`
-        : pos === 0 ? (d.running ? ", next after the running task" : html`, next; start it with <code>pm run</code>`)
-        : pos != null ? `, #${pos + 1} in the queue` : ""}</span></div></div>`;
-  }
+  const t = queued != null ? d.task.get(queued) : null;
+  const running = t && d.running && d.running.task_id === t.id;
+  const pos = t ? d.queuePos.get(t.id) : null;
   return html`<div class="row"><button class="btn primary" onClick=${go} disabled=${busy}>Write an executive summary</button>
-    <span class="muted">queues a task at priority 10000: <code>pm run</code> works it next</span>
+    ${t ? html`<${Pill} status=${running ? "running" : t.status} label=${running ? "writing" : t.status === "open" ? "queued" : t.status} />
+      <span class="sub"><${TaskLink} t=${t} />${running ? html` · <a href=${`#/task/${t.id}?log`}>live log</a>`
+        : pos != null ? `, #${pos + 1} in the queue` : ""}</span>`
+    : html`<span class="muted">queues an exec task at priority 10000</span>`}
     ${error ? html`<span class="err">${error}</span>` : null}</div>`;
 }
 

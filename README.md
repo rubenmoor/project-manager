@@ -57,7 +57,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 
 - milestone: subject, body, status (`open`, `on-hold`, `implemented`), `queue_index` (default 0), `created_at`, `implemented_at`
 - plan: belongs to a milestone; subject, body, priority, `created_at`, `created_by_task`
-- task: belongs to a plan (none: the human's direct call, queued first, e.g. the executive summary); subject, body, kind (`work`, `plan`: writes a plan; made by pm: `masterplan`, `split` for "create tasks for plan N: …", `cleanup`, `revise` for "revise the masterplan of …" and "revise plan N: …", `investigate` for "investigate the failure of task N: …"), status, priority, note, `created_at`, `retired_at` (done or dropped), `created_by_task`
+- task: belongs to a plan, except kind `exec`; subject, body, kind (`work`, `plan`: writes a plan; `exec`: an executive intervention by the human, no plan or milestone, queued as if at queue index 0, by priority; made by pm: `masterplan`, `split` for "create tasks for plan N: …", `cleanup`, `revise` for "revise the masterplan of …" and "revise plan N: …", `investigate` for "investigate the failure of task N: …"), status, priority, note, `created_at`, `retired_at` (done or dropped), `created_by_task`
 - summary: an executive summary (Markdown), the task that wrote it, `head_commit` (where the next one's delta starts), `created_at`
 - decision: subject, body, options, status, answer or reason, `created_at`, `closed_at`, `created_by_task`, `signoff` (made by pm, see below), `kind` (`rule` | `once`), `decided_by_task` (a worker's own choice), `consequences`; `task_decision` links tasks to the decisions they wait for; `decision_supersedes` links a decision to the ones it replaces (note: only partly)
 - run: one worker run of `pm run`: task, start, end, result (`running`, `done`, `blocked`, `failed`, `limit`), reason, exit code, `base_commit` (HEAD at the start), `pid` of `pm run`; from claude's JSON output: model, session, turns, tokens (input, output, cache read, cache creation), cost in USD; while it runs, `running` (at most one, uncommitted); a `pm run` that died leaves it, the next `pm run` marks it `failed` (`interrupted`), or refuses while that process lives
@@ -93,7 +93,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 | `run [--once] [--dry-run]` | Work the queue until it is empty, Claude needs you, or the tree has uncommitted changes |
 | `stop` | Have the running `pm run` stop after its current task (SIGUSR1; same as one Ctrl-C) |
 | `milestone add`, `plan add <milestone>`, `task add <plan>` | In your editor (as `git commit`): first line subject, rest body (Markdown); quit unsaved or save empty to abort |
-| `milestone add <subject>`, `plan add <milestone> <subject>`, `task add <plan> <subject>` | Non-interactive: the body from stdin. `plan add` and `task add` also take `--priority`; `task add` `--kind plan`, `--web` |
+| `milestone add <subject>`, `plan add <milestone> <subject>`, `task add <plan> <subject>` | Non-interactive: the body from stdin. `plan add` and `task add` also take `--priority`; `task add` `--kind plan`, `--web`; `task add --exec <subject>`: an exec task, no plan |
 | `milestone add … --queue <N>`, `milestone set <milestone>` | `--queue <N>`: queue index, lowest first (default 0); `set` also `--subject`, `--status`, `--body`. `milestone add\|set\|hold\|resume` is refused in a worker |
 | `milestone hold <milestone>`, `milestone resume <milestone>` | Keep its plans and tasks out of the queue (a running task finishes), and back |
 | `plan edit <plan>` | `--subject`, `--body`, `--priority <N\|none>` |
@@ -104,7 +104,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 | `decision list` | Pending decisions: context, options, blocked tasks; sign-offs with what they approve. `--answered`: the decision log (answered `rule` decisions nothing fully supersedes, newest first); `--all`: every decision; `--grep <text>` |
 | `decision show <id>` | One decision: context, options, answer, consequences, tasks, supersede links (also `pm show d<id>`) |
 | `decision record <subject> --answer …` | A decision nobody asked, added answered; `--body`, `--once`, `--supersedes <id>`, `--consequences`. In a worker: its own choice (`decided_by_task`) |
-| `summary request`, `summary show [id]`, `summary list` | Queue an executive summary (priority 10000: the next task; it reads the previous summary and reports the delta); show the newest or one; list them |
+| `summary request`, `summary show [id]`, `summary list` | Queue an executive summary (an exec task, priority 10000; it reads the previous summary and reports the delta); show the newest or one; list them |
 | `decision supersede <new> <old>`, `decision consequences <id> <text>`, `decision kind <id> rule\|once` | Link a replaced decision (`--note`: only partly); append what changed because of an answer; lasting rule or one-off |
 | `decision answer <id> <n\|text>`, `decision approve <id>`, `decision irrelevant <id> <reason>` | Close a decision (`answer`: `--once`, `--supersedes <id>`); irrelevant drops the open tasks it blocks; approve: sign-offs only. Refused in a worker |
 | `task-pending-decision <task> <decision>` | The task waits until the decision is answered |

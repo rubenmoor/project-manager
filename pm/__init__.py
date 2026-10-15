@@ -5,10 +5,11 @@ in-memory database (the schema is SCHEMA below). A new milestone comes with a fi
 changed milestone queues the revision of its masterplan, a changed plan that of the plans below it and of its open
 tasks; implemented milestones, done plans and closed tasks can't be changed; a milestone whose tasks are all closed
 gets a last one, the post-milestone cleanup, before it is implemented; a milestone on hold keeps its tasks out of
-the queue until it is resumed. A task without a plan is the human's direct call, queued before every milestone; one is the executive
-summary (`pm summary request`, SUMMARY_PRIORITY): its worker reads the previous summary and stores the new one in the summary table. The queue (the `queue` view): open tasks of
-open milestones, and tasks without a plan, that no pending decision blocks, by the milestone's queue index (lowest first), then highest priority
-first, then by milestone, plan and task.
+the queue until it is resumed. An exec task (kind exec) is the human's direct intervention: no plan, so no milestone,
+queued as if at milestone queue index 0; one is the executive summary (`pm summary request`, SUMMARY_PRIORITY): its
+worker reads the previous summary and stores the new one in the summary table. The queue (the `queue` view): open
+tasks of open milestones, and open exec tasks, that no pending decision blocks, by the milestone's queue index (lowest
+first; exec: 0), then highest priority first, then by milestone, plan and task.
 Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
 
     pm init | status | queue | show <task|d32|p3|m1> | validate | decide | run [--once] [--dry-run] | instructions
@@ -26,7 +27,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 39  # bump by one with every commit (AGENTS.md)
+VERSION = 40  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -51,12 +52,12 @@ REVISE_PLAN_SUBJECT = "revise {}"
 INVESTIGATE_SUBJECT = "investigate the failure of {}"
 SUMMARY_SUBJECT = "write an executive summary"
 SUMMARY_PRIORITY = 10000
-SUMMARY_TASK = f"plan_id IS NULL AND subject = '{SUMMARY_SUBJECT}'"  # SQL: the summary tasks
 # Dedupes queued planning tasks: a running one may have read the old text already, so it doesn't count.
 NOT_RUNNING = "AND id NOT IN (SELECT task_id FROM run WHERE result = 'running')"
 # work: the default; plan: writes a plan; made by pm only: masterplan, split ("create tasks for plan N: …"), cleanup,
-# revise ("revise the masterplan of milestone N: …", "revise plan N: …"), investigate (a failed task)
-TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup", "revise", "investigate")
+# revise ("revise the masterplan of milestone N: …", "revise plan N: …"), investigate (a failed task); made by the
+# human only: exec (an executive intervention, the only kind without a plan)
+TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup", "revise", "investigate", "exec")
 PLANNING_KINDS = ("plan", "masterplan", "split")
 # `signoff` in project-manager.toml → decision.signoff; a sign-off's only answer is SIGNOFF_ANSWER
 SIGNOFF_LEVELS = {"masterplans": "masterplan", "plans": "plan", "task-queue": "task-queue", "web": "web"}
@@ -67,7 +68,7 @@ SIGNOFF_ANSWER = "approve"
 IN_LOG = ("status = 'answered' AND signoff IS NULL AND kind = 'rule' AND id NOT IN (SELECT superseded_id FROM "
           "decision_supersedes s JOIN decision n ON n.id = s.decision_id WHERE s.note = '' AND n.status = 'answered')")
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 # A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
 # run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
 # Columns and tables SCHEMA dropped are left behind, new ones get their defaults; so only renames, moved data and new
@@ -85,7 +86,13 @@ def drop_summary_kind(con):
     con.execute("UPDATE task SET kind = 'work' WHERE kind = 'summary'")
 
 
-MIGRATIONS = {12: "", 13: "", 14: revise_kind, 15: "", 16: "", 17: "", 18: drop_summary_kind}
+def exec_kind(con):
+    """19 -> 20: tasks without a plan get the kind exec."""
+    con.execute("PRAGMA ignore_check_constraints = ON")
+    con.execute("UPDATE task SET kind = 'exec' WHERE plan_id IS NULL")
+
+
+MIGRATIONS = {12: "", 13: "", 14: revise_kind, 15: "", 16: "", 17: "", 18: drop_summary_kind, 19: exec_kind}
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -111,9 +118,9 @@ CREATE TABLE plan (
 
 CREATE TABLE task (
     id              INTEGER PRIMARY KEY,
-    plan_id         INTEGER REFERENCES plan (id),          -- NULL: the human's direct call, e.g. a summary
+    plan_id         INTEGER REFERENCES plan (id),          -- NULL: exec, and only exec
     subject         TEXT NOT NULL CHECK (trim(subject) <> ''),
-    kind            TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'plan', 'masterplan', 'split', 'cleanup', 'revise', 'investigate')),
+    kind            TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'plan', 'masterplan', 'split', 'cleanup', 'revise', 'investigate', 'exec')),
     status          TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done', 'dropped')),
     priority        INTEGER,                               -- NULL: the plan's
     note            TEXT,                                  -- done: date, files; dropped: reason
@@ -124,7 +131,7 @@ CREATE TABLE task (
     web             INTEGER NOT NULL DEFAULT 0 CHECK (web IN (0, 1)),  -- 1: its worker gets WebSearch and WebFetch
     CONSTRAINT "an open task needs a body" CHECK (status <> 'open' OR trim(body) <> ''),
     CONSTRAINT "retired_at is set exactly when done or dropped" CHECK ((status = 'open') = (retired_at IS NULL)),
-    CONSTRAINT "only a work task has no plan" CHECK (plan_id IS NOT NULL OR kind = 'work')
+    CONSTRAINT "an exec task has no plan, every other task has one" CHECK ((kind = 'exec') = (plan_id IS NULL))
 ) STRICT;
 
 CREATE TABLE decision (
@@ -207,10 +214,10 @@ SELECT coalesce(t.priority, p.priority, 0) AS priority, t.id AS task_id, t.subje
 FROM task t
 LEFT JOIN plan p ON p.id = t.plan_id
 LEFT JOIN milestone m ON m.id = p.milestone_id
-WHERE (m.status = 'open' OR t.plan_id IS NULL) AND t.status = 'open'
+WHERE (m.status = 'open' OR t.kind = 'exec') AND t.status = 'open'
   AND NOT EXISTS (SELECT 1 FROM task_decision td JOIN decision d ON d.id = td.decision_id
                   WHERE td.task_id = t.id AND d.status = 'pending')
-ORDER BY m.queue_index, priority DESC, m.id, p.id, t.id;  -- NULL first: no plan, before every milestone
+ORDER BY coalesce(m.queue_index, 0), priority DESC, m.id, p.id, t.id;  -- exec: queue index 0
 """
 
 WORKER_PROMPT = """You are the worker for task {id}. Follow the project's own instructions for agents (AGENTS.md, \
@@ -1027,7 +1034,7 @@ class Project:
             master = db.execute("SELECT 1 FROM task WHERE plan_id = ? AND kind = 'masterplan'", (t["plan_id"],))
             levels = ["masterplan" if master.fetchone() else "plan"]
         else:
-            levels = ["task-queue"] if t["kind"] == "work" and t["plan_id"] is not None else []
+            levels = ["task-queue"] if t["kind"] == "work" else []
         levels += ["web"] * bool(t["web"])
         return [x for x in levels if x in [SIGNOFF_LEVELS[c] for c in self.config["signoff"]]]
 
@@ -1103,21 +1110,15 @@ class Project:
     # --- executive summaries -------------------------------------------------------------------
 
     def summary_request(self):
-        """Queue the task that writes an executive summary, unless one is open. Returns (task id, newly queued)."""
-        human_only("request an executive summary")
-        with self.connect(write=True) as db:
-            if old := db.execute(f"SELECT id FROM task WHERE {SUMMARY_TASK} AND status = 'open'").fetchone():
-                return old[0], False
-            return db.execute("INSERT INTO task (subject, priority, body) VALUES (?, ?, ?)",
-                              (SUMMARY_SUBJECT, SUMMARY_PRIORITY, self.prompt("summary_prompt"))).lastrowid, True
+        """Queue an exec task that writes an executive summary. Returns its id."""
+        return self.task_add(None, SUMMARY_SUBJECT, self.prompt("summary_prompt"), SUMMARY_PRIORITY, "exec")
 
     def summary_add(self, body):
-        """Store the summary the running summary task wrote. Returns its id."""
+        """Store the summary the running exec task wrote. Returns its id."""
         tid = creator()
         with self.connect(write=True) as db:
-            if tid is None or not db.execute(f"SELECT 1 FROM task WHERE id = ? AND {SUMMARY_TASK} AND status = 'open'",
-                                             (tid,)).fetchone():
-                raise FormatError("only the worker of an open summary task adds a summary (`pm summary request`)")
+            if tid is None or (t := self.get(db, "task", tid))["kind"] != "exec" or t["status"] != "open":
+                raise FormatError("only the worker of an open exec task adds a summary (`pm summary request`)")
             if not body.strip():
                 raise FormatError("the summary is empty")
             return db.execute("INSERT INTO summary (task_id, body, head_commit) VALUES (?, ?, ?)",
@@ -1383,11 +1384,14 @@ class Project:
             return [q for q in queued if q]
 
     def task_add(self, pid, subject, body, prio=None, kind="work", web=False):
-        """A new task; a plan-writing one gets planning_priority unless prio is given."""
+        """A new task; a plan-writing one gets planning_priority unless prio is given. kind exec: the human's, pid None."""
         if prio is None and kind in PLANNING_KINDS:
             prio = self.config["planning_priority"]
+        if kind == "exec":
+            human_only("add an exec task")
         with self.connect(write=True) as db:
-            self.check_plan_open(db, pid)
+            if kind != "exec":
+                self.check_plan_open(db, pid)
             return db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task, web) "
                               "VALUES (?, ?, ?, ?, ?, ?, ?)",
                               (pid, subject, kind, prio, body.strip(), creator(), int(web))).lastrowid
@@ -2025,8 +2029,6 @@ class Project:
         if t["kind"] == "split" and not self.rows("SELECT 1 FROM task WHERE plan_id = ? AND kind IN ('work', 'plan')",
                                                   t["plan_id"]):
             return "left its plan without tasks"
-        if t["plan_id"] is None and t["subject"] == SUMMARY_SUBJECT and not self.rows("SELECT 1 FROM summary WHERE task_id = ?", t["id"]):
-            return "stored no summary (`pm summary add`)"
         return None
 
     def commit_task(self, tid, subject, body):
@@ -2112,7 +2114,7 @@ class Project:
                 return 1
             if result == "failed":
                 self.say(f"\ntask {tid} failed: {message}")
-                if self.task_plan(tid) is None:
+                if self.task_kind(tid) == "exec":
                     self.task_set(tid, status="dropped", note="failed: " + message.splitlines()[0][:200])
                     self.drop_task_stashes(tid)
                     self.commit_db(f"task {tid} failed: dropped")
@@ -2133,10 +2135,6 @@ class Project:
             if self.stopping:
                 self.say("Stopped as asked; `pm run` continues with the queue.")
                 return 0
-
-    def task_plan(self, tid):
-        with self.connect() as db:
-            return self.get(db, "task", tid)["plan_id"]
 
     def task_kind(self, tid):
         with self.connect() as db:
@@ -2326,9 +2324,11 @@ def main(argv=None):
                   "milestone's queue index, then highest priority first")
 
     t = sub.add_parser("task", help="add or change tasks").add_subparsers(dest="action", required=True)
-    a = t.add_parser("add", help="new task; prints its id")
-    a.add_argument("plan", type=int)
+    a = t.add_parser("add", help="new task; prints its id. `pm task add --exec [<subject>]`: an exec task, no plan")
+    a.add_argument("plan", nargs="?", help="the plan's id; none with --exec")
     a.add_argument("subject", nargs="?", help="then the body (Markdown) is read from stdin; without: editor")
+    a.add_argument("--exec", action="store_true", help="an executive intervention: no plan, no milestone, queued as "
+                   "if at queue index 0; only the human adds one")
     a.add_argument("--priority", type=int, help="default: the plan's; for --kind plan: planning_priority")
     a.add_argument("--kind", choices=("work", "plan"), default="work", help="plan: the task writes a plan")
     a.add_argument("--web", action="store_true", help="its worker gets WebSearch and WebFetch (sign-off: web)")
@@ -2394,8 +2394,8 @@ def main(argv=None):
     di.add_argument("reason")
     su = sub.add_parser("summary", aliases=["summaries"], help="executive summaries of the project").add_subparsers(
         dest="action", required=True)
-    su.add_parser("request", help=f"queue the task that writes one (priority {SUMMARY_PRIORITY}: next); prints its id")
-    su.add_parser("add", help="in a summary task's worker: store the summary (Markdown, stdin); prints its id")
+    su.add_parser("request", help=f"queue an exec task that writes one (priority {SUMMARY_PRIORITY}); prints its id")
+    su.add_parser("add", help="in an exec task's worker: store the summary (Markdown, stdin); prints its id")
     su.add_parser("show", help="the newest summary, or one (also `pm show s2`)").add_argument("summary", type=int, nargs="?")
     su.add_parser("list", help="every summary, newest first: id, date, commit, first line")
     tpd = sub.add_parser("task-pending-decision", help="the task waits until the decision is answered")
@@ -2482,11 +2482,19 @@ def main(argv=None):
                 msg = f"plan {args.plan} changed"
         elif args.cmd == "task":
             if args.action == "add":
-                pm.require("plan", args.plan)
-                if not (entry := pm.subject_and_body("task", args.subject)):
+                if args.exec:
+                    if args.subject is not None or args.kind != "work":
+                        raise FormatError("an exec task has no plan or other kind: pm task add --exec \"<subject>\"")
+                    plan, subject, kind = None, args.plan, "exec"
+                else:
+                    if args.plan is None or not args.plan.isdigit():
+                        raise FormatError("the plan's id is missing (an exec task: --exec)")
+                    plan, subject, kind = int(args.plan), args.subject, args.kind
+                    pm.require("plan", plan)
+                if not (entry := pm.subject_and_body("task", subject)):
                     print("pm: aborted, no task added")
                     return 1
-                tid = pm.task_add(args.plan, *entry, args.priority, args.kind, args.web)
+                tid = pm.task_add(plan, *entry, args.priority, kind, args.web)
                 print(tid)
                 msg = f"task {tid} added: {entry[0]}"
             elif args.action in ("done", "drop"):
@@ -2541,9 +2549,9 @@ def main(argv=None):
                 msg = f"decision {did} added: {args.subject}"
         elif args.cmd in ("summary", "summaries"):
             if args.action == "request":
-                tid, new = pm.summary_request()
+                tid = pm.summary_request()
                 print(tid)
-                msg = new and f"task {tid} queued: {SUMMARY_SUBJECT}"
+                msg = f"task {tid} queued: {SUMMARY_SUBJECT}"
             elif args.action == "add":
                 sid = pm.summary_add(sys.stdin.read())
                 print(sid)

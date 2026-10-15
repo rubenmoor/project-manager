@@ -50,6 +50,13 @@ export function index(state) {
     const b = d.blockers(task);
     return b.length ? b : null;
   };
+  // Pending decisions by what answering them frees: alone = open tasks it is the only pending blocker of; waiting = all
+  // open tasks it blocks. Most freed first.
+  d.blocking = () => d.decisions.filter((x) => x.status === "pending").map((x) => {
+    const waiting = (d.tasksWaiting.get(x.id) || []).filter((t) => t.status === "open");
+    return { x, waiting, alone: waiting.filter((t) => d.blockers(t).length === 1) };
+  }).filter((b) => b.waiting.length)
+    .sort((a, b) => b.alone.length - a.alone.length || b.waiting.length - a.waiting.length || a.x.id - b.x.id);
   d.held = (m) => !!m && m.status === "on-hold";
   d.taskState = (task) => (task.status === "open" && d.held(d.milestoneOfTask(task)) ? "on-hold" : task.status);
   d.cost = (runs) => runs.reduce((s, r) => s + (r.cost_usd || 0), 0);

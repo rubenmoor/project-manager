@@ -21,7 +21,7 @@ function TaskPrio({ d, t }) {
     save=${t.status === "open" ? saveTask(t.id, "priority") : null} disabled=${runningId(d) === t.id} />`;
 }
 
-const KINDS = ["work", "plan", "masterplan", "split", "cleanup", "revise", "investigate"];
+const KINDS = ["work", "plan", "masterplan", "split", "cleanup", "revise", "investigate", "exec"];
 
 function Banners({ d }) {
   const s = d.state;
@@ -78,7 +78,7 @@ export function Overview({ d }) {
     ${d.queue.length > 8 ? html`<div style="margin-top:6px"><a href="#/queue">All ${d.queue.length} tasks</a></div>` : null}`;
 }
 
-function counts(tasks) {
+export function counts(tasks) {
   return {
     done: tasks.filter((t) => t.status === "done").length,
     dropped: tasks.filter((t) => t.status === "dropped").length,
@@ -113,14 +113,14 @@ function QueueTable({ d, ids }) {
       return html`<tr class=${d.queuePos.get(id) === 0 ? "head-row" : ""}>
         <td class="r num muted">${d.queuePos.get(id) + 1}</td><td><${Prio} p=${d.prio(t)} /></td>
         <td class="subject"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /> ${run ? html`<${Pill} status="running" />` : null}</td>
-        <td class="ink2">${p ? html`<a class="ink2" href=${`#/plan/${p.id}`}><${Named} kind="plan" r=${p} /></a>` : html`<span class="muted">no plan</span>`}</td><td class="muted">${m ? html`<${Named} kind="milestone" r=${m} />` : null}</td></tr>`;
+        <td class="ink2">${p ? html`<a class="ink2" href=${`#/plan/${p.id}`}><${Named} kind="plan" r=${p} /></a>` : html`<a class="ink2" href="#/tasks">executive intervention</a>`}</td><td class="muted">${m ? html`<${Named} kind="milestone" r=${m} />` : null}</td></tr>`;
     })}</tbody></table></div>`;
 }
 
 export function Queue({ d }) {
   const out = d.tasks.filter((t) => t.status === "open" && !d.queuePos.has(t.id));
   return html`<h1>Queue</h1>
-    <div class="sub">What <code>pm run</code> works next: open tasks of open milestones that no pending decision blocks (tasks without a plan, like the executive summary, first),
+    <div class="sub">What <code>pm run</code> works next: open tasks of open milestones that no pending decision blocks (and exec tasks, as if at queue index 0),
       by the milestone's queue index (lowest first), then highest priority first, then milestone, plan and task.</div>
     <${Banners} d=${d} />
     <h2>${d.queue.length} workable</h2>
@@ -157,7 +157,7 @@ export function Milestones({ d }) {
     </div>`;
 }
 
-function TaskRows({ d, tasks }) {
+export function TaskRows({ d, tasks }) {
   return html`<table><tbody>${tasks.map((t) => {
     const run = d.running && d.running.task_id === t.id;
     const pos = d.queuePos.get(t.id);
@@ -171,7 +171,7 @@ function TaskRows({ d, tasks }) {
   })}</tbody></table>`;
 }
 
-function Chips({ value, set, options }) {
+export function Chips({ value, set, options }) {
   return html`<div class="chips">${options.map(([k, label]) => html`<button class=${"chip" + (value === k ? " on" : "")}
     onClick=${() => set(k)}>${label}</button>`)}</div>`;
 }
@@ -326,7 +326,7 @@ export function Task({ d, id, query, embedded = false }) {
   const why = d.excluded(t);
   const last = runs.filter((r) => r.ended_at).pop();
   const fail = t.status === "open" && last && last.result === "failed" ? last : null;
-  return html`<div class="crumbs row"><span class="grow">${p ? html`<a href="#/milestones">Milestones</a> › <${NamedLink} kind="milestone" r=${m} /> › <${NamedLink} kind="plan" r=${p} />` : html`<span>No plan: the human's direct call</span>`}</span>
+  return html`<div class="crumbs row"><span class="grow">${p ? html`<a href="#/milestones">Milestones</a> › <${NamedLink} kind="milestone" r=${m} /> › <${NamedLink} kind="plan" r=${p} />` : html`<a href="#/tasks">Tasks</a> › executive intervention`}</span>
       ${embedded ? html`<a class="btn" href=${`#/task/${t.id}`}>Task page →</a>` : null}</div>
     <${Titled} kind="task" id=${t.id}><${EditableLine} text=${t.subject} save=${t.status === "open" ? saveTask(t.id, "subject") : null} disabled=${running} /></${Titled}>
     <div class="row sub">${running ? html`<${Pill} status="running" />` : html`<${Pill} status=${d.taskState(t)} />`}<${Kind} kind=${t.kind} />

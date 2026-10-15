@@ -69,9 +69,9 @@ def apply(project, op):
     if kind == "task_add":
         subject = text(op.get("subject"), "the subject")
         k = op.get("kind", "work")
-        if k not in ("work", "plan"):
-            raise EditError("kind must be work or plan")
-        tid = project.task_add(int(op["plan"]), subject.strip(), text(op.get("body"), "the body"), prio(op.get("priority")), k)
+        if k not in ("work", "plan", "exec"):
+            raise EditError("kind must be work, plan or exec")
+        tid = project.task_add(None if k == "exec" else int(op["plan"]), subject.strip(), text(op.get("body"), "the body"), prio(op.get("priority")), k)
         return f"task {tid} added: {subject.strip()}", tid
     if kind == "task_edit":
         fields = {}
@@ -105,8 +105,8 @@ def apply(project, op):
         project.resolve(int(op["id"]), irrelevant=reason)
         return f"decision {op['id']} irrelevant: {short(reason)}", None
     if kind == "summary_request":
-        tid, new = project.summary_request()
-        return (f"task {tid} queued: {pm.SUMMARY_SUBJECT}" if new else f"task {tid} already queued"), tid
+        tid = project.summary_request()
+        return f"task {tid} queued: {pm.SUMMARY_SUBJECT}", tid
     raise EditError(f"unknown edit {kind!r}")
 
 

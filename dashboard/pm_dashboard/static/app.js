@@ -4,7 +4,8 @@ import { Pill, Elapsed, Time } from "/ui.js";
 import { Overview, Queue, Milestones, Milestone, Plan, Task, Decisions, Decision, Runs } from "/views.js";
 import { Live } from "/live.js";
 import { MilestoneAdded } from "/add.js";
-import { Summary, openSummary, isSummary } from "/summary.js";
+import { Summary } from "/summary.js";
+import { Tasks } from "/tasks.js";
 import { useNotifications, NotifyButton } from "/notify.js";
 import { UsageLine } from "/usage.js";
 import { Celebrate } from "/celebrate.js";
@@ -45,9 +46,9 @@ function useState2() {
   return { state, log, online };
 }
 
-const NAV = [["live", "Live"], ["overview", "Overview"], ["queue", "Queue"], ["milestones", "Milestones"],
+const NAV = [["live", "Live"], ["overview", "Overview"], ["queue", "Queue"], ["tasks", "Tasks"], ["milestones", "Milestones"],
   ["decisions", "Decisions"], ["summary", "Summary"], ["runs", "Runs"]];
-const SECTION = { added: "milestones", milestone: "milestones", plan: "milestones", task: "milestones", decision: "decisions" };
+const SECTION = { added: "milestones", milestone: "milestones", plan: "milestones", task: "tasks", decision: "decisions" };
 
 function Search({ d }) {
   const [q, setQ] = useState("");
@@ -109,10 +110,9 @@ function App() {
     setHome(d.milestones.length && (d.running || recent) ? "live" : "overview");
   }, [r0.page, !!d]);
   if (r.page === "home") r = { ...r, page: home || "overview" };
-  const page = r.page === "task" && d && d.task.get(r.id) && isSummary(d.task.get(r.id)) ? "summary" : SECTION[r.page] || r.page;
+  const page = SECTION[r.page] || r.page;
   const pending = d ? d.decisions.filter((x) => x.status === "pending").length : 0;
-  const summarizing = d && openSummary(d);
-  const View = { added: MilestoneAdded, live: Live, summary: Summary, overview: Overview, queue: Queue, milestones: Milestones, milestone: Milestone, plan: Plan, task: Task,
+  const View = { added: MilestoneAdded, live: Live, summary: Summary, tasks: Tasks, overview: Overview, queue: Queue, milestones: Milestones, milestone: Milestone, plan: Plan, task: Task,
     decisions: Decisions, decision: Decision, runs: Runs }[r.page];
   const root = state ? state.root.split("/").pop() : "";
   useEffect(() => { document.title = root ? `${root} - PM Dashboard` : "PM Dashboard"; }, [root]);
@@ -131,7 +131,6 @@ function App() {
     </header>
     <nav class="nav">${NAV.map(([k, label]) => html`<a href=${`#/${k}`} class=${page === k ? "on" : ""}>
       <span>${label}</span>${k === "decisions" && pending ? html`<span class="tag">${pending}</span>` : null}
-      ${k === "summary" && summarizing ? html`<span class="tag new">${d.running && d.running.task_id === summarizing.id ? "writing" : "queued"}</span>` : null}
       ${k === "live" && d && d.running ? html`<span class="livedot" title="a worker is running"></span>` : null}</a>`)}</nav>
     <main class=${"main" + (page === "live" ? " full" : "")}>
       ${state && state.error ? html`<div class="banner error"><b>Can't read the database.</b> <pre>${state.error}</pre>
