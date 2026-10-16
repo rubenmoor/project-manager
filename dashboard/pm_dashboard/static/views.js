@@ -41,6 +41,15 @@ function Banners({ d }) {
       needs a sign-off (${s.head_signoff}); <code>pm run</code> asks for it next.</div>` : null}`;
 }
 
+// The running run resumed an earlier one's Claude session: which, and how far along the chain (warm_handoff).
+export function Handoff({ d, r }) {
+  const prev = r.continues_run != null && d.run.get(r.continues_run);
+  if (!prev) return null;
+  const c = d.chain(r), max = d.state.warm_handoff;
+  return html`<div class="muted handoff">↳ same Claude session as <${TaskLink} t=${d.task.get(prev.task_id)} /> (run ${prev.id}),
+    task ${c.indexOf(r) + 1}${max ? ` of at most ${max}` : ""}</div>`;
+}
+
 function RunningCard({ d }) {
   const r = d.running;
   if (!r && (d.stale || d.crash)) return html`<div class="card"><div class="row"><${Pill} status="failed" label="pm not running" />
@@ -53,6 +62,7 @@ function RunningCard({ d }) {
     <div class="row"><${Pill} status="running" /><span class="sub">task ${t.id}, run ${r.id}, for <${Elapsed} start=${r.started_at} /></span></div>
     <div style="margin-top:6px;font-weight:600"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /></div>
     <div class="muted" style="margin-top:2px">${t.plan_id != null ? html`<${Named} kind="plan" r=${d.plan.get(t.plan_id)} /> · ` : null}<a href=${`#/task/${t.id}?log`}>live log</a></div>
+    <${Handoff} d=${d} r=${r} />
   </div>`;
 }
 
@@ -248,14 +258,20 @@ function RunsTable({ d, runs, showTask = false }) {
   if (!runs.length) return html`<div class="empty">No runs.</div>`;
   return html`<div class="tablewrap"><table>
     <thead><tr><th>run</th>${showTask ? html`<th>task</th>` : null}<th>started</th><th class="r">duration</th><th>result</th>
-      <th class="r">turns</th><th class="r">tokens</th><th class="r">cost</th><th>model</th><th>commit</th></tr></thead>
+      <th class="r">turns</th><th class="r">tokens</th><th class="r">cost</th><th title="warm hand-off: runs that worked one Claude session, one after the other">session</th><th>model</th><th>commit</th></tr></thead>
     <tbody>${[...runs].reverse().map((r) => html`<tr>
       <td class="num muted">${r.id}</td>
       ${showTask ? html`<td><${TaskLink} t=${d.task.get(r.task_id)} /></td>` : null}
       <td class="num">${stamp(r.started_at)}</td>
       <td class="r"><${Elapsed} start=${r.started_at} end=${r.ended_at || (d.stale === r && d.crash ? d.crash.at : null)} /></td>
-      <td>${d.stale === r ? html`<${Pill} status="failed" label="crashed" />` : html`<${Pill} status=${r.result} />`}${r.continues_run ? html`<div class="muted" style="font-size:12px">continues run ${r.continues_run}</div>` : null}${r.reason ? html`<div class="muted reason" style="font-size:12px;max-width:520px" title=${r.reason}>${reasonText(r)}</div>` : null}</td>
+      <td>${d.stale === r ? html`<${Pill} status="failed" label="crashed" />` : html`<${Pill} status=${r.result} />`}${r.reason ? html`<div class="muted reason" style="font-size:12px;max-width:520px" title=${r.reason}>${reasonText(r)}</div>` : null}</td>
       <td class="r num">${r.turns ?? ""}</td><td class="r num">${tokens(d.tokens(r))}</td><td class="r num">${usd(r.cost_usd)}</td>
+      <td class="num muted">${(() => {
+        const c = d.chain(r);
+        if (c.length < 2) return "";
+        const i = c.indexOf(r), prev = c[i - 1];
+        return html`<span class="tag" title=${prev ? `resumed the session of run ${prev.id} (task ${prev.task_id})` : `its session went on in run ${c[1].id} (task ${c[1].task_id})`}>${i ? "↳ " : ""}${i + 1}/${c.length}</span>`;
+      })()}</td>
       <td class="muted">${r.model || ""}</td><td class="mono muted">${r.base_commit ? r.base_commit.slice(0, 7) : ""}</td></tr>`)}</tbody></table></div>`;
 }
 
@@ -582,6 +598,10 @@ export function Runs({ d }) {
   const cacheRead = finished.reduce((s, r) => s + (r.cache_read_tokens || 0), 0);
   const secs = finished.reduce((s, r) => s + seconds(r.started_at, r.ended_at), 0);
   const shown = res === "all" ? d.runs : d.runs.filter((r) => r.result === res);
+  // Warm hand-off: done work runs that resumed a session against those that started fresh.
+  const work = finished.filter((r) => r.result === "done" && kindOf(r) === "work");
+  const resumed = work.filter((r) => r.continues_run != null), fresh = work.filter((r) => r.continues_run == null);
+  const avg = (rs) => (rs.length ? d.cost(rs) / rs.length : 0);
   return html`<h1>Runs and cost</h1>
     <div class="tiles">
       <${Tile} label="Cost" value=${usd(d.cost(finished))} sub=${`${finished.length} runs`} />
@@ -589,6 +609,8 @@ export function Runs({ d }) {
       <${Tile} label="Tokens" value=${tokens(tok) || "0"} sub=${tok ? `${Math.round((100 * cacheRead) / tok)}% cache reads` : ""} />
       <${Tile} label="Failed" value=${finished.filter((r) => r.result === "failed").length}
         sub=${`${finished.filter((r) => r.result === "limit").length} usage limits`} />
+      <${Tile} label="Warm hand-off" value=${resumed.length ? usd(avg(resumed)) : "–"}
+        sub=${resumed.length ? `per resumed work run (${resumed.length}); fresh: ${usd(avg(fresh))} (${fresh.length})` : "no resumed run yet"} />
     </div>
     <div class="card"><b>Cost per day</b><${Bars} data=${series} fmt=${usd} /></div>
     <div class="grid2" style="margin-top:12px">

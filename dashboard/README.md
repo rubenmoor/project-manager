@@ -17,7 +17,7 @@ In the project's git repository (the one with `project-manager.toml`):
 
 ## Views
 
-- **Live** (home while pm runs): left, one timeline: queue above (next nearest), the running task between two rules, done and dropped tasks below (newest first); a click selects a task (outline); right, the selected task's task page (below), with a link to it
+- **Live** (home while pm runs): left, one timeline: queue above (next nearest), the running task between two rules (a warm hand-off: "same Claude session as task M (run N), task k of at most `warm_handoff`"), done and dropped tasks below (newest first); a click selects a task (outline); right, the selected task's task page (below), with a link to it
   - running task (or what pm run is doing) pinned in the middle; queue and done/dropped scroll on their own; queue opens at "next"
   - "blocked by decisions" (queue header, off by default, remembered in the browser): open tasks waiting for pending decisions, in purple, where they would queue once unblocked, with the decisions they wait for
   - failed last run: a red "failed" pill in the queue; with no worker running, "pm run stopped: task N failed" and the likely cause
@@ -41,7 +41,7 @@ In the project's git repository (the one with `project-manager.toml`):
   - custom report: the question quoted, then the one-paragraph answer
   - executive summary: reads the previous one and reports the delta
   - resource use report: per category (criteria below its name) tasks, time, tokens, cost and shares, bars by time
-- **Runs**: cost per day, per task kind, per milestone; done and dropped tasks per cost bracket (total over their runs); every run
+- **Runs**: average cost of done work runs that resumed a session (warm hand-off) against fresh ones; cost per day, per task kind, per milestone; done and dropped tasks per cost bracket (total over their runs); every run, with its place in a shared Claude session ("↳ 2/3")
 - Status line (bottom): Claude account usage of the 5-hour window and the week (%, reset time), tokens and cost of pm's workers in each window; a marker in each bar shows how much of the window has passed: bar green while usage is behind it (budget left at the reset), orange once ahead (runs out before the reset)
 - Milestone implemented: a message with fireworks (no sound), shown once the tab is visible again; stays until "Yay!"; remembered per project in the browser
 - Notifications (`notify` in the top bar): a new pending decision, a failed run, `pm run` stopped or done

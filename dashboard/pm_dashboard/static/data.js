@@ -5,7 +5,7 @@ export function index(state) {
   const d = {
     state, milestones: t.milestone, plans: t.plan, tasks: t.task, decisions: t.decision, runs: t.run, summaries: t.summary || [],
     reports: t.resource_use_report || [], customs: t.custom_report || [],
-    milestone: by(t.milestone), plan: by(t.plan), task: by(t.task), decision: by(t.decision),
+    milestone: by(t.milestone), plan: by(t.plan), run: by(t.run), task: by(t.task), decision: by(t.decision),
     queue: state.queue, queuePos: new Map(state.queue.map((id, i) => [id, i])),
     // A 'running' row whose pm run is gone (it crashed) is stale, not running.
     running: (state.pm_run != null && t.run.find((r) => r.result === "running")) || null,
@@ -63,6 +63,14 @@ export function index(state) {
   d.cost = (runs) => runs.reduce((s, r) => s + (r.cost_usd || 0), 0);
   d.tokens = (r) => (r.input_tokens || 0) + (r.output_tokens || 0) + (r.cache_read_tokens || 0) + (r.cache_creation_tokens || 0);
   d.taskRuns = (task) => d.runsOf.get(task.id) || [];
+  // Warm hand-off: the runs of one Claude session, oldest first; [r] if r is in none.
+  const next = new Map(t.run.filter((r) => r.continues_run != null).map((r) => [r.continues_run, r]));
+  d.chain = (r) => {
+    const c = [r];
+    for (let p = r; p.continues_run != null && (p = d.run.get(p.continues_run)); ) c.unshift(p);
+    for (let n = next.get(r.id); n; n = next.get(n.id)) c.push(n);
+    return c;
+  };
   d.milestoneTasks = (m) => (d.plansOf.get(m.id) || []).flatMap((p) => d.tasksOf.get(p.id) || []);
   d.plansSorted = (m) => [...(d.plansOf.get(m.id) || [])].sort((a, b) => (b.priority ?? 0) - (a.priority ?? 0) || a.id - b.id);
   return d;

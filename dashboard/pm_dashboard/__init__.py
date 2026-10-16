@@ -96,7 +96,8 @@ def read_state(project, last_good=None):
     head = git_head(project)
     dirty = [l[3:] for l in project.git("status", "--porcelain").splitlines()]
     base = {"root": str(project.root), "db": project.db, "head": head, "dirty": dirty, "read_at": pm.now(),
-            "schema_version": pm.SCHEMA_VERSION, "planning_priority": project.config.get("planning_priority")}
+            "schema_version": pm.SCHEMA_VERSION, "planning_priority": project.config.get("planning_priority"),
+            "warm_handoff": project.config.get("warm_handoff")}
     if not project.db_path.exists():               # written by the first pm command, e.g. adding a milestone
         return base | {"tables": {t: [] for t in TABLES}, "queue": [], "head_signoff": None, "done_plans": [], "errors": []}
     try:

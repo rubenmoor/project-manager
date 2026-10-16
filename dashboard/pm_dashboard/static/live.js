@@ -2,7 +2,7 @@
 // tasks below, newest first); right, the selected task as on its task page. A click selects (outline).
 import { html, useState, useEffect, useRef, useLayoutEffect } from "/vendor/preact-htm.js";
 import { Pill, Kind, Prio, Elapsed, Time, Named } from "/ui.js";
-import { Task } from "/views.js";
+import { Task, Handoff } from "/views.js";
 import { usd } from "/data.js";
 
 const SHOW_BLOCKED = "pm-live-blocked";
@@ -94,7 +94,8 @@ export function Live({ d }) {
         ${current ? html`<${Item} id=${current.id} sel=${sel} select=${setPicked} cls="now">
             <div class="grow"><div class="row"><${Pill} status="running" /><span class="sub">task ${current.id} · <${Elapsed} start=${r.started_at} /></span></div>
             <div class="tl-current-subject"><${Named} kind="task" r=${current} /> <${Kind} kind=${current.kind} /></div>
-            <div class="muted">${current.plan_id != null ? html`<${Named} kind="plan" r=${d.plan.get(current.plan_id)} /> · <${Named} kind="milestone" r=${d.milestoneOfTask(current)} />` : "executive intervention"}</div></div></${Item}>`
+            <div class="muted">${current.plan_id != null ? html`<${Named} kind="plan" r=${d.plan.get(current.plan_id)} /> · <${Named} kind="milestone" r=${d.milestoneOfTask(current)} />` : "executive intervention"}</div>
+            <${Handoff} d=${d} r=${r} /></div></${Item}>`
           : busy ? html`<div class="tl-idle tl-busy">${busy.spin ? html`<span class="spinner"></span>` : null}<div>
             <div class="sub">${busy.text}</div><div class="muted">${busy.sub}</div></div></div>`
           : crashed ? html`<div class="tl-idle tl-crashed"><div class="sub"><b>pm not running</b>: <code>pm run</code> crashed${crashed.run ? html` during <a href=${`#/task/${crashed.run.task_id}`} onClick=${(e) => { e.preventDefault(); setPicked(crashed.run.task_id); }}>task ${crashed.run.task_id}</a>` : ""}${crashed.at ? html`, <${Time} ts=${crashed.at} />` : ""}.</div>
