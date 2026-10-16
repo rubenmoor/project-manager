@@ -1,4 +1,4 @@
-import { html, useState, useEffect, useRef } from "/vendor/preact-htm.js";
+import { html, useState, useEffect, useRef, useLayoutEffect } from "/vendor/preact-htm.js";
 import { Markdown, InlineMd, Pill, Kind, Prio, TaskLink, Id, Ref, Named, NamedLink, Titled, Time, Elapsed, Tile, Progress, Bars, Fold } from "/ui.js";
 import { usd, tokens, stamp, duration, seconds, day } from "/data.js";
 import { EditableBody, EditableLine, PrioEdit, post, autofocus } from "/editor.js";
@@ -254,21 +254,19 @@ export const reasonText = (r) => r.result === "failed" ? r.reason : r.reason.spl
 
 const MAX_LINES = 5000;
 
-// The nearest ancestor that scrolls: a live log follows its end there.
-function scroller(el) {
-  for (let e = el && el.parentElement; e; e = e.parentElement)
-    if (/auto|scroll/.test(getComputedStyle(e).overflowY)) return e;
-  return document.scrollingElement;
-}
-
 // One fetch at a time: a size change while one is out fetches again when it returns, from where it ended.
-export function Log({ d, t, live, run = null }) {
+// A box 20 lines high that opens at its end and follows it while scrolled to the end. reveal: scroll it into view once.
+export function Log({ d, t, live, run = null, reveal = false }) {
   const [lines, setLines] = useState(null);
   const [cut, setCut] = useState(0);
   const f = useRef({ gen: 0, next: 0, busy: false, again: false });
-  const box = useRef(null);
+  const box = useRef(null), stick = useRef(true);
+  useLayoutEffect(() => {
+    if (box.current && stick.current) box.current.scrollTop = box.current.scrollHeight;
+  }, [lines]);
+  useEffect(() => { if (reveal && lines && box.current) box.current.scrollIntoView({ block: "nearest" }); }, [reveal, lines === null]);
   const size = live && d.state.__log && d.state.__log.task === t.id ? d.state.__log.size : null;
-  useEffect(() => { f.current = { gen: f.current.gen + 1, next: 0, busy: false, again: false }; setLines(null); setCut(0); }, [t.id, run]);
+  useEffect(() => { f.current = { gen: f.current.gen + 1, next: 0, busy: false, again: false }; stick.current = true; setLines(null); setCut(0); }, [t.id, run]);
   useEffect(() => {
     const s = f.current;
     if (s.busy) { s.again = true; return; }
@@ -277,8 +275,8 @@ export function Log({ d, t, live, run = null }) {
       s.busy = true;
       fetch(`/api/log/${t.id}?from=${s.next}${run != null ? `&run=${run}` : ""}`).then((r) => r.json()).then((j) => {
         if (f.current.gen !== gen) return;
-        const sc = live && box.current ? scroller(box.current) : null;
-        const stick = sc && sc.scrollHeight - sc.scrollTop - sc.clientHeight < 40;
+        const b = box.current;
+        stick.current = !b || b.scrollHeight - b.scrollTop - b.clientHeight < 40;
         s.next = j.next;
         setLines((old) => {
           const all = (old || []).concat(j.lines);
@@ -286,7 +284,6 @@ export function Log({ d, t, live, run = null }) {
           setCut((c) => c + all.length - MAX_LINES);
           return all.slice(-MAX_LINES);
         });
-        if (stick) requestAnimationFrame(() => (sc.scrollTop = sc.scrollHeight));
       }).catch(() => {}).finally(() => {
         if (f.current.gen !== gen) return;
         s.busy = false;
@@ -351,7 +348,7 @@ export function Task({ d, id, query, embedded = false }) {
     ${t.status !== "open" ? html`<${Commit} d=${d} t=${t} />` : null}
     <h2>Runs (${runs.length}${runs.length ? `, ${usd(d.cost(runs))}` : ""})</h2>
     <${RunsTable} d=${d} runs=${runs} />
-    ${runs.length ? html`<${Fold} key=${"log" + t.id} head=${html`<h2>Worker log${running ? " (live)" : fail ? ` (failed run ${fail.id})` : ""}</h2>`} open=${query === "log"}><${Log} d=${d} t=${t} live=${running} /></${Fold}>` : null}`;
+    ${runs.length ? html`<h2>Worker log${running ? " (live)" : fail ? ` (failed run ${fail.id})` : ""}</h2><${Log} d=${d} t=${t} live=${running} reveal=${query === "log"} />` : null}`;
 }
 
 function HoldButton({ m }) {

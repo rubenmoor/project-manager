@@ -26,7 +26,8 @@ In the project's git repository (the one with `project-manager.toml`):
 - **Task**: queue position or what blocks it, body, note, priority, decisions; after a failed run: pm's summary
   - done or dropped: rows its commit touched (Affected: tasks created first; tasks, plans, decisions, milestones: new, edited, done, dropped, answered, waits for …; each styled by kind; says why when empty), files changed, the full diff (syntax highlighted)
   - runs, worker log (live while it runs, following its end)
-  - diff and log start hidden; "show" shows them in full, no inner scroll box (the log open via `?log`)
+  - worker log always shown: a box 20 lines high, opened at its end, following it while scrolled there; scroll up for earlier lines (`?log` scrolls to it)
+  - diff starts hidden; "show" shows it in full
 - **Decisions**: pending sign-offs and questions by milestone, the ones holding up the most important work first; closed ones: the decision log (as `pm decision list --answered`) or all; tags for one-offs, workers' own choices, superseded ones; a decision's page shows consequences and supersede links; a pending one is resolved there (below)
 - **Reports**: on top a button per kind, `pm summary request` and `pm report request` (exec tasks, priority 10000); while one is open its button is disabled and links to it; then the custom report form, `pm report ask` (open questions listed with their task); below every report of every kind, newest first
   - custom report: the question quoted, then the one-paragraph answer

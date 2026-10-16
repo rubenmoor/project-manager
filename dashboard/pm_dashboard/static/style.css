@@ -217,8 +217,8 @@ td.subject { min-width: 220px; }
 .grid2 { display: grid; gap: 12px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
 
 /* log */
-.log { background: var(--code); border-radius: 8px; padding: 10px 12px; font-family: var(--mono); font-size: 12px;
-       white-space: pre-wrap; overflow-wrap: anywhere; }
+.log { background: var(--code); border-radius: 8px; padding: 10px 12px; font-family: var(--mono); font-size: 12px; line-height: 18px;
+       white-space: pre-wrap; overflow-wrap: anywhere; box-sizing: content-box; height: calc(20 * 18px); overflow-y: auto; }
 .log .tool { color: var(--ink-2); }
 .log .res { color: var(--good-text); font-weight: 600; }
 
