@@ -1,6 +1,6 @@
 # pm: instructions for agents
 
-`pm` keeps a project's work as **milestones → plans → tasks**, plus **decisions** that only the human can make. Everything lives in `tasks.sql` (SQL text, tracked by git) and is read and changed only through `pm` commands. `pm run` works the queue one task at a time with a `claude -p` worker; as a worker you are one task of that run (environment `PM_TASK=<your task>`).
+`pm` keeps a project's work as **milestones → plans → tasks**, plus **decisions** that only the human can make. Everything lives in `tasks.sql` (SQL text, tracked by git) and is read and changed only through `pm` commands. `pm run` works the queue one task at a time with a `claude -p` worker; as a worker you are one task of that run (environment `PM_TASK=<your task>`). A work task right after a done work task of the same plan may continue that task's Claude session (warm hand-off): what you learned of the code still holds, but only the task in your newest prompt is yours.
 
 ## Rules
 
@@ -127,6 +127,9 @@ EOF
 pm task add 2 "Docs for the export endpoint" --priority 690 <<'EOF'
 …
 EOF
+pm task add 2 "Untangle the cache invalidation" --model opus <<'EOF'   # needs deep reasoning
+…
+EOF
 pm task set 6 [--subject …] [--body -] [--priority N|none] [--web|--no-web] [--model opus|none]   # open, not running
 pm task priority 6 710          # none: back to the plan's
 pm task done 5 "2026-10-10, app/api/export.py, tests/test_export.py"
@@ -240,6 +243,8 @@ pm task add --exec "<subject>" [--priority N] < body.md
 pm summary request ; pm report request # queue an executive summary / resource use report; show, list
 pm report ask "<question>"             # queue a custom one-paragraph report
 ```
+
+Settings in `project-manager.toml`: `[models]` (the worker's model per task kind, `escalate` after a failure), `warm_handoff` (tasks per resumed Claude session, 0: off).
 
 Record only answers the human gave.
 
