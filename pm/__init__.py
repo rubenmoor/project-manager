@@ -31,7 +31,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 69  # bump by one with every commit (AGENTS.md)
+VERSION = 70  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -554,7 +554,7 @@ def load_config(root):
     w = config["worker"]
     if not isinstance(w, list) or not w or not all(isinstance(a, str) for a in w):
         errors.append("worker must be a non-empty list of strings")
-    errors += [f"{k} must be an integer >= 0" for k in ("limit_margin_minutes", "warm_handoff")
+    errors += [f"{k} must be an integer >= 0" for k in ("limit_margin_minutes", "warm_handoff", "push_minutes")
                if not isinstance(config[k], int) or isinstance(config[k], bool) or config[k] < 0]
     errors += [f"{k} must be a string" for k in ("log_dir", "editor") if not isinstance(config[k], str)]
     if not isinstance(config["max_parallel"], int) or isinstance(config["max_parallel"], bool) or config["max_parallel"] < 1:
@@ -703,6 +703,7 @@ class Project:
         self.limit_until = None     # a worker waits for the usage limit's reset: start no other task until then
         self.procs = set()          # the running workers' process ids
         self.finished = None        # `pm run`: queue.Queue of (work tree, task id, result, message)
+        self.next_push = 0          # `pm run`: time.monotonic() of the next `git push` (push_minutes)
 
     @property
     def top(self):
@@ -2750,6 +2751,7 @@ class Project:
             if "" not in running:
                 self.merge_worktrees()
                 self.close_and_commit()
+                self.push()
             if not code and (errors := self.validate()):
                 self.say("the database has errors:\n  " + "\n  ".join(errors))
                 code = 1
@@ -2785,9 +2787,43 @@ class Project:
             if msg != waiting:
                 self.say(msg + " Waiting for tasks (Ctrl-C or `pm stop` ends it).")
                 waiting = msg
-            if not self.wait_for_change(timeout=30 if q else None):
+            due = self.next_push - time.monotonic() if self.config["push_minutes"] and self.unpushed() else None
+            if not self.wait_for_change(timeout=min((t for t in (30 if q else None, due) if t is not None), default=None)):
                 self.say("Stopped as asked.")
                 return 0
+
+    def upstream(self):
+        """The trunk's branch's upstream as (remote, ref), or None (detached HEAD, no upstream)."""
+        try:
+            branch = self.git("symbolic-ref", "--short", "-q", "HEAD").strip()
+            return self.git("config", f"branch.{branch}.remote").strip(), self.git("config", f"branch.{branch}.merge").strip()
+        except subprocess.CalledProcessError:
+            return None
+
+    def unpushed(self):
+        """The trunk has commits its upstream doesn't."""
+        try:
+            return self.upstream() is not None and self.git("rev-list", "--count", "@{u}..HEAD").strip() != "0"
+        except subprocess.CalledProcessError:
+            return False
+
+    def push(self):
+        """`git push` of the trunk's branch to its upstream, at most every push_minutes (0: never), never forced; a
+        failure is said and retried next time."""
+        if not (every := self.config["push_minutes"]) or time.monotonic() < self.next_push or not self.unpushed():
+            return
+        self.next_push = time.monotonic() + every * 60
+        remote, ref = self.upstream()
+        env = os.environ | {"GIT_TERMINAL_PROMPT": "0"}
+        env.setdefault("GIT_SSH_COMMAND", "ssh -o BatchMode=yes")
+        try:
+            subprocess.run(["git", "push", "-q", remote, f"HEAD:{ref}"], cwd=self.root, env=env, stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, check=True, timeout=300)
+            self.say(f"pushed to {remote}")
+        except subprocess.CalledProcessError as e:
+            self.say(f"git push to {remote} failed, retrying in {every} min: {e.stderr.strip()}")
+        except subprocess.TimeoutExpired:
+            self.say(f"git push to {remote} timed out, retrying in {every} min")
 
     def start_tasks(self, running, once):
         """Start the first queued task of the trunk and of each work tree that runs nothing, within the lowest milestone

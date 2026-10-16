@@ -23,6 +23,10 @@ limit_margin_minutes = 5
 # session, then a fresh one; 0 or 1: every task fresh. Still one run, one commit and one cost record per task.
 warm_handoff = 3
 
+# `pm run` pushes the trunk's branch to its upstream (`git push`, never forced) at most every this many minutes, only
+# while no task runs in the trunk; a failed push is retried next time. 0: never. Work tree branches aren't pushed.
+push_minutes = 60
+
 # Work trees ([worktrees] at the end): every task but the human's exec tasks and pm's planning and cleanup tasks
 # (they run in the trunk, the project's own checkout) runs in one of them: <worktree_dir>/<name>, on the branch
 # pm/wt/<name>, kept between tasks. Before a task pm merges the trunk into it; after the task, pm commits there and
