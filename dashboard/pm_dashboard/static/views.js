@@ -21,6 +21,15 @@ function TaskPrio({ d, t }) {
     save=${t.status === "open" ? saveTask(t.id, "priority") : null} disabled=${runningId(d) === t.id} />`;
 }
 
+// The plain-English intro on top; the technical body right below it, hidden behind a button unless there's no intro.
+function Intro({ intro, saveIntro, children }) {
+  const [open, setOpen] = useState(!intro);
+  return html`${intro || saveIntro ? html`<div class="intro">${saveIntro ? html`<${EditableBody} text=${intro} save=${saveIntro} empty="No intro." ph="Intro: plain English for an outsider" />`
+      : html`<div class="card"><${Markdown} text=${intro} /></div>`}</div>` : null}
+    ${intro && children ? html`<button class="iconbtn details-btn" onClick=${() => setOpen(!open)}>${open ? "Hide details" : "Show details"}</button>` : null}
+    ${open ? html`<div class="details-body">${children}</div>` : null}`;
+}
+
 const KINDS = ["work", "plan", "masterplan", "split", "cleanup", "revise", "investigate", "exec"];
 
 function Banners({ d }) {
@@ -224,11 +233,12 @@ export function Plan({ d, id }) {
       save=${planSave(d, p.id, "priority")} /></span>
       <span>· created ${stamp(p.created_at)}</span>${p.created_by_task != null ? html`<span>· by <a href=${`#/task/${p.created_by_task}`}>task ${p.created_by_task}</a></span>` : null}</div>
     ${d.held(m) && !d.planDone.has(p.id) ? html`<div class="hold-note">On hold with <a href=${`#/milestone/${m.id}`}>milestone ${m.id}</a>: its tasks stay out of the queue.</div>` : null}
+    <${Intro} key=${p.id} intro=${p.intro} saveIntro=${planSave(d, p.id, "intro")}>
+      <${EditableBody} text=${p.body} save=${planSave(d, p.id, "body")} />
+      <div class="sub" style="margin-top:4px">${d.planDone.has(p.id)
+        ? "Done: no open task, nor in the plans below it. It can't be changed; add a new plan instead."
+        : html`A new subject or body queues "create tasks for plan ${p.id}: ${p.subject}" again and the revision of the plans below it.`}</div></${Intro}>
     <${Progress} ...${counts(tasks)} />
-    <div style="margin-top:12px"><${EditableBody} text=${p.body} save=${planSave(d, p.id, "body")} /></div>
-    <div class="sub" style="margin-top:4px">${d.planDone.has(p.id)
-      ? "Done: no open task, nor in the plans below it. It can't be changed; add a new plan instead."
-      : html`A new subject or body queues "create tasks for plan ${p.id}: ${p.subject}" again and the revision of the plans below it.`}</div>
     <h2>Tasks</h2>
     <div class="tablewrap">${tasks.length ? html`<${TaskRows} d=${d} tasks=${tasks} />` : html`<div class="empty" style="padding:10px 12px">No tasks yet.</div>`}</div>
     ${d.planDone.has(p.id) ? null : html`<div style="margin-top:12px"><${AddButton} kind="task" parent=${p.id} /></div>`}`;
@@ -426,6 +436,7 @@ function PendingNewest({ d, xs }) {
       <td style="width:56px"><${Id} kind="decision" id=${x.id} /></td>
       <td class="subject"><a href=${`#/decision/${x.id}?view=newest`}>${x.subject}</a> ${x.signoff ? html`<span class="tag signoff">${x.signoff}</span>` : null}
         ${stalls ? html` <span class="tag signoff" title="its tasks have a higher priority than the head of the queue">would run next</span>` : null}
+        ${x.intro ? html`<div class="intro-line">${x.intro}</div>` : null}
         ${x.options.length ? html`<div class="muted" style="font-size:12px">${x.options.join(" / ")}</div>` : null}
         <div class="ctx">${ms.length ? html`<span>${ms.map((m, i) => html`${i ? ", " : ""}<${NamedLink} kind="milestone" r=${m} />`)}</span>` : null}
           ${waiting.length ? html`<span>holds up ${waiting.map((t, i) => html`${i ? ", " : ""}<${TaskLink} t=${t} />`)} (prio ${top})</span>`
@@ -441,6 +452,7 @@ function PendingGroups({ d, xs }) {
     <div class="tablewrap"><table><tbody>${its.map(({ x, waiting, top, stalls }) => html`<tr>
       <td style="width:56px"><${Id} kind="decision" id=${x.id} /></td>
       <td class="subject"><a href=${`#/decision/${x.id}`}>${x.subject}</a> ${x.signoff ? html`<span class="tag signoff">${x.signoff}</span>` : null}
+        ${x.intro ? html`<div class="intro-line">${x.intro}</div>` : null}
         ${x.options.length ? html`<div class="muted" style="font-size:12px">${x.options.join(" / ")}</div>` : null}</td>
       <td style="width:200px">${waiting.length ? html`holds up ${waiting.length} task${waiting.length > 1 ? "s" : ""}, prio ${top}` : html`<span class="muted">holds up nothing</span>`}
         ${stalls ? html`<div><span class="tag signoff" title="its tasks have a higher priority than the head of the queue">would run next</span></div>` : null}</td>
@@ -494,7 +506,7 @@ export function Decisions({ d, query }) {
     ${closed.length ? list(closed) : html`<div class="empty">None yet.</div>`}`;
 }
 
-const KNOWN = new Set(["id", "subject", "status", "options", "body", "answer", "reason", "created_at", "closed_at",
+const KNOWN = new Set(["id", "subject", "status", "options", "body", "intro", "answer", "reason", "created_at", "closed_at",
   "created_by_task", "signoff", "signoff_view", "kind", "decided_by_task", "consequences"]);
 
 const links = (d, xs, verb) => xs.map((s) => html`<div class="sub">${(s.note ? "Partly " + verb.toLowerCase() : verb) + " "}<a href=${`#/decision/${s.id}`}>decision ${s.id}: ${(d.decision.get(s.id) || {}).subject}</a>${s.note ? ` (${s.note})` : ""}</div>`);
@@ -529,12 +541,12 @@ export function Decision({ d, id, query }) {
       ${!x.signoff ? html`<span class="tag">${x.kind === "once" ? "once: not in the log" : "rule"}</span>` : null}
       ${extra.map(([k, v]) => html`<span class="tag">${k}: ${String(v)}</span>`)}</div>
     ${links(d, d.supersededBy.get(x.id) || [], "Superseded by")}${links(d, d.supersedes.get(x.id) || [], "Supersedes")}
+    <${Intro} key=${x.id} intro=${x.intro}>${x.body.trim() || !x.signoff_view ? html`<div class="card"><${Markdown} text=${x.body} empty="No body." /></div>` : null}</${Intro}>
     ${x.status !== "pending" ? html`<h3>${x.status === "answered" ? "Answer" : "Irrelevant"}</h3>
       <div class="sub">${stamp(x.closed_at)}${x.decided_by_task != null ? html`, the own choice of <a href=${`#/task/${x.decided_by_task}`}>task ${x.decided_by_task}</a>` : null}</div>
       <div class="card"><${Markdown} text=${x.answer || x.reason} /></div>` : null}
     ${x.consequences ? html`<${Consequences} text=${x.consequences} />` : null}
     ${x.options.length && !pending ? html`<h3>Options</h3><ol class="options">${x.options.map((o, i) => html`<li class=${i === 0 ? "rec" : ""}><${InlineMd} text=${o} /></li>`)}</ol>` : null}
-    ${x.body.trim() || !x.signoff_view ? html`<div class="card" style="margin-top:12px"><${Markdown} text=${x.body} empty="No body." /></div>` : null}
     ${x.signoff_view ? html`<h2>What it approves</h2><div class="card"><${Markdown} text=${x.signoff_view} /></div>` : null}
     ${pending ? html`<${Resolve} key=${x.id} d=${d} x=${x} next=${nextPending(d, x, newest)} view=${newest ? "?view=newest" : ""} />` : null}
     <h2>Tasks waiting for it (${waiting.length})</h2>

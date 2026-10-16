@@ -37,7 +37,7 @@ def apply(project, op):
     kind = op.get("op")
     if kind in TABLES and isinstance(base := op.get("base"), dict):
         row = project.rows(f"SELECT * FROM {TABLES[kind]} WHERE id = ?", int(op["id"]))
-        if row and (changed := [f for f, v in base.items() if f in ("subject", "body") and row[0][f] != v]):
+        if row and (changed := [f for f, v in base.items() if f in ("subject", "body", "intro") and row[0][f] != v]):
             raise EditError(f"the {' and '.join(changed)} changed since you started editing (a worker or another "
                             f"window); copy your text, then edit the new version")
     if kind == "milestone_add":
@@ -58,12 +58,14 @@ def apply(project, op):
         return f"milestone {mid} " + ("on hold" if hold else "resumed"), None
     if kind == "plan_add":
         subject = text(op.get("subject"), "the subject")
-        pid = project.plan_add(int(op["milestone"]), subject.strip(), text(op.get("body"), "the body"), prio(op.get("priority")))
+        pid = project.plan_add(int(op["milestone"]), subject.strip(), text(op.get("body"), "the body"), prio(op.get("priority")),
+                               text(op.get("intro"), "the intro"))
         return f"plan {pid} added: {subject.strip()}", pid
     if kind == "plan_edit":
         p = op.get("priority", ...)
         project.plan_edit(int(op["id"]), subject=text(op.get("subject"), "the subject", False),
                           body=text(op.get("body"), "the body", False),
+                          intro=text(op.get("intro"), "the intro", False),
                           prio=None if p is ... else ("none" if prio(p) is None else p))
         return f"plan {op['id']} changed", None
     if kind == "task_add":

@@ -95,17 +95,17 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 | `run [--once] [--dry-run]` | Work the queue; when it is empty, wait for tasks (`--once`: exit). Stops when Claude needs you or the tree has uncommitted changes |
 | `stop` | Have the running `pm run` stop after its current task (SIGUSR1; same as one Ctrl-C) |
 | `milestone add`, `plan add <milestone>`, `task add <plan>` | In your editor (as `git commit`): first line subject, rest body (Markdown); quit unsaved or save empty to abort |
-| `milestone add <subject>`, `plan add <milestone> <subject>`, `task add <plan> <subject>` | Non-interactive: the body from stdin. `plan add` and `task add` also take `--priority`; `task add` `--kind plan`, `--web`; `task add --exec <subject>`: an exec task, no plan |
+| `milestone add <subject>`, `plan add <milestone> <subject>`, `task add <plan> <subject>` | Non-interactive: the body from stdin. `plan add` requires `--intro` (plain English for an outsider, no pm terms); `plan add` and `task add` also take `--priority`; `task add` `--kind plan`, `--web`; `task add --exec <subject>`: an exec task, no plan |
 | `milestone add … --queue <N>`, `milestone set <milestone>` | `--queue <N>`: queue index, lowest first (default 0); `set` also `--subject`, `--status`, `--body`. `milestone add\|set\|hold\|resume` is refused in a worker |
 | `milestone hold <milestone>`, `milestone resume <milestone>` | Keep its plans and tasks out of the queue (a running task finishes), and back |
-| `plan edit <plan>` | `--subject`, `--body`, `--priority <N\|none>` |
+| `plan edit <plan>` | `--subject`, `--body`, `--intro` (queues nothing), `--priority <N\|none>`; a worker's `--body` on a plan without an intro needs `--intro` too |
 | `task set <task>` | `--subject`, `--body`, `--priority <N\|none>`, `--web`/`--no-web`; open tasks that aren't running |
 | `task done\|drop <task> <note>`, `task priority <task> <N\|none>` | Close a task, set its priority |
-| `decision add <subject>` | `--body`, `--option` (recommended first) |
+| `decision add <subject>` | `--intro` (required: what has to be decided, plain English for an outsider), `--body`, `--option` (recommended first) |
 | `decide` | Answer pending decisions one by one in the terminal (number, text, `s` skip, `x <reason>` irrelevant; sign-offs: `a` approve, `s` skip) |
 | `decision list` | Pending decisions: context, options, blocked tasks; sign-offs with what they approve. `--answered`: the decision log (answered `rule` decisions nothing fully supersedes, newest first); `--all`: every decision; `--grep <text>` |
 | `decision show <id>` | One decision: context, options, answer, consequences, tasks, supersede links (also `pm show d<id>`) |
-| `decision record <subject> --answer …` | A decision nobody asked, added answered; `--body`, `--once`, `--supersedes <id>`, `--consequences`. In a worker: its own choice (`decided_by_task`) |
+| `decision record <subject> --answer …` | A decision nobody asked, added answered; `--intro` (required), `--body`, `--once`, `--supersedes <id>`, `--consequences`. In a worker: its own choice (`decided_by_task`) |
 | `summary request`, `summary show [id]`, `summary list` | Queue an executive summary (an exec task, priority 10000; it reads the previous summary and reports the delta); show the newest or one; list them |
 | `report request`, `report show [id]`, `report list` | Queue a resource use report (an exec task, priority 10000; two passes over all done tasks and their diffs: draw up mutually exclusive categories with criteria, then put each task in one; pm sums time, tokens and cost per category); show the newest or one; list them (with custom reports) |
 | `report ask <question>`, `report answer` | A custom report: queue an exec task (priority 10000) that answers the question in one plain paragraph; in its worker, store the answer (stdin); `pm show c2` |

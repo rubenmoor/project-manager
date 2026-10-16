@@ -29,7 +29,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 59  # bump by one with every commit (AGENTS.md)
+VERSION = 60  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -69,11 +69,22 @@ SIGNOFF_LEVELS = {"masterplans": "masterplan", "plans": "plan", "task-queue": "t
 # A task marked web gets these, once signed off (or if "web" isn't in `signoff`)
 WEB_TOOLS = ["WebSearch", "WebFetch"]
 SIGNOFF_ANSWER = "approve"
+INTRO_RULE = ("one paragraph, 2 to 4 sentences, in plain English for an interested outsider who knows neither the code "
+              "nor how the work is organised: what this is about and why it matters. No ids, file names, code or "
+              "project-management words (task, plan, milestone, sign-off, worker, pm). A decision's intro says what has "
+              "to be chosen, between which options, and what changes with the answer")
+SIGNOFF_INTROS = {
+    "plan": "Approving lets the work described here go ahead.",
+    "task-queue": "New work is lined up and waits for a go-ahead before it starts. Approving lets it begin; the list "
+                  "below shows what will be done.",
+    "web": "The next piece of work needs to look things up on the internet: search the web and read web pages. "
+           "Approving allows that for this piece of work only.",
+}
 # The decision log: answered lasting questions that nothing fully supersedes.
 IN_LOG = ("status = 'answered' AND signoff IS NULL AND kind = 'rule' AND id NOT IN (SELECT superseded_id FROM "
           "decision_supersedes s JOIN decision n ON n.id = s.decision_id WHERE s.note = '' AND n.status = 'answered')")
 
-SCHEMA_VERSION = 22
+SCHEMA_VERSION = 23
 # A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
 # run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
 # Columns and tables SCHEMA dropped are left behind, new ones get their defaults; so only renames, moved data and new
@@ -98,7 +109,7 @@ def exec_kind(con):
 
 
 MIGRATIONS = {12: "", 13: "", 14: revise_kind, 15: "", 16: "", 17: "", 18: drop_summary_kind, 19: exec_kind,
-              20: "", 21: ""}
+              20: "", 21: "", 22: ""}
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -118,6 +129,7 @@ CREATE TABLE plan (
     subject         TEXT NOT NULL CHECK (trim(subject) <> ''),
     priority        INTEGER,                               -- NULL: 0
     body            TEXT NOT NULL CONSTRAINT "a plan needs a body" CHECK (trim(body) <> ''),
+    intro           TEXT NOT NULL DEFAULT '',              -- plain English for an outsider; required by pm since schema 23
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     created_by_task INTEGER REFERENCES task (id)
 ) STRICT;
@@ -146,6 +158,7 @@ CREATE TABLE decision (
     status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'answered', 'irrelevant')),
     options         TEXT NOT NULL DEFAULT '[]' CHECK (json_type(options) = 'array'),  -- recommended first
     body            TEXT NOT NULL DEFAULT '',
+    intro           TEXT NOT NULL DEFAULT '',              -- plain English: what is to be decided; required since schema 23
     answer          TEXT,
     reason          TEXT,
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
@@ -266,6 +279,8 @@ Before you start, look up what the project decided about what task {id} touches 
 `pm decision list --answered --grep <word> [--grep <word> …]`. Those answers are binding, unless a newer one \
 supersedes them; follow them, and cite one where you rely on it, as `decision <id>: <subject>`.
 
+Every plan and decision you add gets an intro (`--intro`), for a human who reads nothing else: {intro_rule}.
+
 Refer to a milestone, plan, task or decision by id and full subject, `plan 12: <subject>`: plain in a subject, \
 in backticks in a body, a note or a decision's text.
 
@@ -275,18 +290,20 @@ is a follow-up task, not part of yours: `pm task add <plan id> "<subject>" < bod
 plan already lists.
 
 Milestones, plans, tasks and decisions are in {db}; change them only with these commands (a text value - reads stdin):
-  pm plan add <milestone id> "<subject>" < body.md     a task to split it into tasks is queued
-  pm plan edit <plan id> [--subject …] [--body …] [--priority N]
+  pm plan add <milestone id> "<subject>" --intro "<intro>" < body.md     a task to split it into tasks is queued
+  pm plan edit <plan id> [--subject …] [--body …] [--intro …] [--priority N]
   pm plans list     plans with open tasks, by milestone queue index, then highest priority first
   pm milestone list     every milestone; pm milestone show <milestone id>
   pm task add <plan id> "<subject>" [--kind plan] [--priority N] [--web] < body.md     --kind plan: the task writes a plan;
       --web: its worker gets WebSearch and WebFetch (after the human's sign-off)
   pm task set <task id> [--subject …] [--body …] [--priority N] [--web|--no-web]     an open task that isn't
       running
-  pm decision add "<subject>" [--body "<text>"] [--option "<recommended>"] [--option …]   prints its id
+  pm decision add "<subject>" --intro "<intro>" [--body "<text>"] [--option "<recommended>"] [--option …]
+      prints its id
   pm task-pending-decision <task id> <decision id>     the task waits until the human answers
   pm decision list --answered [--grep <word> …]     the decision log: what was decided about X
-  pm decision record "<subject>" --answer "<choice>" --body "<why>"   a lasting choice of yours (design, a rule)
+  pm decision record "<subject>" --intro "<intro>" --answer "<choice>" --body "<why>"   a lasting choice of yours
+      (design, a rule)
   pm decision consequences <decision id> "<text>"     what changed because of an answer
   pm show <task id>     also d<decision id>, p<plan id>, m<milestone id>
 Every command with examples, and recipes for the usual tasks: `pm instructions`.
@@ -350,6 +367,13 @@ def now():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def need_intro(intro, what):
+    """The intro, stripped; refused if empty."""
+    if not (intro or "").strip():
+        raise FormatError(f"{what} needs an intro (--intro): {INTRO_RULE}")
+    return intro.strip()
+
+
 def option_lines(options):
     """A decision's options, numbered, the recommended one first."""
     return [f"  {n}) {o}{'  (recommended)' if n == 1 else ''}" for n, o in enumerate(options, 1)]
@@ -400,7 +424,7 @@ def human_only(what):
 
 def matches(d, texts):
     """Decision d mentions one of texts (any case) in its subject, body, options, answer, reason or consequences."""
-    hay = "\n".join(str(d[k] or "") for k in ("subject", "body", "options", "answer", "reason", "consequences")).casefold()
+    hay = "\n".join(str(d[k] or "") for k in ("subject", "intro", "body", "options", "answer", "reason", "consequences")).casefold()
     return not texts or any(t.casefold() in hay for t in texts)
 
 
@@ -946,6 +970,8 @@ class Project:
         by = f", by task {d['created_by_task']}" if d["created_by_task"] else ""
         out = [f"# Decision {did}: {d['subject']}", "", f"{self.decision_tags(d)}; created {stamp(d['created_at'])}{by}"]
         out += self.supersede_lines(did)
+        if d["intro"]:
+            out += ["", d["intro"]]
         if d["body"]:
             out += ["", d["body"]]
         if d["signoff"] and d["status"] == "pending":
@@ -968,6 +994,8 @@ class Project:
         for d in ds:
             out.append(f"Decision {d['id']}{' (sign-off)' if d['signoff'] else ''}: {d['subject']}")
             if d["signoff"]:
+                if d["intro"]:
+                    out.append("  " + d["intro"].replace("\n", "\n  "))
                 out.append("  " + self.signoff_view(d["id"], d["signoff"]).replace("\n", "\n  "))
                 out.append(f"  pm decision approve {d['id']}\n")
                 continue
@@ -976,6 +1004,8 @@ class Project:
                 "WHERE td.decision_id = ? AND t.status = 'open' ORDER BY t.id", d["id"])]
             if blocks:
                 out.append(f"  blocks task(s) {', '.join(blocks)}")
+            if d["intro"]:
+                out.append("  " + d["intro"].replace("\n", "\n  "))
             if d["body"]:
                 out.append("  " + d["body"].replace("\n", "\n  "))
             out += option_lines(d["options"])
@@ -1024,13 +1054,14 @@ class Project:
         self.resolve(did, answer=reply, kind=kind, supersedes=supersedes)
         return reply
 
-    def record(self, subject, answer, body=None, kind="rule", supersedes=(), consequences=None):
+    def record(self, subject, answer, body=None, kind="rule", supersedes=(), consequences=None, intro=None):
         """`pm decision record`: a decision nobody asked, added answered: the human's, or in a worker its own choice
         (decided_by_task). Returns its id."""
+        intro = need_intro(intro, "a decision")
         with self.connect(write=True) as db:
-            did = db.execute("INSERT INTO decision (subject, body, status, answer, closed_at, created_by_task, kind, "
-                             "decided_by_task) VALUES (?, ?, 'answered', ?, ?, ?, ?, ?)",
-                             (subject, (body or "").strip(), answer.strip(), now(), creator(), kind,
+            did = db.execute("INSERT INTO decision (subject, body, intro, status, answer, closed_at, created_by_task, "
+                             "kind, decided_by_task) VALUES (?, ?, ?, 'answered', ?, ?, ?, ?, ?)",
+                             (subject, (body or "").strip(), intro, answer.strip(), now(), creator(), kind,
                               creator())).lastrowid
             for old in supersedes:
                 self.link_supersede(db, did, old)
@@ -1131,18 +1162,21 @@ class Project:
                     "WHERE m.status = 'open' AND t.status = 'open' AND t.kind = 'work' ORDER BY t.id").fetchall()
                         if not self.signed_off(db, r[0], level)]
                 subject = "Sign off the task queue"
+                intro = SIGNOFF_INTROS["task-queue"]
             elif level == "web":
                 tids = [tid]
                 subject = f"Grant {ref('task', tid, t['subject'])} web access (WebSearch, WebFetch)"
+                intro = SIGNOFF_INTROS["web"]
             else:
                 p = self.get(db, "plan", t["plan_id"])
                 tids = [tid]
                 m = self.get(db, "milestone", p["milestone_id"])
                 subject = (f"Sign off the masterplan of {ref('milestone', m['id'], m['subject'])}"
                            if level == "masterplan" else f"Sign off {ref('plan', p['id'], p['subject'])}")
+                intro = "\n\n".join(x for x in (p["intro"], SIGNOFF_INTROS["plan"]) if x)
             if did is None:
-                did = db.execute("INSERT INTO decision (subject, options, signoff) VALUES (?, ?, ?)",
-                                 (subject, json.dumps([SIGNOFF_ANSWER]), level)).lastrowid
+                did = db.execute("INSERT INTO decision (subject, options, signoff, intro) VALUES (?, ?, ?, ?)",
+                                 (subject, json.dumps([SIGNOFF_ANSWER]), level, intro)).lastrowid
             for x in tids:
                 self.block(db, x, did)
         return did
@@ -1563,20 +1597,26 @@ class Project:
                           "VALUES (?, ?, 'split', ?, ?, ?)",
                           (pid, subject, self.config["planning_priority"], body, creator())).lastrowid, subject
 
-    def plan_add(self, mid, subject, body, prio=None):
+    def plan_add(self, mid, subject, body, prio=None, intro=None):
+        intro = need_intro(intro, "a plan")
         with self.connect(write=True) as db:
             self.get(db, "milestone", mid)
-            pid = db.execute("INSERT INTO plan (milestone_id, subject, priority, body, created_by_task) "
-                             "VALUES (?, ?, ?, ?, ?)", (mid, subject, prio, body.strip(), creator())).lastrowid
+            pid = db.execute("INSERT INTO plan (milestone_id, subject, priority, body, intro, created_by_task) "
+                             "VALUES (?, ?, ?, ?, ?, ?)", (mid, subject, prio, body.strip(), intro, creator())).lastrowid
             self.queue_plan_tasks(db, pid)
         return pid
 
-    def plan_edit(self, pid, subject=None, body=None, prio=None):
+    def plan_edit(self, pid, subject=None, body=None, prio=None, intro=None):
         """Change a plan that isn't done; a changed subject or body queues the task that splits it into tasks again and
-        the revision of each child plan. prio "none" clears the priority. Returns the queued tasks: [(id, subject)]."""
+        the revision of each child plan; the intro alone queues nothing. A worker that changes the body of a plan
+        without an intro must give one. prio "none" clears the priority. Returns the queued tasks: [(id, subject)]."""
         with self.connect(write=True) as db:
             p = self.get(db, "plan", pid)
             self.check_plan_open(db, pid)
+            if intro is not None:
+                db.execute("UPDATE plan SET intro = ? WHERE id = ?", (need_intro(intro, f"plan {pid}"), pid))
+            elif creator() is not None and body is not None and not p["intro"]:
+                need_intro(None, f"plan {pid}")
             if prio is not None:
                 db.execute("UPDATE plan SET priority = ? WHERE id = ?", (None if prio == "none" else prio, pid))
             changed = False
@@ -1629,10 +1669,12 @@ class Project:
         with self.connect(write=True) as db:
             self.block(db, tid, did)
 
-    def decision_add(self, subject, body=None, options=(), kind="rule"):
+    def decision_add(self, subject, body=None, options=(), kind="rule", intro=None):
+        intro = need_intro(intro, "a decision")
         with self.connect(write=True) as db:
-            return db.execute("INSERT INTO decision (subject, options, body, created_by_task, kind) VALUES (?, ?, ?, ?, ?)",
-                              (subject, json.dumps(list(options), ensure_ascii=False), (body or "").strip(),
+            return db.execute("INSERT INTO decision (subject, options, body, intro, created_by_task, kind) "
+                              "VALUES (?, ?, ?, ?, ?, ?)",
+                              (subject, json.dumps(list(options), ensure_ascii=False), (body or "").strip(), intro,
                                creator(), kind)).lastrowid
 
     # --- show --------------------------------------------------------------------------------
@@ -1658,7 +1700,7 @@ class Project:
                                (pid,)).fetchall()
         by = f", by task {p['created_by_task']}" if p["created_by_task"] else ""
         out = [f"# Plan {pid}: {p['subject']} (milestone {m['id']}: {m['subject']}; priority {p['priority'] or 0}, "
-               f"created {stamp(p['created_at'])}{by})", "", p["body"], ""]
+               f"created {stamp(p['created_at'])}{by})", ""] + [p["intro"], ""] * bool(p["intro"]) + [p["body"], ""]
         out += [f"- task {x['id']} [{x['status']}{'' if x['kind'] == 'work' else ', ' + x['kind']}] {x['subject']}"
                 for x in tasks]
         return "\n".join(out).rstrip() + "\n"
@@ -1766,7 +1808,7 @@ class Project:
     def worker_command(self, tid):
         """(command, prompt): the prompt goes to the worker's stdin; None if the command holds it ("{prompt}")."""
         show = "\n".join([self.show(tid), self.earlier_failure(tid), *self.priority_prompts()]).rstrip() + "\n"
-        prompt = WORKER_PROMPT.format(id=tid, db=self.db, show=show)
+        prompt = WORKER_PROMPT.format(id=tid, db=self.db, show=show, intro_rule=INTRO_RULE)
         hook = {"type": "command", "command": shlex.join([sys.executable, str(GUARD)])}
         permissions = {"deny": [f"Read(/{self.db_path.resolve()})"]}
         if self.web_granted(tid):
@@ -2088,7 +2130,8 @@ class Project:
                 f"`{branch}` and cleaned the tree.\n\n" + "\n".join(f"    {l}" for l in left[:30])
                 + (f"\n    … and {len(left) - 30} more" if len(left) > 30 else "")
                 + f"\n\nLook: `git show {branch}`. Keep: `git merge {branch}`. Then `git branch -D {branch}`.",
-                kind="once")
+                kind="once", intro="A piece of automated work finished but left changes behind that it didn't hand in. "
+                "They were set aside, nothing is lost. Decide whether to keep them or throw them away.")
             note = f"left {n} unstaged, committed on branch {branch}; decision {did}: investigate"
         with self.connect(write=True) as db:
             db.execute("UPDATE run SET reason = ? WHERE id = ?", (note, rid))
@@ -2555,11 +2598,13 @@ def main(argv=None):
     pa.add_argument("milestone", type=int)
     pa.add_argument("subject", nargs="?", help="then the body (Markdown) is read from stdin; without: editor")
     pa.add_argument("--priority", type=int)
+    pa.add_argument("--intro", type=text_arg, help="required: what the plan is about, in plain English for an outsider")
     pe = p.add_parser("edit", help="change a plan that isn't done; a new subject or body queues the task that splits it "
                       "again and the revision of the plans below it")
     pe.add_argument("plan", type=int)
     pe.add_argument("--subject")
     pe.add_argument("--body", type=text_arg)
+    pe.add_argument("--intro", type=text_arg, help="plain English for an outsider; queues nothing")
     pe.add_argument("--priority", type=lambda v: v if v == "none" else int(v), help="integer, or none for 0")
     p.add_parser("list", help="plans with open tasks in open milestones, one per line: priority, id, subject; by the "
                   "milestone's queue index, then highest priority first")
@@ -2592,6 +2637,7 @@ def main(argv=None):
                        "decision log").add_subparsers(dest="action", required=True)
     da = d.add_parser("add", help="new pending decision; prints its id")
     da.add_argument("subject", help="the question")
+    da.add_argument("--intro", type=text_arg, help="required: what has to be decided, in plain English for an outsider")
     da.add_argument("--body", type=text_arg, help="context for the human")
     da.add_argument("--option", action="append", default=[], help="repeat; the recommended one first")
     da.add_argument("--once", action="store_true", help="a one-off go-ahead or check, not a lasting rule")
@@ -2609,6 +2655,7 @@ def main(argv=None):
                       "choice, which the human can supersede")
     dr.add_argument("subject")
     dr.add_argument("--answer", type=text_arg, required=True, help="the decision")
+    dr.add_argument("--intro", type=text_arg, help="required: what was decided and why, in plain English for an outsider")
     dr.add_argument("--body", type=text_arg, help="context: why, what was considered")
     dr.add_argument("--once", action="store_true", help="a one-off, not a lasting rule")
     dr.add_argument("--supersedes", type=int, action="append", default=[], help="repeat; decisions it replaces")
@@ -2720,17 +2767,18 @@ def main(argv=None):
                 pm.print_plans()
             elif args.action == "add":
                 pm.require("milestone", args.milestone)
+                need_intro(args.intro, "a plan")
                 if not (entry := pm.subject_and_body("plan", args.subject)):
                     print("pm: aborted, no plan added")
                     return 1
-                pid = pm.plan_add(args.milestone, *entry, args.priority)
+                pid = pm.plan_add(args.milestone, *entry, args.priority, args.intro)
                 print(pid)
                 pm.print_plans(new=pid, file=sys.stderr)
                 print(f"Compare plan {pid} with these plans. If it must clearly run before or after one of them, "
                       f"change its priority: pm plan edit {pid} --priority N", file=sys.stderr)
                 msg = f"plan {pid} added: {entry[0]}"
             else:
-                print_queued(pm.plan_edit(args.plan, args.subject, args.body, args.priority))
+                print_queued(pm.plan_edit(args.plan, args.subject, args.body, args.priority, args.intro))
                 msg = f"plan {args.plan} changed"
         elif args.cmd == "task":
             if args.action == "add":
@@ -2777,7 +2825,7 @@ def main(argv=None):
                 msg = f"decision {args.decision} answered: {said}"
             elif args.action == "record":
                 did = pm.record(args.subject, args.answer, args.body, "once" if args.once else "rule", args.supersedes,
-                                args.consequences)
+                                args.consequences, args.intro)
                 print(did)
                 msg = f"decision {did} recorded: {args.subject}"
             elif args.action == "supersede":
@@ -2796,7 +2844,7 @@ def main(argv=None):
                 pm.resolve(args.decision, irrelevant=args.reason)
                 msg = f"decision {args.decision} irrelevant: {args.reason}"
             else:
-                did = pm.decision_add(args.subject, args.body, args.option, "once" if args.once else "rule")
+                did = pm.decision_add(args.subject, args.body, args.option, "once" if args.once else "rule", args.intro)
                 print(did)
                 msg = f"decision {did} added: {args.subject}"
         elif args.cmd in ("summary", "summaries"):

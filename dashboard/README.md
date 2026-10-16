@@ -26,6 +26,7 @@ In the project's git repository (the one with `project-manager.toml`):
 - **Queue**: as `pm run` sees it; open tasks it leaves out and why
 - **Tasks**: every task. On top: pending decisions by how many open tasks answering each frees (it is their only blocker), the top one highlighted, each listing its waiting tasks; then executive interventions (exec tasks, no plan; add one there); then by milestone (queue index) and plan, done plans folded; open, closed or all
 - **Milestones**: open and on-hold cards grouped by queue index (lowest first), completed ones in their own column on the right (newest first); with progress and the number of pending decisions its open tasks wait for, linked to exactly those (`#/decisions?milestone=N`)
+- **Plan**, **decision** pages: the intro (plain English) on top; the body right below it, hidden behind "Show details" (shown when there is no intro); a plan's intro is editable; decision lists show the intro under the subject
 - **Milestone**, **plans**: plans by priority with their tasks; filters by status and kind; change a milestone's queue index; put a milestone on hold or resume it (its plans and open tasks show "on hold")
 - **Task**: queue position or what blocks it, note, priority, decisions; after a failed run: pm's summary; the body last, at the bottom
   - done or dropped: rows its commit touched (Affected: tasks created first; tasks, plans, decisions, milestones: new, edited, done, dropped, answered, waits for …; each styled by kind; says why when empty), files changed, the full diff (syntax highlighted)

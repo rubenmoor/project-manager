@@ -30,7 +30,7 @@ editor = ""
 # {milestone}, {plan}, {milestone_id}, {milestone_subject} and {plan_id} are replaced.
 masterplan_prompt = '''
 Write {plan}, the masterplan of {milestone}: expand on everything that needs to be done to achieve it,
-divided into parts. State in the masterplan that its own tasks are not implementation work: each of them writes the
+divided into parts, with an intro in plain English (`pm plan edit {plan_id} --intro "…" --body -`). State in the masterplan that its own tasks are not implementation work: each of them writes the
 plan for one part.
 '''
 
