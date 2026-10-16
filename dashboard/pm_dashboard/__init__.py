@@ -285,7 +285,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(b": keepalive\n\n")
                 else:
                     seen = version
-                    msg = {"version": version, "log": log and {"task": log[0], "size": log[1]}}
+                    msg = {"version": version, "pm": pm.VERSION, "log": log and {"task": log[0], "size": log[1]}}
                     self.wfile.write(f"event: state\ndata: {json.dumps(msg)}\n\n".encode())
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):

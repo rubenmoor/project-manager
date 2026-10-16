@@ -14,6 +14,7 @@ dependencies = []
 
 [project.scripts]
 pm-dashboard = "pm_dashboard:main"
+pm-dashboard-live = "pm_dashboard.live:main"
 
 [tool.setuptools]
 packages = ["pm_dashboard"]

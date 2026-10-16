@@ -2,6 +2,7 @@
   # pm: a project manager for Claude Code workers (README.md).
   #   nix run . -- status      nix build      nix develop
   #   nix run .#dashboard      the optional web view (dashboard/), not part of the default package
+#   nix run .#dashboard-live the dashboard of GitHub main, restarted on every push
   # `claude` itself is not included: pm runs the one on your PATH.
   description = "A project manager for Claude Code workers";
 
@@ -41,6 +42,7 @@
       apps = forAll (pkgs: {
         default = { type = "app"; program = "${self.packages.${pkgs.system}.default}/bin/pm"; };
         dashboard = { type = "app"; program = "${self.packages.${pkgs.system}.dashboard}/bin/pm-dashboard"; };
+        dashboard-live = { type = "app"; program = "${self.packages.${pkgs.system}.dashboard}/bin/pm-dashboard-live"; };
       });
 
       devShells = forAll (pkgs: {

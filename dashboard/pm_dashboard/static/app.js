@@ -16,13 +16,20 @@ function route() {
   return { page: parts[0] || "home", id: parts[1] ? Number(parts[1]) : null, query: query || null };
 }
 
+// A restarted server with another pm version (pm-dashboard-live): reload, once no editor has focus.
+function reloadWhenIdle() {
+  const busy = () => document.activeElement && document.activeElement.closest("input, textarea, select, .cm-editor");
+  if (!busy()) return location.reload();
+  setTimeout(reloadWhenIdle, 1000);
+}
+
 // /api/state, refetched whenever the server's event stream says something changed.
 function useState2() {
   const [state, setState] = useState(null);
   const [log, setLog] = useState(null);
   const [online, setOnline] = useState(true);
   useEffect(() => {
-    let version = null, inflight = false, again = false;
+    let version = null, pmVersion = null, inflight = false, again = false;
     const load = () => {
       if (inflight) { again = true; return; }
       inflight = true;
@@ -36,6 +43,8 @@ function useState2() {
     es.addEventListener("state", (e) => {
       const m = JSON.parse(e.data);
       setOnline(true);
+      if (pmVersion !== null && m.pm !== pmVersion) return reloadWhenIdle();
+      pmVersion = m.pm;
       setLog(m.log);
       if (m.version !== version) { version = m.version; load(); }
     });
