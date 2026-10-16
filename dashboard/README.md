@@ -9,6 +9,7 @@ In the project's git repository (the one with `project-manager.toml`):
 - `nix run github:<you>/pm#dashboard`, or `nix run .#dashboard` in this repository
 - `nix run github:rubenmoor/project-manager#dashboard-live`: GitHub main's dashboard, restarted on every push
   - polls `git ls-remote` (`--interval 60` s); builds the new commit first, keeps the old server if the build fails; same port
+  - a server that exited (e.g. a config error): started again once `project-manager.toml` changes
   - `--repo owner/name`, `--branch main`; other options go to pm-dashboard
   - open tabs reload on a new pm version, once no editor has focus
 - `pipx install .` (pm) then `pipx inject pm ./dashboard --include-apps`
