@@ -17,8 +17,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-PM_MIN_VERSION = 50     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
-                        # summary_request, exec tasks, open_summary, report_request, report_rows, report_ask)
+PM_MIN_VERSION = 66     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
+                        # summary_request, exec tasks, open_summary, report_request, report_rows, report_ask, WORKTREE_NAME)
 try:
     import pm
 except ImportError:
@@ -43,7 +43,7 @@ class Watcher:
         self.project = project
         self.cond = threading.Condition()
         self.version = 0
-        self.log = None                         # (task id, size) of the running worker's log
+        self.log = None                         # ((task id, size), …) of the running workers' logs
         self.state = None
         self.last_good = None
         self.sig = None
@@ -61,14 +61,16 @@ class Watcher:
         return out
 
     def running_log(self, state):
+        """((task id, log size), …) of the running workers: one per work tree."""
         runs = (state or {}).get("tables", {}).get("run", [])
-        r = next((r for r in runs if r["result"] == "running"), None)
-        if r is None:
-            return None
-        try:
-            return r["task_id"], (self.project.logs / f"task-{r['task_id']}.log").stat().st_size
-        except FileNotFoundError:
-            return r["task_id"], 0
+        out = []
+        for r in runs:
+            if r["result"] == "running":
+                try:
+                    out.append((r["task_id"], (self.project.logs / f"task-{r['task_id']}.log").stat().st_size))
+                except FileNotFoundError:
+                    out.append((r["task_id"], 0))
+        return tuple(out) or None
 
     def loop(self):
         while True:
@@ -289,7 +291,7 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.write(b": keepalive\n\n")
                 else:
                     seen = version
-                    msg = {"version": version, "pm": pm.VERSION, "log": log and {"task": log[0], "size": log[1]}}
+                    msg = {"version": version, "pm": pm.VERSION, "log": [{"task": t, "size": n} for t, n in log or ()]}
                     self.wfile.write(f"event: state\ndata: {json.dumps(msg)}\n\n".encode())
                 self.wfile.flush()
         except (BrokenPipeError, ConnectionResetError):

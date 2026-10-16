@@ -15,7 +15,7 @@ function Request({ d, op, open, label, queued, writing }) {
     post({ op }).catch((e) => setError(e.message)).finally(() => setBusy(false));
   };
   const t = open != null ? d.task.get(open) : null;
-  const running = t && d.running && d.running.task_id === t.id;
+  const running = t && d.isRunning(t.id);
   const pos = t ? d.queuePos.get(t.id) : null;
   return html`<div class="row"><button class="btn primary" onClick=${go} disabled=${busy || !!t}>
       ${t ? (running ? writing : queued) : label}</button>
@@ -42,7 +42,7 @@ function Ask({ d }) {
     <div class="row"><button class="btn primary" onClick=${go} disabled=${busy || !q.trim()}>Ask</button>
       <span class="muted">queues an exec task at priority 10000 · Ctrl+Enter</span>${error ? html`<span class="err">${error}</span>` : null}</div>
     ${open.map(([c, t]) => {
-      const running = d.running && d.running.task_id === t.id, pos = d.queuePos.get(t.id);
+      const running = d.isRunning(t.id), pos = d.queuePos.get(t.id);
       return html`<div class="sub"><${TaskLink} t=${t} />${running ? html` · <a href=${`#/task/${t.id}?log`}>answering…</a>`
         : pos != null ? `, #${pos + 1} in the queue` : ", not in the queue"}</div>`;
     })}</div>`;

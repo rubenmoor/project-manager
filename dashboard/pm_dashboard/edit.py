@@ -88,10 +88,15 @@ def apply(project, op):
             if m is not None and (not isinstance(m, str) or not m.strip()):
                 raise EditError("the model must be a name, or null for the kind's")
             fields["model"] = m.strip() if m else None
+        if "worktree" in op:
+            w = op["worktree"]
+            if w is not None and not (isinstance(w, str) and pm.WORKTREE_NAME.fullmatch(w)):
+                raise EditError("the work tree is a name of lowercase letters, digits and -, e.g. questions; empty: the main checkout")
+            fields["worktree"] = w
         if not fields:
             raise EditError("nothing to change")
         project.task_set(int(op["id"]), **fields)
-        return f"task {op['id']} " + (list(fields)[0] if list(fields) in (["priority"], ["model"]) else "changed"), None
+        return f"task {op['id']} " + (list(fields)[0] if list(fields) in (["priority"], ["model"], ["worktree"]) else "changed"), None
     if kind == "task_close":
         status = op.get("status")
         if status not in ("done", "dropped"):

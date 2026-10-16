@@ -1,7 +1,8 @@
-// The run view: left, one timeline (queue above, highest priority nearest; the running task between two rules; retired
+// The run view: left, one timeline (queue above, highest priority nearest; the running tasks, one per work tree, stacked
+// between two rules; retired
 // tasks below, newest first); right, the selected task as on its task page. A click selects (outline).
 import { html, useState, useEffect, useRef, useLayoutEffect } from "/vendor/preact-htm.js";
-import { Pill, Kind, Prio, Elapsed, Time, Named } from "/ui.js";
+import { Pill, Kind, Worktree, Prio, Elapsed, Time, Named } from "/ui.js";
 import { Task, Handoff } from "/views.js";
 import { usd } from "/data.js";
 
@@ -33,15 +34,16 @@ function Item({ id, sel, select, cls = "", children }) {
 
 export function Live({ d }) {
   const r = d.running;
-  const rt = r ? d.task.get(r.task_id) : null;
-  // The worker closed its task (or made it wait for a decision) but hasn't exited yet.
-  const wrapping = rt && (rt.status !== "open" || d.blockers(rt).length > 0);
-  const current = wrapping ? null : rt;
+  // Per running run: its task; wrapping: the worker closed it (or made it wait for a decision) but hasn't exited yet.
+  const now = d.runningAll.map((x) => { const t = d.task.get(x.task_id); return { r: x, t, wrapping: t.status !== "open" || d.blockers(t).length > 0 }; });
+  const currents = now.filter((x) => !x.wrapping);
+  const current = currents.length ? currents[0].t : null;
+  const isCurrent = (id) => currents.some((x) => x.t.id === id);
   const [showBlocked, setShowBlocked] = useState(loadShow);
   const toggleBlocked = (on) => { setShowBlocked(on); try { localStorage.setItem(SHOW_BLOCKED, on ? "1" : "0"); } catch {} };
-  const blocked = d.tasks.filter((t) => t.status === "open" && !d.queuePos.has(t.id) && (!current || t.id !== current.id)
+  const blocked = d.tasks.filter((t) => t.status === "open" && !d.queuePos.has(t.id) && !isCurrent(t.id)
     && d.blockers(t).length && (t.kind === "exec" || d.milestoneOfTask(t)?.status === "open"));
-  const queued = d.queue.filter((id) => !current || id !== current.id).map((id) => d.task.get(id));
+  const queued = d.queue.filter((id) => !isCurrent(id)).map((id) => d.task.get(id));
   const queue = (showBlocked && blocked.length
     ? [...queued, ...blocked].map((t) => [queueKey(d, t), t]).sort((a, b) => byKey(a[0], b[0])).map(([, t]) => t)
     : [...queued]).reverse();
@@ -54,9 +56,9 @@ export function Live({ d }) {
   const crashed = !alive && (d.stale || d.crash) ? { run: d.stale, error: d.crash ? d.crash.error : null, at: d.crash ? d.crash.at : null } : null;
   const stopped = !r && !alive && !crashed && lastRun && lastRun.result === "failed" ? lastRun : null;
   const next = d.queue.length ? d.task.get(d.queue[0]) : null;
-  const busy = wrapping ? { spin: true, text: `Task ${rt.id} is ${rt.status === "open" ? "waiting for a decision" : rt.status}; its worker is finishing`,
-      sub: "Then pm records the run, commits, and starts the next task." }
-    : between && between.result === "limit" ? { spin: false, text: "pm run waits for the usage limit to reset",
+  const wrapText = (t) => ({ spin: true, text: `Task ${t.id} is ${t.status === "open" ? "waiting for a decision" : t.status}; its worker is finishing`,
+      sub: "Then pm records the run, commits, and starts the next task." });
+  const busy = between && between.result === "limit" ? { spin: false, text: "pm run waits for the usage limit to reset",
       sub: (between.reason || "").split("\n")[0] + "; then task " + between.task_id + " again." }
     : !r && alive && !next ? { spin: false, text: "pm run waits for tasks",
       sub: "The queue is empty; it starts when a task is queued or a decision answered." }
@@ -68,11 +70,11 @@ export function Live({ d }) {
   // The queue scrolls on its own, opened at its end ("next"); again whenever the running task or the toggle changes.
   const qbox = useRef(null), H = useHeight(qbox), atEnd = useRef(null);
   useLayoutEffect(() => {
-    const key = `${current ? current.id : "none"} ${showBlocked}`;
+    const key = `${currents.map((x) => x.t.id).join(",")} ${showBlocked}`;
     if (!H || atEnd.current === key) return;
     atEnd.current = key;
     qbox.current.scrollTop = qbox.current.scrollHeight;
-  }, [H, current && current.id, showBlocked]);
+  }, [H, currents.map((x) => x.t.id).join(","), showBlocked]);
   const selTask = sel != null ? d.task.get(sel) : null;
   return html`<div class="live">
     <div class="tl">
@@ -84,18 +86,20 @@ export function Live({ d }) {
           const q = qpos.get(t.id);
           if (q == null) return html`<${Item} id=${t.id} sel=${sel} select=${setPicked} cls="blocked">
             <span class="tl-pos num" title="waits for a pending decision">—</span>
-            <span class="tl-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} />
+            <span class="tl-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} /> <${Worktree} name=${t.worktree} />
               <span class="tag waits">waits for ${d.blockers(t).map((x) => `d${x.id}`).join(", ")}</span></span><${Prio} p=${d.prio(t)} /></${Item}>`;
           return html`<${Item} id=${t.id} sel=${sel} select=${setPicked}>
             <span class="tl-pos num">${q === 1 ? "next" : `#${q}`}</span>
-            <span class="tl-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} />${failedLast(t) ? html` <${Pill} status="failed" />` : null}</span><${Prio} p=${d.prio(t)} /></${Item}>`;
+            <span class="tl-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} /> <${Worktree} name=${t.worktree} />${failedLast(t) ? html` <${Pill} status="failed" />` : null}</span><${Prio} p=${d.prio(t)} /></${Item}>`;
         })}</div></div>
       <div class="tl-current">
-        ${current ? html`<${Item} id=${current.id} sel=${sel} select=${setPicked} cls="now">
-            <div class="grow"><div class="row"><${Pill} status="running" /><span class="sub">task ${current.id} · <${Elapsed} start=${r.started_at} /></span></div>
-            <div class="tl-current-subject"><${Named} kind="task" r=${current} /> <${Kind} kind=${current.kind} /></div>
-            <div class="muted">${current.plan_id != null ? html`<${Named} kind="plan" r=${d.plan.get(current.plan_id)} /> · <${Named} kind="milestone" r=${d.milestoneOfTask(current)} />` : "executive intervention"}</div>
-            <${Handoff} d=${d} r=${r} /></div></${Item}>`
+        ${now.length ? now.map(({ r, t, wrapping }) => wrapping ? html`<div class="tl-idle tl-busy"><span class="spinner"></span><div>
+            <div class="sub">${wrapText(t).text} <${Worktree} name=${r.worktree} /></div><div class="muted">${wrapText(t).sub}</div></div></div>`
+          : html`<${Item} id=${t.id} sel=${sel} select=${setPicked} cls="now">
+            <div class="grow"><div class="row"><${Pill} status="running" /><span class="sub">task ${t.id} · <${Elapsed} start=${r.started_at} /></span><${Worktree} name=${r.worktree} /></div>
+            <div class="tl-current-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} /></div>
+            <div class="muted">${t.plan_id != null ? html`<${Named} kind="plan" r=${d.plan.get(t.plan_id)} /> · <${Named} kind="milestone" r=${d.milestoneOfTask(t)} />` : "executive intervention"}</div>
+            <${Handoff} d=${d} r=${r} /></div></${Item}>`)
           : busy ? html`<div class="tl-idle tl-busy">${busy.spin ? html`<span class="spinner"></span>` : null}<div>
             <div class="sub">${busy.text}</div><div class="muted">${busy.sub}</div></div></div>`
           : crashed ? html`<div class="tl-idle tl-crashed"><div class="sub"><b>pm not running</b>: <code>pm run</code> crashed${crashed.run ? html` during <a href=${`#/task/${crashed.run.task_id}`} onClick=${(e) => { e.preventDefault(); setPicked(crashed.run.task_id); }}>task ${crashed.run.task_id}</a>` : ""}${crashed.at ? html`, <${Time} ts=${crashed.at} />` : ""}.</div>
@@ -110,7 +114,7 @@ export function Live({ d }) {
         ${retired.map((t) => {
           const runs = d.taskRuns(t);
           return html`<${Item} id=${t.id} sel=${sel} select=${setPicked} cls="retired"><${Pill} status=${t.status} />
-            <span class="tl-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} /></span>
+            <span class="tl-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} /> <${Worktree} name=${t.worktree} /></span>
             <span class="muted num" style="white-space:nowrap">${runs.length ? usd(d.cost(runs)) + " · " : ""}<${Time} ts=${t.retired_at} /></span></${Item}>`;
         })}</div>
     </div>

@@ -1,5 +1,5 @@
 import { html, useState, useEffect, useRef, useLayoutEffect } from "/vendor/preact-htm.js";
-import { Markdown, InlineMd, Pill, Kind, Prio, TaskLink, Id, Ref, Named, NamedLink, Titled, Time, Elapsed, Tile, Progress, Bars, Fold } from "/ui.js";
+import { Markdown, InlineMd, Pill, Kind, Worktree, Prio, TaskLink, Id, Ref, Named, NamedLink, Titled, Time, Elapsed, Tile, Progress, Bars, Fold } from "/ui.js";
 import { usd, tokens, stamp, duration, seconds, day } from "/data.js";
 import { EditableBody, EditableLine, PrioEdit, post, autofocus } from "/editor.js";
 import { AddButton, Welcome } from "/add.js";
@@ -7,7 +7,6 @@ import { TaskDiff, useCommit } from "/diff.js";
 import { Affected } from "/affected.js";
 import { Resolve } from "/resolve.js";
 
-const runningId = (d) => d.running && d.running.task_id;
 // A text edit sends the text it started from as `base`: the server refuses it if the row changed meanwhile.
 const saver = (op) => (id, field) => (v, base) => post({ op, id, [field]: v, ...(base != null ? { base: { [field]: base } } : {}) });
 const saveTask = saver("task_edit");
@@ -18,7 +17,7 @@ const saveMilestone = saver("milestone_edit");
 function TaskPrio({ d, t }) {
   const p = d.prio(t);
   return html`<${PrioEdit} value=${t.priority} effective=${p.value} from=${p.from === "plan" ? "plan" : "–"}
-    save=${t.status === "open" ? saveTask(t.id, "priority") : null} disabled=${runningId(d) === t.id} />`;
+    save=${t.status === "open" ? saveTask(t.id, "priority") : null} disabled=${d.isRunning(t.id)} />`;
 }
 
 // The plain-English intro on top; the technical body right below it, hidden behind a button unless there's no intro.
@@ -30,7 +29,7 @@ function Intro({ intro, saveIntro, children }) {
     ${open ? html`<div class="details-body">${children}</div>` : null}`;
 }
 
-const KINDS = ["work", "plan", "masterplan", "split", "cleanup", "revise", "investigate", "exec"];
+const KINDS = ["work", "plan", "masterplan", "split", "cleanup", "revise", "investigate", "merge", "exec"];
 
 function Banners({ d }) {
   const s = d.state;
@@ -57,13 +56,15 @@ function RunningCard({ d }) {
     ${d.crash ? html`<pre class="crash">${d.crash.error}</pre>` : null}</div>`;
   if (!r) return html`<div class="card"><div class="sub">No worker is running${d.queue.length ? html`: start them with <code>pm run</code> in the project's terminal` : ""}.</div>
     ${d.queue.length ? html`<div class="muted" style="margin-top:4px">Next: <${TaskLink} t=${d.task.get(d.queue[0])} /></div>` : null}</div>`;
-  const t = d.task.get(r.task_id);
-  return html`<div class="card">
-    <div class="row"><${Pill} status="running" /><span class="sub">task ${t.id}, run ${r.id}, for <${Elapsed} start=${r.started_at} /></span></div>
+  return d.runningAll.map((r) => {
+    const t = d.task.get(r.task_id);
+    return html`<div class="card">
+    <div class="row"><${Pill} status="running" /><span class="sub">task ${t.id}, run ${r.id}, for <${Elapsed} start=${r.started_at} /></span><${Worktree} name=${r.worktree} /></div>
     <div style="margin-top:6px;font-weight:600"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /></div>
     <div class="muted" style="margin-top:2px">${t.plan_id != null ? html`<${Named} kind="plan" r=${d.plan.get(t.plan_id)} /> · ` : null}<a href=${`#/task/${t.id}?log`}>live log</a></div>
     <${Handoff} d=${d} r=${r} />
   </div>`;
+  });
 }
 
 export function Overview({ d }) {
@@ -128,10 +129,10 @@ function QueueTable({ d, ids }) {
     <thead><tr><th class="r">#</th><th>prio</th><th>task</th><th>plan</th><th>milestone</th></tr></thead>
     <tbody>${ids.map((id) => {
       const t = d.task.get(id), p = d.plan.get(t.plan_id), m = d.milestoneOfTask(t);
-      const run = d.running && d.running.task_id === id;
+      const run = d.isRunning(id);
       return html`<tr class=${d.queuePos.get(id) === 0 ? "head-row" : ""}>
         <td class="r num muted">${d.queuePos.get(id) + 1}</td><td><${Prio} p=${d.prio(t)} /></td>
-        <td class="subject"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /> ${run ? html`<${Pill} status="running" />` : null}</td>
+        <td class="subject"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /> <${Worktree} name=${t.worktree} /> ${run ? html`<${Pill} status="running" />` : null}</td>
         <td class="ink2">${p ? html`<a class="ink2" href=${`#/plan/${p.id}`}><${Named} kind="plan" r=${p} /></a>` : html`<a class="ink2" href="#/tasks">executive intervention</a>`}</td><td class="muted">${m ? html`<${Named} kind="milestone" r=${m} />` : null}</td></tr>`;
     })}</tbody></table></div>`;
 }
@@ -178,11 +179,11 @@ export function Milestones({ d }) {
 
 export function TaskRows({ d, tasks }) {
   return html`<table><tbody>${tasks.map((t) => {
-    const run = d.running && d.running.task_id === t.id;
+    const run = d.isRunning(t.id);
     const pos = d.queuePos.get(t.id);
     const why = d.excluded(t);
     return html`<tr class=${t.status !== "open" ? "closed" : ""}>
-      <td class="subject"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /></td>
+      <td class="subject"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /> <${Worktree} name=${t.worktree} /></td>
       <td style="width:90px"><${TaskPrio} d=${d} t=${t} /></td>
       <td style="width:170px">${run ? html`<${Pill} status="running" />` : html`<${Pill} status=${d.taskState(t)} />`}
         ${pos != null ? html` <span class="muted num" title="position in the queue">#${pos + 1}</span>` : null}
@@ -272,7 +273,7 @@ function RunsTable({ d, runs, showTask = false }) {
         const i = c.indexOf(r), prev = c[i - 1];
         return html`<span class="tag" title=${prev ? `resumed the session of run ${prev.id} (task ${prev.task_id})` : `its session went on in run ${c[1].id} (task ${c[1].task_id})`}>${i ? "↳ " : ""}${i + 1}/${c.length}</span>`;
       })()}</td>
-      <td class="muted">${r.model || ""}</td><td class="mono muted">${r.base_commit ? r.base_commit.slice(0, 7) : ""}</td></tr>`)}</tbody></table></div>`;
+      <td class="muted">${r.model || ""}${r.worktree ? html` <${Worktree} name=${r.worktree} />` : null}</td><td class="mono muted">${r.base_commit ? r.base_commit.slice(0, 7) : ""}</td></tr>`)}</tbody></table></div>`;
 }
 
 // A failed run's reason is pm's summary: show it whole; others: the first line.
@@ -293,7 +294,7 @@ export function Log({ d, t, live, run = null, reveal = false }) {
     if (box.current && stick.current) box.current.scrollTop = box.current.scrollHeight;
   }, [lines]);
   useEffect(() => { if (reveal && lines && box.current) box.current.scrollIntoView({ block: "nearest" }); }, [reveal, lines === null]);
-  const size = live && d.state.__log && d.state.__log.task === t.id ? d.state.__log.size : null;
+  const size = (live && (d.state.__log || []).find((l) => l.task === t.id) || {}).size ?? null;
   useEffect(() => { f.current = { gen: f.current.gen + 1, next: 0, busy: false, again: false }; stick.current = true; setLines(null); setCut(0); }, [t.id, run]);
   useEffect(() => {
     const s = f.current;
@@ -357,13 +358,28 @@ function ModelPick({ d, t, disabled }) {
     ${error ? html` <span class="err">${error}</span>` : null}`;
 }
 
+// A task's work tree: its name, editable while it is open and not running; empty: the main checkout ("base").
+function WorktreePick({ t, disabled }) {
+  const [error, setError] = useState(null);
+  if (t.status !== "open" || disabled) return html`<span>${t.worktree || "base (the main checkout)"}</span>`;
+  const change = async (v) => {
+    v = v.trim();
+    if (v === (t.worktree || "")) return;
+    try { await post({ op: "task_edit", id: t.id, worktree: v || null }); setError(null); } catch (e) { setError(e.message); }
+  };
+  return html`<input class="small" key=${t.worktree || ""} value=${t.worktree || ""} placeholder="base (the main checkout)"
+      title="its own git work tree, e.g. questions: runs in parallel with other work trees' tasks, merged when done; empty: the main checkout"
+      onChange=${(e) => change(e.target.value)} onKeyDown=${(e) => e.key === "Enter" && e.target.blur()} />
+    ${error ? html` <span class="err">${error}</span>` : null}`;
+}
+
 // The task page; the live page shows the same for its selected task (`embedded`: with a link to this page).
 export function Task({ d, id, query, embedded = false }) {
   const t = d.task.get(id);
   if (!t) return html`<div class="empty">No task ${id}.</div>`;
   const p = d.plan.get(t.plan_id), m = d.milestoneOfTask(t);
   const runs = d.taskRuns(t);
-  const running = d.running && d.running.task_id === t.id;
+  const running = d.isRunning(t.id);
   const decs = d.decisionsOf.get(t.id) || [];
   const created = d.createdBy.get(t.id) || [];
   const pos = d.queuePos.get(t.id);
@@ -375,13 +391,14 @@ export function Task({ d, id, query, embedded = false }) {
     <${Titled} kind="task" id=${t.id}><${EditableLine} text=${t.subject} save=${t.status === "open" ? saveTask(t.id, "subject") : null} disabled=${running} /></${Titled}>
     <div class="row sub">${running ? html`<${Pill} status="running" />` : html`<${Pill} status=${d.taskState(t)} />`}<${Kind} kind=${t.kind} />
       <span>priority <${TaskPrio} d=${d} t=${t} /></span>
-      ${running ? html`<span>· <${Elapsed} start=${d.running.started_at} /></span>` : null}
+      ${running ? html`<span>· <${Elapsed} start=${d.runningOf.get(t.id).started_at} /></span>` : null}
       ${pos != null && !running ? html`<span>· ${pos === 0 ? "next in the queue" : `#${pos + 1} in the queue`}</span>` : null}
       ${why && typeof why === "string" ? html`<span>· not queued: ${why}</span>` : null}</div>
     <dl class="meta">
       <dt>created</dt><dd>${stamp(t.created_at)}${t.created_by_task != null ? html` by <a href=${`#/task/${t.created_by_task}`}>task ${t.created_by_task}</a>` : " by the human or pm"}</dd>
       ${t.retired_at ? html`<dt>${t.status}</dt><dd>${stamp(t.retired_at)} · <${Time} ts=${t.retired_at} /></dd>` : null}
       ${t.note ? html`<dt>note</dt><dd>${t.note}</dd>` : null}
+      ${t.kind !== "exec" ? html`<dt>work tree</dt><dd><${WorktreePick} t=${t} disabled=${running} /></dd>` : null}
       ${t.model_pick || t.model ? html`<dt>model</dt><dd><${ModelPick} d=${d} t=${t} disabled=${running} /></dd>` : null}
       ${runs.length ? html`<dt>runs</dt><dd>${runs.length}, ${duration(runs.reduce((s, r) => s + seconds(r.started_at, r.ended_at), 0))}, ${usd(d.cost(runs))}</dd>` : null}
     </dl>

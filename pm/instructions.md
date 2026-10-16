@@ -1,6 +1,6 @@
 # pm: instructions for agents
 
-`pm` keeps a project's work as **milestones → plans → tasks**, plus **decisions** that only the human can make. Everything lives in `tasks.sql` (SQL text, tracked by git) and is read and changed only through `pm` commands. `pm run` works the queue one task at a time with a `claude -p` worker; as a worker you are one task of that run (environment `PM_TASK=<your task>`). A work task right after a done work task of the same plan may continue that task's Claude session (warm hand-off): what you learned of the code still holds, but only the task in your newest prompt is yours.
+`pm` keeps a project's work as **milestones → plans → tasks**, plus **decisions** that only the human can make. Everything lives in `tasks.sql` (SQL text, tracked by git) and is read and changed only through `pm` commands. `pm run` works the queue one task at a time with a `claude -p` worker, one per work tree: a task with a work tree runs in its own git work tree, in parallel with other work trees' tasks, and pm merges its branch when it is done; as a worker you are one task of that run (environment `PM_TASK=<your task>`). A work task right after a done work task of the same plan may continue that task's Claude session (warm hand-off): what you learned of the code still holds, but only the task in your newest prompt is yours.
 
 ## Rules
 
@@ -124,7 +124,7 @@ EOF
 pm task add 2 "Untangle the cache invalidation" --model opus <<'EOF'   # needs deep reasoning
 …
 EOF
-pm task set 6 [--subject …] [--body -] [--priority N|none] [--web|--no-web] [--model opus|none]   # open, not running
+pm task set 6 [--subject …] [--body -] [--priority N|none] [--web|--no-web] [--model opus|none] [--worktree <name>|base]   # open, not running
 pm task priority 6 710          # none: back to the plan's
 pm task done 5 "2026-10-10, app/api/export.py, tests/test_export.py"
 pm task drop 6 "covered by task 5"
@@ -133,6 +133,8 @@ pm task drop 6 "covered by task 5"
 A task fits one worker run: one change you can describe, check and commit.
 
 **Model:** pm picks the worker's model by task kind (`[models]` in the config: usually Sonnet for work, Opus for planning and investigations) and switches a task to Opus after a failed run. When splitting a plan, mark a work task that needs deep reasoning (subtle design, hard bugs, wide refactors) `--model opus`; leave the rest to pm.
+
+**Work trees:** `--worktree <name>` (e.g. `questions`) on `pm task add|set`: the task runs in its own git work tree, in parallel with other work trees' tasks, one task per work tree at a time, merged into the main checkout when done; `base`: the main checkout. Tasks you add get your own task's work tree unless you say otherwise. Give a work tree only to tasks the human or the plan assigned to one; don't invent work trees. In a work tree, stay in it; pm's commands still use the main checkout's database.
 
 **Web access:** workers have no WebSearch or WebFetch, except for a task marked web (`--web`). Mark only a task that needs it, e.g. "verify the sourced figures"; its worker gets both tools once the human approves the sign-off (if `"web"` is in `signoff`). Your own task needs the web: `pm task set <your task> --web`, then stop without closing it, even when pm reminds you it is open; the next run has the tools. Don't ask for web access with a decision, and don't edit settings to grant it.
 

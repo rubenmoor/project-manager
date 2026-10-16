@@ -18,7 +18,7 @@ export function useNotifications(d) {
     const now = {
       pending: new Set(d.decisions.filter((x) => x.status === "pending").map((x) => x.id)),
       failed: new Set(d.runs.filter((x) => x.result === "failed").map((x) => x.id)),
-      running: d.running ? d.running.id : null,
+      running: d.runningAll.length,
       crash: d.crash ? d.crash.at : null,
       queue: d.queue.length,
     };

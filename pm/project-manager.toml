@@ -23,6 +23,14 @@ limit_margin_minutes = 5
 # session, then a fresh one; 0 or 1: every task fresh. Still one run, one commit and one cost record per task.
 warm_handoff = 3
 
+# Work trees: a task with a work tree (`pm task add|set --worktree <name>`) runs in its own git work tree,
+# <worktree_dir>/<name> on the branch pm/wt/<name>, made from the main checkout's HEAD; pm commits its work there,
+# merges the branch into the main checkout once no task runs there, and removes the work tree. Tasks of different work
+# trees (the main checkout is one) run at the same time, at most max_parallel; 1: one task at a time.
+# worktree_dir: relative to the project root, "{repo}" is the project folder's name; keep it outside the project.
+max_parallel = 4
+worktree_dir = "../{repo}-worktrees"
+
 # Worker logs. A relative path is inside the git directory, so it is never tracked.
 log_dir = "pm-logs"
 
@@ -88,6 +96,19 @@ Then, by what you find:
 * nothing to fix (a passing outage): say so; task {task_id} runs again as it is
 If earlier investigations of this task are listed below, don't repeat their fix: raise a decision instead.
 Your note on `pm task done`: the cause and what you queued.
+'''
+
+# The task pm queues in the main checkout when a work tree's branch doesn't merge cleanly (kind merge, priority of the
+# merged task + 2); the work tree runs nothing until its branch is merged. {worktree}, {branch}, {tasks} (the tasks
+# the branch holds) are replaced.
+merge_prompt = '''
+Merging the branch `{branch}` of work tree {worktree} into the main checkout conflicts. It holds the work of {tasks}.
+* `git merge --no-commit --no-ff {branch}`, then resolve every conflict so both sides' intent survives; read both
+  tasks (`pm show <id>`) and the commits (`git log -p HEAD...{branch}`) where it isn't obvious
+* run the checks the project has for the files involved
+* stage the result (`git add`); pm commits the merge. Don't `git merge --abort` unless you queue a task that redoes the
+  branch's work instead
+Your note on `pm task done`: what conflicted and how you resolved it.
 '''
 
 # Body of the task "write an executive summary" (kind exec), queued by `pm summary request` or the

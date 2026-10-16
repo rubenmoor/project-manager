@@ -17,18 +17,18 @@ In the project's git repository (the one with `project-manager.toml`):
 
 ## Views
 
-- **Live** (home while pm runs): left, one timeline: queue above (next nearest), the running task between two rules (a warm hand-off: "same Claude session as task M (run N), task k of at most `warm_handoff`"), done and dropped tasks below (newest first); a click selects a task (outline); right, the selected task's task page (below), with a link to it
-  - running task (or what pm run is doing) pinned in the middle; queue and done/dropped scroll on their own; queue opens at "next"
+- **Live** (home while pm runs): left, one timeline: queue above (next nearest), the running tasks between two rules, one per work tree, stacked (a warm hand-off: "same Claude session as task M (run N), task k of at most `warm_handoff`"), done and dropped tasks below (newest first); a click selects a task (outline); right, the selected task's task page (below), with a link to it
+  - running tasks (or what pm run is doing) pinned in the middle; queue and done/dropped scroll on their own; queue opens at "next"
   - "blocked by decisions" (queue header, off by default, remembered in the browser): open tasks waiting for pending decisions, in purple, where they would queue once unblocked, with the decisions they wait for
   - failed last run: a red "failed" pill in the queue; with no worker running, "pm run stopped: task N failed" and the likely cause
   - crashed `pm run` (e.g. disk full): "pm not running", the task it was on and its error (also on the overview, and a notification); its stale `running` run shows as "crashed"
-- **Overview**: running task, decisions waiting on you, cost, open and on-hold milestones with progress, queue head; without milestones a welcome screen with one button
+- **Overview**: running tasks, decisions waiting on you, cost, open and on-hold milestones with progress, queue head; without milestones a welcome screen with one button
 - **Queue**: as `pm run` sees it; open tasks it leaves out and why
 - **Tasks**: every task. On top: pending decisions by how many open tasks answering each frees (it is their only blocker), the top one highlighted, each listing its waiting tasks; then executive interventions (exec tasks, no plan; add one there); then by milestone (queue index) and plan, done plans folded; open, closed or all
 - **Milestones**: open and on-hold cards grouped by queue index (lowest first), completed ones in their own column on the right (newest first); with progress and the number of pending decisions its open tasks wait for, linked to exactly those (`#/decisions?milestone=N`)
 - **Plan**, **decision** pages: the intro (plain English) on top; the body right below it, hidden behind "Show details" (shown when there is no intro); a plan's intro is editable; decision lists show the intro under the subject
 - **Milestone**, **plans**: plans by priority with their tasks; filters by status and kind; change a milestone's queue index; put a milestone on hold or resume it (its plans and open tasks show "on hold")
-- **Task**: queue position or what blocks it, note, priority, model (open task: pm's pick by kind or after a failure, or a chosen one), decisions; after a failed run: pm's summary; the body last, at the bottom
+- **Task**: queue position or what blocks it, note, priority, work tree (open task: editable, empty: the main checkout), model (open task: pm's pick by kind or after a failure, or a chosen one), decisions; after a failed run: pm's summary; the body last, at the bottom
   - done or dropped: rows its commit touched (Affected: tasks created first; tasks, plans, decisions, milestones: new, edited, done, dropped, answered, waits for …; each styled by kind; says why when empty), files changed, the full diff (syntax highlighted)
   - runs, worker log (live while it runs, following its end)
   - worker log always shown, each event with the time pm got it (local, HH:MM:SS; none in logs before pm 57): a box 20 lines high, opened at its end, following it while scrolled there; scroll up for earlier lines (`?log` scrolls to it)
@@ -67,7 +67,7 @@ Text is edited in place, through pm's own methods; each change is a commit (`pm:
 
 - Reads the working copy of `tasks.sql` (a running worker's changes included) through `pm.Project.connect()`
 - Polls `tasks.sql`, `.git/HEAD`, `.git/index`, `.git/logs/HEAD` every 0.5 s; pushes changes over server-sent events; the browser refetches the snapshot
-- The running task: the `run` row with result `running` that `pm run` keeps while a worker works, and only while `pm run` holds its lock; else it is stale and the error comes from `pm.Project.run_crash`
+- The running tasks: the `run` rows with result `running` (one per work tree) that `pm run` keeps while workers work, and only while `pm run` holds its lock; else it is stale and the error comes from `pm.Project.run_crash`
 - Between tasks: a running task already done (its worker finishing), then `pm run` committing and picking the next task or waiting for a usage limit: told apart by the run row and `pm run`'s lock (`pm.Project.run_pid`); shown with a spinner; `pm run` alive with an empty queue: "pm run waits for tasks"
 - Worker log: `.git/pm-logs/task-<id>-run-<run>.log` (`task-<id>.log`: the latest), shown as `pm run` shows it (`pm.Project.read_event`); `pm run` flushes it per line
 - Usage limits: the newest `rate_limit_event` in the worker logs (claude's stream-json); as of the last worker's API call, so stale between runs; usage outside pm counts in the % but not in the token totals

@@ -12,7 +12,8 @@ worker reads the previous summary and stores the new one in the summary table; a
 tokens and cost; a custom report (`pm report ask`) answers the human's question in one paragraph. The queue (the `queue` view): open
 tasks of open milestones, and open exec tasks, that no pending decision blocks, by the milestone's queue index (lowest
 first; exec: 0), then highest priority first, then by milestone, plan and task.
-Worked one task at a time by `claude -p`. Standard library only (Python 3.11+).
+Worked one task at a time by `claude -p`, one per work tree (task.worktree): a work tree's task runs in its own git
+work tree, in parallel, and its branch is merged into the main checkout when done. Standard library only (Python 3.11+).
 
     pm init | status | queue | show <task|d32|p3|m1> | validate | decide | run [--once] [--dry-run] | instructions
     pm milestone add|set|hold|resume|list|show …   pm plan add|edit|list …   pm task add|set|done|drop|priority …
@@ -24,12 +25,12 @@ Works on the git repository around the current directory. `pm init` writes the s
 template is the file of that name next to this one), and commits it; the first command that uses the database
 writes it. pm commits its own changes to tasks.sql; workers commit them with their work. Nothing is pushed.
 """
-import argparse, collections, contextlib, datetime, fcntl, functools, json, os, re, shlex, signal, sqlite3, \
+import argparse, collections, contextlib, datetime, fcntl, functools, json, os, queue, re, shlex, signal, sqlite3, \
     subprocess, sys, threading, time, tomllib, traceback, zoneinfo
 from pathlib import Path
 
 
-VERSION = 65  # bump by one with every commit (AGENTS.md)
+VERSION = 66  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -44,7 +45,7 @@ WORKER_ENV = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1", "BASH_MAX_TIMEOUT_MS"
 EPILOG = "Agents (LLMs): read `pm instructions` first, the full reference with examples for every command."
 PROMPT_KEYS = ("masterplan_prompt", "plan_tasks_prompt", "revise_masterplan_prompt", "revise_plan_prompt",
                "cleanup_prompt", "investigate_prompt", "summary_prompt",
-               "report_prompt", "custom_report_prompt")
+               "report_prompt", "custom_report_prompt", "merge_prompt")
 PRIORITY_KEYS = ("plan_priority_prompt", "task_priority_prompt")
 # Items are referred to by id and full subject, `ref()`: plain in a subject, in backticks in a body.
 CLEANUP_SUBJECT = "post-milestone cleanup of {}"
@@ -53,6 +54,8 @@ WRITE_MASTERPLAN_SUBJECT = "write the masterplan of {}"
 REVISE_MASTERPLAN_SUBJECT = "revise the masterplan of {}"
 REVISE_PLAN_SUBJECT = "revise {}"
 INVESTIGATE_SUBJECT = "investigate the failure of {}"
+MERGE_SUBJECT = "merge work tree {} into the main checkout"
+WORKTREE_BRANCH = "pm/wt/"     # + the work tree's name: the branch of its checkout
 SUMMARY_SUBJECT = "write an executive summary"
 SUMMARY_PRIORITY = 10000
 REPORT_SUBJECT = "write a resource use report"
@@ -60,9 +63,9 @@ CUSTOM_REPORT_SUBJECT = "answer: {}"
 # Dedupes queued planning tasks: a running one may have read the old text already, so it doesn't count.
 NOT_RUNNING = "AND id NOT IN (SELECT task_id FROM run WHERE result = 'running')"
 # work: the default; plan: writes a plan; made by pm only: masterplan, split ("create tasks for plan N: …"), cleanup,
-# revise ("revise the masterplan of milestone N: …", "revise plan N: …"), investigate (a failed task); made by the
-# human only: exec (an executive intervention, the only kind without a plan)
-TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup", "revise", "investigate", "exec")
+# revise ("revise the masterplan of milestone N: …", "revise plan N: …"), investigate (a failed task), merge (a work
+# tree's branch that didn't merge); made by the human only: exec (an executive intervention, the only kind without a plan)
+TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup", "revise", "investigate", "merge", "exec")
 PLANNING_KINDS = ("plan", "masterplan", "split")
 # `signoff` in project-manager.toml → decision.signoff; a sign-off's only answer is SIGNOFF_ANSWER
 SIGNOFF_LEVELS = {"masterplans": "masterplan", "plans": "plan", "task-queue": "task-queue", "web": "web"}
@@ -84,7 +87,7 @@ SIGNOFF_INTROS = {
 IN_LOG = ("status = 'answered' AND signoff IS NULL AND kind = 'rule' AND id NOT IN (SELECT superseded_id FROM "
           "decision_supersedes s JOIN decision n ON n.id = s.decision_id WHERE s.note = '' AND n.status = 'answered')")
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 # A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
 # run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
 # Columns and tables SCHEMA dropped are left behind, new ones get their defaults; so only renames, moved data and new
@@ -109,7 +112,7 @@ def exec_kind(con):
 
 
 MIGRATIONS = {12: "", 13: "", 14: revise_kind, 15: "", 16: "", 17: "", 18: drop_summary_kind, 19: exec_kind,
-              20: "", 21: "", 22: "", 23: "", 24: ""}
+              20: "", 21: "", 22: "", 23: "", 24: "", 25: ""}
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -138,7 +141,7 @@ CREATE TABLE task (
     id              INTEGER PRIMARY KEY,
     plan_id         INTEGER REFERENCES plan (id),          -- NULL: exec, and only exec
     subject         TEXT NOT NULL CHECK (trim(subject) <> ''),
-    kind            TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'plan', 'masterplan', 'split', 'cleanup', 'revise', 'investigate', 'exec')),
+    kind            TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'plan', 'masterplan', 'split', 'cleanup', 'revise', 'investigate', 'merge', 'exec')),
     status          TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done', 'dropped')),
     priority        INTEGER,                               -- NULL: the plan's
     note            TEXT,                                  -- done: date, files; dropped: reason
@@ -148,9 +151,11 @@ CREATE TABLE task (
     created_by_task INTEGER REFERENCES task (id),
     web             INTEGER NOT NULL DEFAULT 0 CHECK (web IN (0, 1)),  -- 1: its worker gets WebSearch and WebFetch
     model           TEXT CHECK (model IS NULL OR trim(model) <> ''),  -- claude --model; NULL: [models] in the config
+    worktree        TEXT CHECK (worktree GLOB '[a-z0-9]*' AND worktree NOT GLOB '*[^a-z0-9-]*'),  -- NULL: the main checkout
     CONSTRAINT "an open task needs a body" CHECK (status <> 'open' OR trim(body) <> ''),
     CONSTRAINT "retired_at is set exactly when done or dropped" CHECK ((status = 'open') = (retired_at IS NULL)),
-    CONSTRAINT "an exec task has no plan, every other task has one" CHECK ((kind = 'exec') = (plan_id IS NULL))
+    CONSTRAINT "an exec task has no plan, every other task has one" CHECK ((kind = 'exec') = (plan_id IS NULL)),
+    CONSTRAINT "an exec task runs in the main checkout" CHECK (kind <> 'exec' OR worktree IS NULL)
 ) STRICT;
 
 CREATE TABLE decision (
@@ -188,6 +193,7 @@ CREATE TABLE run (                                         -- one worker run of 
     reason                TEXT,                            -- failed: why; limit: the message
     exit_code             INTEGER,
     base_commit           TEXT,                            -- HEAD when the run started
+    worktree              TEXT,                            -- the task's work tree then; NULL: the main checkout
     model                 TEXT,                            -- from here on: the worker's JSON output, if any
     session_id            TEXT,
     continues_run         INTEGER REFERENCES run (id),     -- warm hand-off: the run whose Claude session it resumed
@@ -260,10 +266,11 @@ CREATE INDEX task_plan ON task (plan_id);
 CREATE INDEX task_decision_decision ON task_decision (decision_id);
 CREATE INDEX decision_superseded ON decision_supersedes (superseded_id);
 CREATE INDEX run_task ON run (task_id);
-CREATE UNIQUE INDEX run_running ON run (result) WHERE result = 'running';  -- at most one
+CREATE UNIQUE INDEX run_running ON run (coalesce(worktree, '')) WHERE result = 'running';  -- at most one per work tree
 
 CREATE VIEW queue AS
-SELECT coalesce(t.priority, p.priority, 0) AS priority, t.id AS task_id, t.subject, t.kind
+SELECT coalesce(t.priority, p.priority, 0) AS priority, t.id AS task_id, t.subject, t.kind,
+       coalesce(m.queue_index, 0) AS queue_index, t.worktree
 FROM task t
 LEFT JOIN plan p ON p.id = t.plan_id
 LEFT JOIN milestone m ON m.id = p.milestone_id
@@ -538,6 +545,10 @@ def load_config(root):
     errors += [f"{k} must be an integer >= 0" for k in ("limit_margin_minutes", "warm_handoff")
                if not isinstance(config[k], int) or isinstance(config[k], bool) or config[k] < 0]
     errors += [f"{k} must be a string" for k in ("log_dir", "editor") if not isinstance(config[k], str)]
+    if not isinstance(config["max_parallel"], int) or isinstance(config["max_parallel"], bool) or config["max_parallel"] < 1:
+        errors.append("max_parallel must be an integer >= 1")
+    if not isinstance(config["worktree_dir"], str) or not config["worktree_dir"].strip():
+        errors.append("worktree_dir must be a folder")
     errors += [f"{k} must be a non-empty string" for k in PROMPT_KEYS
                if not isinstance(config[k], str) or not config[k].strip()]
     errors += [f"{k} must be a string" for k in PRIORITY_KEYS if not isinstance(config[k], str)]
@@ -576,9 +587,40 @@ def dump(con):
 
 
 def running_run(db):
-    """The run row of the worker running now, or None."""
-    r = db.execute("SELECT * FROM run WHERE result = 'running'").fetchone()
+    """The run row of the worker running in the main checkout now, or None."""
+    r = db.execute("SELECT * FROM run WHERE result = 'running' AND worktree IS NULL").fetchone()
     return dict(r) if r else None
+
+
+WORKTREE_NAME = re.compile(r"[a-z0-9][a-z0-9-]*")
+STASH_LOCK = threading.Lock()   # git's stash is one for all work trees
+
+
+def worktree_arg(v):
+    """--worktree: a name, or "base" (or "none") for the main checkout (None)."""
+    if v in ("base", "none"):
+        return None
+    if not WORKTREE_NAME.fullmatch(v):
+        raise argparse.ArgumentTypeError(f"{v!r}: lowercase letters, digits and -, e.g. questions; base: the main checkout")
+    return v
+
+
+class PrefixOut:
+    """Output of a work tree's task: each line prefixed with its name; whole lines, so threads don't mix them."""
+
+    def __init__(self, out, prefix):
+        self.out, self.prefix, self.buf, self.lock = out, prefix, "", threading.Lock()
+
+    def write(self, s):
+        with self.lock:
+            self.buf += s
+            *lines, self.buf = self.buf.split("\n")
+            if lines:
+                self.out.write("".join(f"{self.prefix}{l}\n" if l else "\n" for l in lines))
+        return len(s)
+
+    def flush(self):
+        self.out.flush()
 
 
 def memory():
@@ -638,6 +680,25 @@ class Project:
         self.cache = None           # (file_key(), the loaded database)
         self.mutex = threading.RLock()
         self.locked = False
+        self.base = None            # a work tree's task: the main checkout's Project (database, `pm run` state)
+        self.worktree = None        # its name
+        self.killed = None          # `pm run` stops now: the signal's name; its workers are killed
+        self.limit_until = None     # a worker waits for the usage limit's reset: start no other task until then
+        self.procs = set()          # the running workers' process ids
+        self.finished = None        # `pm run`: queue.Queue of (work tree, task id, result, message)
+
+    @property
+    def top(self):
+        """The main checkout's Project: `pm run`'s state lives there."""
+        return self.base or self
+
+    def child(self, name, path):
+        """The Project of task in work tree `name` (checked out at path): git runs there, the database is the main
+        checkout's (same file, cache and lock), output lines prefixed with the name."""
+        c = Project(path, self.config, out=PrefixOut(self.out, f"[{name}] "))
+        c.db_path, c.base, c.worktree = self.db_path, self, name
+        c.connect = self.connect
+        return c
 
     def say(self, *args):
         print(*args, file=self.out, flush=True)
@@ -646,7 +707,8 @@ class Project:
 
     @functools.cached_property
     def git_dir(self):
-        return Path(self.git("rev-parse", "--absolute-git-dir").strip())
+        """The repository's git directory, the same from every work tree."""
+        return Path(self.git("rev-parse", "--path-format=absolute", "--git-common-dir").strip())
 
     @contextlib.contextmanager
     def lock(self):
@@ -774,9 +836,10 @@ class Project:
         os.replace(tmp, self.db_path)
 
     def commit_db(self, message, running=...):
-        """Commit the database file if it changed. Not in a worker, nor while one runs: `pm run` commits the file with
-        the task. Returns False if git failed."""
-        if os.environ.get("PM_WORKER") or not self.git("status", "--porcelain", "--", self.db).strip():
+        """Commit the database file if it changed. Not in a worker, nor while one runs in the main checkout: `pm run`
+        commits the file with the task. In a work tree: never, the main checkout commits it. Returns False if git
+        failed."""
+        if self.base or os.environ.get("PM_WORKER") or not self.git("status", "--porcelain", "--", self.db).strip():
             return True
         if running is ...:
             with self.connect() as db:
@@ -818,7 +881,7 @@ class Project:
         return ds
 
     def queue(self):
-        """[(priority, task id, subject, kind)]: the `queue` view."""
+        """[(priority, task id, subject, kind, queue index, work tree)]: the `queue` view."""
         return [tuple(r.values()) for r in self.rows("SELECT * FROM queue")]
 
     # --- git ---------------------------------------------------------------------------------
@@ -1642,31 +1705,39 @@ class Project:
             queued = [self.queue_plan_tasks(db, pid)] + [self.queue_revision(db, c, pid) for c in self.child_plans(db, pid)]
             return [q for q in queued if q]
 
-    def task_add(self, pid, subject, body, prio=None, kind="work", web=False, model=None):
-        """A new task; a plan-writing one gets planning_priority unless prio is given. kind exec: the human's, pid None."""
+    def task_add(self, pid, subject, body, prio=None, kind="work", web=False, model=None, worktree=...):
+        """A new task; a plan-writing one gets planning_priority unless prio is given. kind exec: the human's, pid None.
+        worktree: its work tree's name, None: the main checkout; not given: a worker's task gets its own task's."""
         if prio is None and kind in PLANNING_KINDS:
             prio = self.config["planning_priority"]
         if kind == "exec":
             human_only("add an exec task")
+            if worktree not in (None, ...):
+                raise FormatError("an exec task runs in the main checkout, it has no work tree")
         with self.connect(write=True) as db:
             if kind != "exec":
                 self.check_plan_open(db, pid)
-            return db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task, web, model) "
-                              "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-                              (pid, subject, kind, prio, body.strip(), creator(), int(web), model)).lastrowid
+            if worktree is ...:
+                own = creator() and db.execute("SELECT worktree FROM task WHERE id = ?", (creator(),)).fetchone()
+                worktree = own[0] if own and kind != "exec" else None
+            return db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task, web, model, "
+                              "worktree) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                              (pid, subject, kind, prio, body.strip(), creator(), int(web), model, worktree)).lastrowid
 
     def task_set(self, tid, **fields):
-        """Set fields of an open task (status, note, priority, subject, body, web); a value None clears it. A running task:
-        only its own worker changes it, and not its subject or body."""
+        """Set fields of an open task (status, note, priority, subject, body, web, model, worktree); a value None clears
+        it. A running task: only its own worker changes it, and not its subject, body or work tree."""
         with self.connect(write=True) as db:
             if (t := self.get(db, "task", tid))["status"] != "open":
                 raise FormatError(f"task {tid} is {t['status']}; a closed task can't be changed")
-            if (r := running_run(db)) and r["task_id"] == tid:
+            if db.execute("SELECT 1 FROM run WHERE result = 'running' AND task_id = ?", (tid,)).fetchone():
                 if creator() != tid:
                     raise FormatError(f"task {tid} is running; it can't be changed until its run ends")
-                if {"subject", "body"} & fields.keys():
-                    raise FormatError(f"task {tid} is running; its subject and body can't be changed. "
+                if {"subject", "body", "worktree"} & fields.keys():
+                    raise FormatError(f"task {tid} is running; its subject, body and work tree can't be changed. "
                                       f"Add a follow-up task instead: pm task add {t['plan_id']}")
+            if fields.get("worktree") and t["kind"] == "exec":
+                raise FormatError(f"task {tid} is an exec task: it runs in the main checkout, it has no work tree")
             for k, v in fields.items():
                 if k == "status":
                     db.execute("UPDATE task SET status = ?, retired_at = CASE WHEN ? <> 'open' THEN ? END WHERE id = ?",
@@ -1777,6 +1848,8 @@ class Project:
             web += f", model {model or 'claude default'}" + ("" if why == "set" else f" ({why})")
         elif t["model"]:
             web += f", model {t['model']}"
+        if t["worktree"]:
+            web += f", work tree {t['worktree']}"
         out += [f"# Task {tid}: {t['subject']} ({t['status']}, kind {t['kind']}, priority {prio}{web}, "
                 f"created {stamp(t['created_at'])}{retired}{by(t)})", ""]
         if t["note"]:
@@ -1807,6 +1880,8 @@ class Project:
             parts.append(f"${r['cost_usd']:.2f}")
         if r["continues_run"]:
             parts.append(f"continues run {r['continues_run']}")
+        if r["worktree"]:
+            parts.append(f"work tree {r['worktree']}")
         return ", ".join(parts) + (f": {r['reason'].splitlines()[0][:120]}" if r["reason"] else "")
 
     # --- run ---------------------------------------------------------------------------------
@@ -1832,8 +1907,14 @@ class Project:
             prompt = (f"Task {handoff['task_id']} is done and committed. This session goes on with the next task of its "
                       f"plan: what you learned of the code still holds, what you were told about task "
                       f"{handoff['task_id']} no longer does.\n\n" + prompt)
+        if self.base:
+            prompt += (f"\n\nYou work in a git work tree of your own, {self.root}, on the branch "
+                       f"{WORKTREE_BRANCH}{self.worktree}; other tasks run at the same time in the main checkout, "
+                       f"{self.base.root}, and other work trees. Stay in yours: pm commits what you stage here and "
+                       "merges it into the main checkout. pm's commands use the main checkout's database; the copy "
+                       f"of {self.db} here is stale.")
         hook = {"type": "command", "command": shlex.join([sys.executable, str(GUARD)])}
-        permissions = {"deny": [f"Read(/{self.db_path.resolve()})"]}
+        permissions = {"deny": [f"Read(/{p.resolve()})" for p in {self.db_path, self.root / self.db}]}
         if self.web_granted(tid):
             permissions["allow"] = WEB_TOOLS
         settings = json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [hook]}], "Stop": [{"hooks": [hook]}]},
@@ -1869,7 +1950,8 @@ class Project:
 
     def handoff(self, tid):
         """Warm hand-off: the latest run, if task tid can resume its Claude session (run row with task_id,
-        session_id), else None. Both tasks are work tasks of one plan, the previous one done by that run less than
+        session_id), else None. The latest run of the same work tree; both tasks are work tasks of one plan, the
+        previous one done by that run less than
         HANDOFF_MINUTES ago, the chain of resumed runs shorter than warm_handoff, the worker claude's stream-json."""
         w, limit = self.config["worker"], self.config["warm_handoff"]
         if not limit or Path(w[0]).name != "claude" or "stream-json" not in w:
@@ -1877,7 +1959,8 @@ class Project:
         with self.connect() as db:
             t = self.get(db, "task", tid)
             r = db.execute("SELECT r.*, t.plan_id, t.kind, t.status FROM run r JOIN task t ON t.id = r.task_id "
-                           "ORDER BY r.id DESC LIMIT 1").fetchone()
+                           "WHERE coalesce(r.worktree, '') = coalesce(?, '') ORDER BY r.id DESC LIMIT 1",
+                           (t["worktree"],)).fetchone()
             if not (r and t["kind"] == r["kind"] == "work" and t["plan_id"] == r["plan_id"] and r["result"] == "done"
                     and r["status"] == "done" and r["session_id"] and r["task_id"] != tid
                     and seconds(r["ended_at"], None) < HANDOFF_MINUTES * 60):
@@ -1909,41 +1992,43 @@ class Project:
         """Run the worker in its own session, writing its output to the log and a readable form of it to the
         terminal. Returns the exit code; `info` gets what its JSON output (`--output-format stream-json`) says about
         the run (model, tokens, cost, the last tool call) and the last lines shown. Interrupted (Ctrl-C, SIGTERM,
-        SIGHUP): the worker's process group gets SIGTERM."""
+        SIGHUP): `pm run` sends the worker's process group SIGTERM (self.procs)."""
         log.parent.mkdir(parents=True, exist_ok=True)
         info["shown"] = shown_lines = collections.deque(maxlen=15)
-        def stop(sig, _):
-            raise KeyboardInterrupt(signal.Signals(sig).name)
-        old = {sig: signal.signal(sig, stop) for sig in (signal.SIGTERM, signal.SIGHUP)}
-        try:
-            with open(log, "w", encoding="utf-8", errors="replace") as f, subprocess.Popen(
-                    cmd, cwd=self.root, env=os.environ | {"PM_WORKER": "1", "PM_TASK": str(tid), "PM_DB": self.db},
-                    stdin=subprocess.DEVNULL if prompt is None else subprocess.PIPE, stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1,
-                    start_new_session=True) as proc:
-                try:
-                    if prompt is not None:
-                        with contextlib.suppress(BrokenPipeError):
-                            proc.stdin.write(prompt)
-                        with contextlib.suppress(BrokenPipeError):
-                            proc.stdin.close()
-                    for line in proc.stdout:
-                        stamp = now()
-                        f.write(f"{stamp}\t{line}")
-                        f.flush()                   # read live by pm-dashboard
-                        shown = self.read_event(line, info)
-                        if shown is not None:
-                            shown_lines.extend(shown.rstrip("\n").split("\n"))
-                            self.out.write(f"{clock(stamp)} " + shown.rstrip("\n").replace("\n", "\n         ") + "\n")
-                            self.out.flush()
-                    return proc.wait()
-                except BaseException:
-                    with contextlib.suppress(ProcessLookupError, PermissionError):
-                        os.killpg(proc.pid, signal.SIGTERM)
-                    raise
-        finally:
-            for sig, handler in old.items():
-                signal.signal(sig, handler)
+        env = os.environ | {"PM_WORKER": "1", "PM_TASK": str(tid), "PM_DB": self.db}
+        if self.base:
+            env["PM_ROOT"] = str(self.base.root)
+        procs = self.top.procs
+        with open(log, "w", encoding="utf-8", errors="replace") as f, subprocess.Popen(
+                cmd, cwd=self.root, env=env,
+                stdin=subprocess.DEVNULL if prompt is None else subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1,
+                start_new_session=True) as proc:
+            procs.add(proc.pid)
+            try:
+                if self.top.killed:
+                    os.killpg(proc.pid, signal.SIGTERM)
+                if prompt is not None:
+                    with contextlib.suppress(BrokenPipeError):
+                        proc.stdin.write(prompt)
+                    with contextlib.suppress(BrokenPipeError):
+                        proc.stdin.close()
+                for line in proc.stdout:
+                    stamp = now()
+                    f.write(f"{stamp}\t{line}")
+                    f.flush()                   # read live by pm-dashboard
+                    shown = self.read_event(line, info)
+                    if shown is not None:
+                        shown_lines.extend(shown.rstrip("\n").split("\n"))
+                        self.out.write(f"{clock(stamp)} " + shown.rstrip("\n").replace("\n", "\n         ") + "\n")
+                        self.out.flush()
+                return proc.wait()
+            except BaseException:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(proc.pid, signal.SIGTERM)
+                raise
+            finally:
+                procs.discard(proc.pid)
 
     @staticmethod
     def read_event(line, info):
@@ -1997,7 +2082,7 @@ class Project:
 
     def wait_until(self, when):
         """Sleep until `when` by the wall clock, so a suspended machine still wakes up on time."""
-        while not self.stopping and (left := (when - datetime.datetime.now(when.tzinfo)).total_seconds()) > 0:
+        while not self.top.stopping and (left := (when - datetime.datetime.now(when.tzinfo)).total_seconds()) > 0:
             time.sleep(min(left, 60))
 
     def head(self):
@@ -2009,9 +2094,9 @@ class Project:
     def start_run(self, tid, continues=None):
         """The run row of the task now running (result 'running'); returns its id."""
         with self.connect(write=True) as db:
-            return db.execute("INSERT INTO run (task_id, started_at, result, base_commit, pid, continues_run) "
-                              "VALUES (?, ?, 'running', ?, ?, ?)",
-                              (tid, now(), self.head(), os.getpid(), continues)).lastrowid
+            return db.execute("INSERT INTO run (task_id, started_at, result, base_commit, pid, continues_run, worktree) "
+                              "VALUES (?, ?, 'running', ?, ?, ?, ?)",
+                              (tid, now(), self.head(), os.getpid(), continues, self.worktree)).lastrowid
 
     def record_run(self, rid, code, info, result, reason=None):
         cols = ("model", "session_id", "turns", "input_tokens", "output_tokens", "cache_read_tokens",
@@ -2075,14 +2160,121 @@ class Project:
             os.close(fd)
 
     def close_stale_run(self):
-        """Under the run lock, a 'running' run is one whose `pm run` died: it becomes failed and is committed."""
-        r = (self.rows("SELECT * FROM run WHERE result = 'running'") or [None])[0]
-        if r is None:
+        """Under the run lock, a 'running' run is one whose `pm run` died: it becomes failed and is committed; what it
+        left in its work tree is stashed for the task's next run, and the work tree removed."""
+        rs = self.rows("SELECT * FROM run WHERE result = 'running' ORDER BY id")
+        if not rs:
             return
         with self.connect(write=True) as db:
-            db.execute("UPDATE run SET ended_at = ?, result = 'failed', reason = ? WHERE id = ?",
-                       (now(), f"pm run crashed: {self.crash['error']}" if self.crash else "interrupted", r["id"]))
-        self.commit_db(f"run {r['id']} (task {r['task_id']}) " + ("crashed" if self.crash else "interrupted"))
+            for r in rs:
+                db.execute("UPDATE run SET ended_at = ?, result = 'failed', reason = ? WHERE id = ?",
+                           (now(), f"pm run crashed: {self.crash['error']}" if self.crash else "interrupted", r["id"]))
+        for r in rs:
+            if r["worktree"] and (path := self.worktree_path(r["worktree"])).is_dir():
+                with contextlib.suppress(subprocess.CalledProcessError, OSError):
+                    if stash := self.child(r["worktree"], path).stash_leftovers(
+                            f"pm: task {r['task_id']} run {r['id']} failed"):
+                        self.say(f"[{r['worktree']}] {stash}")
+                self.worktree_remove(r["worktree"])
+        self.commit_db(", ".join(f"run {r['id']} (task {r['task_id']})" for r in rs)
+                       + (" crashed" if self.crash else " interrupted"))
+
+    # --- work trees --------------------------------------------------------------------------
+
+    def worktree_path(self, name):
+        return (self.root / self.config["worktree_dir"].replace("{repo}", self.root.name) / name).resolve()
+
+    def worktree_add(self, name):
+        """A fresh work tree for `name`, on its branch, at the main checkout's HEAD; returns its path."""
+        path = self.worktree_path(name)
+        self.git("worktree", "prune")
+        if path.exists():
+            self.worktree_remove(name)
+            if path.exists():
+                raise FormatError(f"{path} is in the way of work tree {name}: move it away")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        self.git("worktree", "add", "-q", "-B", WORKTREE_BRANCH + name, str(path), "HEAD")
+        return path
+
+    def worktree_remove(self, name):
+        with contextlib.suppress(subprocess.CalledProcessError):
+            self.git("worktree", "remove", "--force", str(self.worktree_path(name)))
+
+    def worktree_branches(self):
+        """{work tree name: its branch is merged into HEAD}."""
+        refs = self.git("for-each-ref", "--format=%(refname:short)", "refs/heads/" + WORKTREE_BRANCH).split()
+        return {ref[len(WORKTREE_BRANCH):]: subprocess.run(["git", "merge-base", "--is-ancestor", ref, "HEAD"],
+                                                           cwd=self.root).returncode == 0 for ref in refs}
+
+    def merging(self):
+        """A merge is in progress in this checkout."""
+        return (self.root / self.git("rev-parse", "--git-path", "MERGE_HEAD").strip()).exists()
+
+    def merge_task(self, name):
+        """The open task that merges work tree name's branch, or None."""
+        r = self.rows("SELECT id FROM task WHERE kind = 'merge' AND status = 'open' AND subject = ?",
+                      MERGE_SUBJECT.format(name))
+        return r[0]["id"] if r else None
+
+    def merge_worktrees(self, running):
+        """While no task runs in the main checkout: merge the branches of the work trees that run nothing, delete the
+        merged ones. A work tree runs nothing more until its branch is merged."""
+        for name, merged in self.worktree_branches().items():
+            if name in running:
+                continue
+            if merged:
+                self.worktree_remove(name)
+                with contextlib.suppress(subprocess.CalledProcessError):
+                    self.git("branch", "-D", WORKTREE_BRANCH + name)
+            elif not self.merge_task(name):
+                self.merge_worktree(name)
+
+    def merge_worktree(self, name):
+        """Merge work tree name's branch into the main checkout, with the database, and delete it. A conflict is
+        aborted and queues a merge task; another failure is reported once and tried again later."""
+        branch = WORKTREE_BRANCH + name
+        ids = sorted({int(m[1]) for l in self.git("log", "--format=%s", f"HEAD..{branch}").splitlines()
+                      if (m := re.match(r"task (\d+): ", l))})
+        message = f"pm: merge work tree {name}" + (f": task {', '.join(map(str, ids))}" if ids else "")
+        try:
+            self.git("merge", "--no-ff", "--no-commit", branch)
+            self.git("add", "--", self.db)
+            self.git("commit", "-q", "-m", message)
+        except subprocess.CalledProcessError as e:
+            conflict = self.merging() and self.git("diff", "--name-only", "--diff-filter=U").strip()
+            if self.merging():
+                self.git("merge", "--abort")
+            if conflict:
+                tid = self.queue_merge(name, ids)
+                self.say(f"[{name}] merging {branch} conflicts ({', '.join(conflict.split())}); "
+                         + (f"task {tid} merges it" if tid else f"merge it yourself: git merge {branch}"))
+                self.commit_db(f"work tree {name}: task {tid} merges it")
+            elif self.merge_errors.get(name) != (err := ((e.stdout or "") + (e.stderr or "")).strip()):
+                self.merge_errors[name] = err
+                self.say(f"[{name}] merging {branch} failed; it waits, pm tries again later:\n  {err}")
+            return
+        self.merge_errors.pop(name, None)
+        self.gc()
+        self.say(f"[{name}] merged into the main checkout")
+        self.worktree_remove(name)
+        with contextlib.suppress(subprocess.CalledProcessError):
+            self.git("branch", "-D", branch)
+
+    def queue_merge(self, name, ids):
+        """A merge task for work tree name's branch, in the main checkout, in the plan of the tree's last task; its id,
+        or None without such a task."""
+        with self.connect(write=True) as db:
+            t = db.execute("SELECT t.* FROM run r JOIN task t ON t.id = r.task_id WHERE r.worktree = ? "
+                           "AND t.plan_id IS NOT NULL ORDER BY r.id DESC LIMIT 1", (name,)).fetchone()
+            if t is None:
+                return None
+            p = self.get(db, "plan", t["plan_id"])
+            prio = t["priority"] if t["priority"] is not None else p["priority"] or 0
+            tasks = [db.execute("SELECT id, subject FROM task WHERE id = ?", (i,)).fetchone() for i in ids]
+            body = self.prompt("merge_prompt", worktree=name, branch=WORKTREE_BRANCH + name,
+                               tasks=", ".join(ref("task", r["id"], r["subject"], True) for r in tasks if r) or "its tasks")
+            return db.execute("INSERT INTO task (plan_id, subject, kind, priority, body) VALUES (?, ?, 'merge', ?, ?)",
+                              (t["plan_id"], MERGE_SUBJECT.format(name), prio + 2, body)).lastrowid
 
     def work(self, tid):
         """Run the worker for a task until no usage limit stops it; record each run and commit the task.
@@ -2101,11 +2293,11 @@ class Project:
             info = {}
             try:
                 code = self.run_worker(cmd, prompt, log, tid, info)
-            except KeyboardInterrupt as e:
-                self.failed(tid, rid, f"interrupted ({e.args[0] if e.args else 'Ctrl-C'})", None, info, started, log)
-                raise
             except OSError as e:
                 return "error", self.failed(tid, rid, f"the worker command can't start: {e}", None, info, started)[1]
+            if self.top.killed:
+                return "interrupted", self.failed(tid, rid, f"interrupted ({self.top.killed})", code, info, started, log,
+                                                  cause="`pm run` stopped now")[1]
             if handoff:
                 handoff = None
                 cmd, prompt = self.worker_command(tid)
@@ -2125,8 +2317,9 @@ class Project:
                 until = max(reset + margin, datetime.datetime.now(reset.tzinfo) + margin)
                 self.say(f"Usage limit ({limit.strip()}). Waiting until {until:%Y-%m-%d %H:%M %Z}, then the same task "
                          "again.")
+                self.top.limit_until = max(until, self.top.limit_until or until)
                 self.wait_until(until)
-                if self.stopping:
+                if self.top.stopping:
                     return "limit", "stopped while waiting for the usage limit's reset"
                 continue
             if limit:
@@ -2146,7 +2339,7 @@ class Project:
             until = datetime.datetime.now().astimezone() + datetime.timedelta(minutes=delay)
             self.say(f"Claude: {line}\nThe same task again " + (f"at {until:%H:%M}." if delay else "now."))
             self.wait_until(until)
-            if self.stopping:
+            if self.top.stopping:
                 return "limit", "stopped while waiting to retry after a Claude error"
         if errors := self.validate():
             msg = "the database is no longer valid:\n  " + "\n  ".join(errors)
@@ -2226,7 +2419,7 @@ class Project:
     def branch_leftovers(self, branch, message):
         """Commit the working tree's changes, the database aside, on a new branch off HEAD, then clean the tree;
         HEAD and the checkout stay."""
-        index = self.git_dir / "pm-leftovers.index"
+        index = self.git_dir / f"pm-leftovers-{os.getpid()}-{threading.get_ident()}.index"
         env = os.environ | {"GIT_INDEX_FILE": str(index)}
         git = lambda *a: subprocess.run(["git", *a], cwd=self.root, env=env, capture_output=True, text=True,
                                         check=True).stdout.strip()
@@ -2290,11 +2483,7 @@ class Project:
             lines.append(f"log: {log}")
         summary = "\n".join(lines)
         self.record_run(rid, code, info, "failed", summary)
-        try:
-            self.git("commit", "-q", "-m", f"pm: task {tid} failed", "--", self.db)
-            self.gc()
-        except subprocess.CalledProcessError as e:
-            summary += f"\ncommitting {self.db} failed: {e.stderr.strip()}"
+        self.commit_db(f"task {tid} failed")
         if shown := info.get("shown"):
             summary += "\nlast output:\n" + "\n".join("  " + l for l in shown)
         elif log and log.exists():
@@ -2314,10 +2503,11 @@ class Project:
     def drop_task_stashes(self, tid):
         """Drop task tid's stashes (its work is committed or dropped); returns their short shas."""
         dropped = []
-        for ref, sha in reversed(self.task_stashes(tid)):       # oldest first: the newer refs keep their index
-            with contextlib.suppress(subprocess.CalledProcessError):
-                self.git("stash", "drop", "-q", ref)
-                dropped.append(sha[:7])
+        with STASH_LOCK:
+            for ref, sha in reversed(self.task_stashes(tid)):   # oldest first: the newer refs keep their index
+                with contextlib.suppress(subprocess.CalledProcessError):
+                    self.git("stash", "drop", "-q", ref)
+                    dropped.append(sha[:7])
         return dropped
 
     def earlier_failure(self, tid):
@@ -2346,15 +2536,19 @@ class Project:
         return "\n".join(out)
 
     def stash_leftovers(self, message):
-        """Stash the working tree's changes, the database aside, so the next `pm run` starts clean. Returns a line
-        saying what was stashed and how to get it back, or None if nothing was left."""
+        """Stash the working tree's changes, the database aside, so the next `pm run` starts clean; a merge in progress
+        is aborted first. Returns a line saying what was stashed and how to get it back, or None if nothing was left."""
+        if self.merging():
+            with contextlib.suppress(subprocess.CalledProcessError):
+                self.git("merge", "--abort")
         files = [l[3:] for l in self.git("status", "--porcelain").splitlines() if l[3:] != self.db]
         if not files:
             return None
         n = f"{len(files)} file{'s' if len(files) > 1 else ''}"
         try:
-            self.git("stash", "push", "-q", "--include-untracked", "-m", message, "--", ".", f":(exclude){self.db}")
-            sha = self.git("rev-parse", "--short", "stash@{0}").strip()
+            with STASH_LOCK:
+                self.git("stash", "push", "-q", "--include-untracked", "-m", message, "--", ".", f":(exclude){self.db}")
+                sha = self.git("rev-parse", "--short", "stash@{0}").strip()
         except subprocess.CalledProcessError as e:
             return f"left behind: {n}, stashing failed: {e.stderr.strip()}"
         return f"left behind: {n}, stashed as {sha} ({message}); get them back with `git stash apply {sha}`"
@@ -2373,9 +2567,11 @@ class Project:
         return None
 
     def commit_task(self, tid, subject, body):
-        """Commit what the worker staged, with the database, as "task <id>: <subject>"."""
-        self.git("add", "--", self.db)
-        if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=self.root).returncode:
+        """Commit what the worker staged, with the database (in a work tree: without), as "task <id>: <subject>"; a
+        merge the worker started is committed even if it changes nothing."""
+        if not self.base:
+            self.git("add", "--", self.db)
+        if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=self.root).returncode or self.merging():
             self.git("commit", "-q", "-m", f"task {tid}: {subject}", "-m", body)
             self.gc()
 
@@ -2389,16 +2585,20 @@ class Project:
             self.commit_db(", ".join(done))
 
     def run(self, once=False, dry_run=False):
-        """Work the queue. The first Ctrl-C (SIGINT) or a SIGUSR1 (`pm stop`): stop after the current task; a second
-        Ctrl-C, SIGTERM or SIGHUP: stop now."""
+        """Work the queue, a task per work tree at a time (the main checkout is one). The first Ctrl-C (SIGINT) or a
+        SIGUSR1 (`pm stop`): start nothing new, stop after the running tasks; a second Ctrl-C, SIGTERM or SIGHUP: stop
+        now, the workers get SIGTERM."""
         def stop_later(sig, _):
-            if sig == signal.SIGINT and self.stopping:
-                raise KeyboardInterrupt("SIGINT")
-            if not self.stopping:
+            if sig in (signal.SIGTERM, signal.SIGHUP) or sig == signal.SIGINT and self.stopping:
+                self.stopping, self.killed = True, signal.Signals(sig).name
+                for pid in list(self.procs):
+                    with contextlib.suppress(ProcessLookupError, PermissionError):
+                        os.killpg(pid, signal.SIGTERM)
+            elif not self.stopping:
                 self.stopping = True
                 if not self.idle:
-                    os.write(2, b"\n== stopping after this task (Ctrl-C again: stop now)\n")  # print() may be mid-write
-        old = {sig: signal.signal(sig, stop_later) for sig in (signal.SIGINT, signal.SIGUSR1)}
+                    os.write(2, b"\n== stopping after the running task(s) (Ctrl-C again: stop now)\n")
+        old = {sig: signal.signal(sig, stop_later) for sig in (signal.SIGINT, signal.SIGUSR1, signal.SIGTERM, signal.SIGHUP)}
         try:
             if dry_run:
                 return self.work_queue(once, dry_run)
@@ -2425,27 +2625,72 @@ class Project:
         finally:
             self.idle = False
 
+    def wait_event(self):
+        """While tasks run: until one ends, the database changes or `pm run` is to stop."""
+        before, stopping = self.file_key(), self.stopping
+        while True:
+            try:
+                self.finished.put(self.finished.get(timeout=IDLE_POLL_SECONDS))
+                return
+            except queue.Empty:
+                pass
+            if self.file_key() != before or self.stopping != stopping:
+                return
+
     def work_queue(self, once, dry_run):
         for w in self.worker_warnings():
             self.say(w)
-        waiting = None
-        while True:
-            errors = self.validate()
-            if errors:
+        if dry_run:
+            if errors := self.validate():
                 self.say("the database has errors:\n  " + "\n  ".join(errors))
                 return 1
-            if dry_run:
-                q = self.queue()
-                if not q:
-                    self.say("Queue empty.")
-                elif level := self.needs_signoff(q[0][1]):
-                    self.say(f"task {q[0][1]} needs a sign-off ({level}); `pm run` would request it")
-                else:
-                    cmd, prompt = self.worker_command(q[0][1], self.handoff(q[0][1]))
-                    self.say(shlex.join(cmd) + ("" if prompt is None else f"\n\nstdin:\n{prompt}"))
-                return 0
-            self.close_stale_run()
-            self.close_and_commit()
+            q = self.queue()
+            if not q:
+                self.say("Queue empty.")
+            elif level := self.needs_signoff(q[0][1]):
+                self.say(f"task {q[0][1]} needs a sign-off ({level}); `pm run` would request it")
+            else:
+                cmd, prompt = self.worker_command(q[0][1], self.handoff(q[0][1]))
+                self.say(shlex.join(cmd) + ("" if prompt is None else f"\n\nstdin:\n{prompt}"))
+            return 0
+        self.finished, self.merge_errors = queue.Queue(), {}
+        running = {}                # work tree ("": the main checkout) -> (thread, task id)
+        code, last, waiting = 0, None, None
+        self.git("worktree", "prune")
+        self.close_stale_run()
+        while True:
+            while not self.finished.empty():
+                tree, tid, result, message = self.finished.get()
+                running.pop(tree)[0].join()
+                last = result
+                code = self.finished_task(tree, tid, result, message) or code
+            if self.killed:
+                if running:
+                    self.wait_event()
+                    continue
+                self.say("\nStopped. `pm run` continues with the same task(s).")
+                return 130
+            if "" not in running:
+                self.merge_worktrees(running)
+                self.close_and_commit()
+            if not code and (errors := self.validate()):
+                self.say("the database has errors:\n  " + "\n  ".join(errors))
+                code = 1
+            if once and last is not None and not running:
+                return code or int(last == "failed")
+            if code or self.stopping:
+                if running:
+                    self.wait_event()
+                    continue
+                if not code:
+                    self.say("Stopped as asked; `pm run` continues with the queue.")
+                return code
+            code = self.start_tasks(running, once)
+            if code or running:
+                waiting = None
+                if running:
+                    self.wait_event()
+                continue
             q = self.queue()
             if not q:
                 if not self.rows("SELECT 1 FROM milestone WHERE status = 'open'"):
@@ -2455,55 +2700,102 @@ class Project:
                 else:
                     n = len(self.pending())
                     msg = f"Queue empty; {n} pending decision(s)." + (" Answer them with `pm decide`." if n else "")
-                if once:
-                    self.say(msg)
-                    return 0
-                if msg != waiting:
-                    self.say(msg + " Waiting for tasks (Ctrl-C or `pm stop` ends it).")
-                    waiting = msg
-                if not self.wait_for_change():
-                    self.say("Stopped as asked.")
-                    return 0
+            else:
+                trees = sorted({t for *_, t in q if t})
+                msg = f"{len(q)} task(s) queued, none can start: work tree(s) {', '.join(trees)} wait for their " \
+                      f"branch to be merged (`git branch --list '{WORKTREE_BRANCH}*'`)."
+            if once:
+                self.say(msg)
+                return 0
+            if msg != waiting:
+                self.say(msg + " Waiting for tasks (Ctrl-C or `pm stop` ends it).")
+                waiting = msg
+            if not self.wait_for_change():
+                self.say("Stopped as asked.")
+                return 0
+
+    def start_tasks(self, running, once):
+        """Start the first queued task of each work tree (the main checkout is one) that runs nothing and whose branch
+        is merged, within the lowest milestone queue index in the queue, up to max_parallel (once: one task); none
+        while a worker waits for the usage limit. Returns 1 if `pm run` has to stop (the main checkout has changes,
+        git failed), else 0."""
+        if (until := self.limit_until) and datetime.datetime.now(until.tzinfo) < until:
+            return 0
+        q = self.queue()
+        limit = 1 if once else self.config["max_parallel"]
+        unmerged = {n for n, merged in self.worktree_branches().items() if not merged} if q else set()
+        seen = set()
+        for _, tid, _, _, index, tree in q:
+            if index != q[0][4] or len(running) >= limit:
+                break
+            tree = tree or ""
+            if tree in seen:
                 continue
-            waiting = None
-            if level := self.needs_signoff(q[0][1]):
-                did = self.request_signoff(q[0][1])
-                self.say(f"task {q[0][1]} waits for sign-off: decision {did} ({level})")
+            seen.add(tree)
+            if tree in running or tree in unmerged:
+                continue
+            if level := self.needs_signoff(tid):
+                did = self.request_signoff(tid)
+                self.say(f"task {tid} waits for sign-off: decision {did} ({level})")
                 self.commit_db(f"sign-off requested: decision {did}")
                 continue
-            if self.dirty():
-                self.say(self.dirty_message())
-                return 1
-            if not self.commit_db("uncommitted changes"):
-                return 1
-            tid = q[0][1]
-            result, message = self.work(tid)
-            if result == "error":
-                self.say(f"\ntask {tid} failed: {message}\nStopping: this may hit every task.")
-                return 1
-            if result == "failed":
-                self.say(f"\ntask {tid} failed: {message}")
-                if self.task_kind(tid) == "exec":
-                    self.task_set(tid, status="dropped", note="failed: " + message.splitlines()[0][:200])
-                    self.drop_task_stashes(tid)
-                    self.commit_db(f"task {tid} failed: dropped")
-                    self.say(f"task {tid} has no plan to investigate in: dropped")
-                elif self.task_kind(tid) == "investigate":
-                    self.say(f"Stopping: task {tid} investigated a failure; pm doesn't investigate an investigation.")
+            if not tree:
+                if self.dirty():
+                    self.say(self.dirty_message())
                     return 1
-                elif not (iid := self.investigate(tid, message)):
-                    self.say(f"Stopping: task {tid} failed again after {MAX_INVESTIGATIONS} investigations.")
+                if not self.commit_db("uncommitted changes"):
                     return 1
-                else:
-                    self.say(f"task {iid} investigates it first")
+                project = self
             else:
-                self.say(f"\ntask {tid}: {result} ({message})")
-            self.close_and_commit()
-            if once:
-                return int(result == "failed")
-            if self.stopping:
-                self.say("Stopped as asked; `pm run` continues with the queue.")
-                return 0
+                try:
+                    project = self.child(tree, self.worktree_add(tree))
+                except (subprocess.CalledProcessError, FormatError) as e:
+                    self.say(f"[{tree}] making the work tree failed: {getattr(e, 'stderr', None) or e}".rstrip())
+                    return 1
+            thread = threading.Thread(target=self.run_task, args=(project, tree, tid), name=f"task {tid}", daemon=True)
+            running[tree] = thread, tid
+            thread.start()
+        return 0
+
+    def run_task(self, project, tree, tid):
+        """A task's thread: the worker, then its result to `pm run` (self.finished)."""
+        try:
+            result, message = project.work(tid)
+        except FormatError as e:
+            result, message = "error", str(e)
+        except Exception:  # noqa: BLE001 — reported, then `pm run` stops
+            result, message = "error", traceback.format_exc().rstrip()
+        self.finished.put((tree, tid, result, message))
+
+    def finished_task(self, tree, tid, result, message):
+        """After a task's thread: its work tree removed (the branch stays until merged), a failure handled. Returns 1
+        if `pm run` has to stop."""
+        at = f"[{tree}] " if tree else ""
+        if tree:
+            self.worktree_remove(tree)
+        if result == "error":
+            self.say(f"\n{at}task {tid} failed: {message}\nStopping: this may hit every task.")
+            return 1
+        if result == "interrupted":
+            self.say(f"\n{at}task {tid}: {message.splitlines()[0]}")
+        elif result == "failed":
+            self.say(f"\n{at}task {tid} failed: {message}")
+            if self.task_kind(tid) == "exec":
+                self.task_set(tid, status="dropped", note="failed: " + message.splitlines()[0][:200])
+                self.drop_task_stashes(tid)
+                self.commit_db(f"task {tid} failed: dropped")
+                self.say(f"task {tid} has no plan to investigate in: dropped")
+            elif self.task_kind(tid) == "investigate":
+                self.say(f"Stopping: task {tid} investigated a failure; pm doesn't investigate an investigation.")
+                return 1
+            elif not (iid := self.investigate(tid, message)):
+                self.say(f"Stopping: task {tid} failed again after {MAX_INVESTIGATIONS} investigations.")
+                return 1
+            else:
+                self.say(f"{at}task {iid} investigates it first")
+        else:
+            self.say(f"\n{at}task {tid}: {result} ({message})")
+        return 0
 
     def task_kind(self, tid):
         with self.connect() as db:
@@ -2526,11 +2818,11 @@ class Project:
             if earlier:
                 body += "\n\n# Earlier investigations of this task\n\n" + "\n".join(
                     f"- task {r['id']} ({r['status']}): {r['note'] or 'no note'}" for r in earlier)
-            iid = db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task) "
-                             "VALUES (?, ?, 'investigate', ?, ?, ?)",
+            iid = db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task, worktree) "
+                             "VALUES (?, ?, 'investigate', ?, ?, ?, ?)",
                              (t["plan_id"], INVESTIGATE_SUBJECT.format(ref("task", tid, t["subject"])), prio + 2, body,
-                              creator())).lastrowid
-        self.commit_db(f"task {tid} failed: task {iid} investigates", running=None)
+                              creator(), t["worktree"])).lastrowid
+        self.commit_db(f"task {tid} failed: task {iid} investigates")
         return iid
 
     def stop(self):
@@ -2540,8 +2832,8 @@ class Project:
             os.kill(pid, signal.SIGUSR1)
         except (TypeError, ProcessLookupError):
             raise FormatError("no `pm run` is working this repository") from None
-        r = (self.rows("SELECT * FROM run WHERE result = 'running'") or [None])[0]
-        self.say(f"`pm run` (pid {pid}) stops " + (f"after task {r['task_id']}" if r else "before its next task"))
+        rs = [str(r["task_id"]) for r in self.rows("SELECT task_id FROM run WHERE result = 'running' ORDER BY id")]
+        self.say(f"`pm run` (pid {pid}) stops " + (f"after task(s) {', '.join(rs)}" if rs else "before its next task"))
 
     def dirty_message(self):
         files = [l for l in self.git("status", "--porcelain").splitlines() if l[3:] != self.db]
@@ -2558,7 +2850,8 @@ class Project:
     def status(self):
         for r in self.rows("SELECT * FROM run WHERE result = 'running'"):
             gone = "" if self.run_pid() else "; its `pm run` is gone, the next one records it as failed"
-            self.say(f"Running: task {r['task_id']} (run {r['id']}, pid {r['pid']}) since {stamp(r['started_at'])}, "
+            where = f" in work tree {r['worktree']}" if r["worktree"] else ""
+            self.say(f"Running: task {r['task_id']}{where} (run {r['id']}, pid {r['pid']}) since {stamp(r['started_at'])}, "
                      f"{duration(seconds(r['started_at'], None))}{gone}")
         if (c := self.run_crash()) and not self.run_pid():
             self.say(f"`pm run` (pid {c['pid']}) crashed at {stamp(c['at'])}: {c['error']}")
@@ -2611,14 +2904,18 @@ class Project:
     def print_queue(self, limit=None):
         q = self.queue()
         self.say(f"\nQueue ({len(q)}):")
-        for prio, tid, subject, kind in q[:limit]:
-            subject += "" if kind == "work" else f" ({kind})"
+        for prio, tid, subject, kind, _, tree in q[:limit]:
+            subject += ("" if kind == "work" else f" ({kind})") + (f" [{tree}]" if tree else "")
             self.say(f"  {prio:+6d}  task {tid}: {subject}" if prio else f"          task {tid}: {subject}")
         if limit and len(q) > limit:
             self.say(f"  … {len(q) - limit} more (`pm queue`)")
 
 
 def git_root():
+    """PM_ROOT (a worker in a work tree: the main checkout, whose database it uses), else the repository around the
+    current directory."""
+    if os.environ.get("PM_ROOT"):
+        return os.environ["PM_ROOT"]
     r = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True)
     return r.stdout.strip() if r.returncode == 0 else None
 
@@ -2633,6 +2930,10 @@ def prio_arg(v):
 
 
 MODEL_HELP = "claude --model for its worker, e.g. opus for a task that needs deep reasoning; default: by kind ([models])"
+
+
+WORKTREE_HELP = ("the work tree it runs in, e.g. questions: its own git work tree and branch, in parallel with "
+                 "other work trees' tasks, merged when done; base: the main checkout")
 
 
 def model_arg(v):
@@ -2667,7 +2968,7 @@ def main(argv=None):
     r = sub.add_parser("run", help="work the queue with the worker command (claude -p)")
     r.add_argument("--once", action="store_true", help="stop after one task")
     r.add_argument("--dry-run", action="store_true", help="print the next worker command; change nothing")
-    sub.add_parser("stop", help="have the running `pm run` stop after its current task")
+    sub.add_parser("stop", help="have the running `pm run` stop after its running task(s)")
 
     ms = sub.add_parser("milestone", aliases=["milestones"], help="add, change, list or show milestones").add_subparsers(dest="action", required=True)
     ma = ms.add_parser("add", help="new open milestone; prints its id. Without a subject: write it in your editor "
@@ -2714,11 +3015,14 @@ def main(argv=None):
     a.add_argument("--kind", choices=("work", "plan"), default="work", help="plan: the task writes a plan")
     a.add_argument("--web", action="store_true", help="its worker gets WebSearch and WebFetch (sign-off: web)")
     a.add_argument("--model", type=model_arg, help=MODEL_HELP)
+    a.add_argument("--worktree", type=worktree_arg, default=argparse.SUPPRESS, help=WORKTREE_HELP + "; default: in a "
+                   "worker, its own task's work tree, else base")
     for verb, text in [("done", "note: date, files or commit"), ("drop", "reason")]:
         x = t.add_parser(verb)
         x.add_argument("task", type=int)
         x.add_argument("note", help=text)
-    ts = t.add_parser("set", help="change an open task that isn't running: subject, body, priority, web, model")
+    ts = t.add_parser("set", help="change an open task that isn't running: subject, body, priority, web, model, "
+                      "work tree")
     ts.add_argument("task", type=int)
     ts.add_argument("--subject")
     ts.add_argument("--body", type=text_arg)
@@ -2726,6 +3030,7 @@ def main(argv=None):
     ts.add_argument("--web", action=argparse.BooleanOptionalAction, default=argparse.SUPPRESS,
                     help="its worker gets WebSearch and WebFetch (sign-off: web)")
     ts.add_argument("--model", type=model_arg, default=argparse.SUPPRESS, help=MODEL_HELP + "; none: by kind again")
+    ts.add_argument("--worktree", type=worktree_arg, default=argparse.SUPPRESS, help=WORKTREE_HELP)
     tp = t.add_parser("priority", help="integer, or none for the plan's")
     tp.add_argument("task", type=int)
     tp.add_argument("priority", type=prio_arg)
@@ -2891,7 +3196,8 @@ def main(argv=None):
                 if not (entry := pm.subject_and_body("task", subject)):
                     print("pm: aborted, no task added")
                     return 1
-                tid = pm.task_add(plan, *entry, args.priority, kind, args.web, args.model)
+                tid = pm.task_add(plan, *entry, args.priority, kind, args.web, args.model,
+                                  getattr(args, "worktree", ...))
                 print(tid)
                 msg = f"task {tid} added: {entry[0]}"
             elif args.action in ("done", "drop"):
@@ -2905,8 +3211,10 @@ def main(argv=None):
                     fields["web"] = int(args.web)
                 if "model" in args:
                     fields["model"] = args.model
+                if "worktree" in args:
+                    fields["worktree"] = args.worktree
                 if not fields:
-                    raise FormatError("nothing to change: --subject, --body, --priority, --web or --model")
+                    raise FormatError("nothing to change: --subject, --body, --priority, --web, --model or --worktree")
                 if fields.get("subject") == "":
                     raise FormatError("the subject can't be empty")
                 pm.task_set(args.task, **fields)

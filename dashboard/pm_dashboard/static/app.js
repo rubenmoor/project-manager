@@ -1,6 +1,6 @@
 import { html, render, useState, useEffect, useMemo, useRef } from "/vendor/preact-htm.js";
 import { index } from "/data.js";
-import { Pill, Elapsed, Time } from "/ui.js";
+import { Pill, Elapsed, Time, Worktree } from "/ui.js";
 import { Overview, Queue, Milestones, Milestone, Plan, Task, Decisions, Decision, Runs } from "/views.js";
 import { Live } from "/live.js";
 import { MilestoneAdded } from "/add.js";
@@ -129,8 +129,8 @@ function App() {
     <header class="top">
       <span class="conn ${online ? "" : "off"}" title=${online ? "live" : "disconnected from pm-dashboard"}></span>
       <span class="brand">pm<small>${root}</small></span>
-      ${d && d.running ? html`<a class="running" href=${`#/task/${d.running.task_id}?log`}><${Pill} status="running" label=${`task ${d.running.task_id}`} />
-        <${Elapsed} start=${d.running.started_at} /></a>` : null}
+      ${d ? d.runningAll.map((r) => html`<a class="running" href=${`#/task/${r.task_id}?log`}><${Pill} status="running" label=${`task ${r.task_id}`} />
+        ${r.worktree ? html`<${Worktree} name=${r.worktree} /> ` : null}<${Elapsed} start=${r.started_at} /></a>`) : null}
       <span class="grow head">${state && state.head ? html`<span class="mono">${state.head.commit.slice(0, 7)}</span> ${state.head.subject}
         <span class="muted"> · <${Time} ts=${state.head.date} /></span>` : null}
         ${state && state.dirty.length ? html` <span class="tag" title=${state.dirty.join("\n")}>${state.dirty.length} uncommitted</span>` : null}</span>

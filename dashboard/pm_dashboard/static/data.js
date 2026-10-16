@@ -7,12 +7,17 @@ export function index(state) {
     reports: t.resource_use_report || [], customs: t.custom_report || [],
     milestone: by(t.milestone), plan: by(t.plan), run: by(t.run), task: by(t.task), decision: by(t.decision),
     queue: state.queue, queuePos: new Map(state.queue.map((id, i) => [id, i])),
-    // A 'running' row whose pm run is gone (it crashed) is stale, not running.
-    running: (state.pm_run != null && t.run.find((r) => r.result === "running")) || null,
+    // A 'running' row whose pm run is gone (it crashed) is stale, not running. One per work tree: the main checkout's
+    // first, then by work tree.
+    runningAll: state.pm_run == null ? [] : t.run.filter((r) => r.result === "running")
+      .sort((a, b) => (a.worktree || "").localeCompare(b.worktree || "")),
     stale: (state.pm_run == null && t.run.find((r) => r.result === "running")) || null,
     crash: state.pm_crash || null,
     planDone: new Set(state.done_plans || []),
   };
+  d.running = d.runningAll[0] || null;
+  d.runningOf = new Map(d.runningAll.map((r) => [r.task_id, r]));
+  d.isRunning = (id) => d.runningOf.has(id);
   // rows grouped by key(row): Map key → [value(row)]
   const group = (rows, key, value = (r) => r) => {
     const m = new Map();
