@@ -29,7 +29,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 53  # bump by one with every commit (AGENTS.md)
+VERSION = 54  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -676,6 +676,7 @@ class Project:
                     con.close()
                     raise FormatError(f"{self.db} changed while migrating, try again")
                 self.save(dump(con))
+                key = self.file_key()
                 self.commit_db(f"{self.db}: schema {version} -> {SCHEMA_VERSION}", running_run(con))
             self.say(f"pm: migrated {self.db} from schema {version} to {SCHEMA_VERSION}")
         elif problem := schema_difference(con):
@@ -684,8 +685,10 @@ class Project:
                               f"undo the hand edit or merge")
         elif text is None:
             self.save(dump(con))
+            key = self.file_key()
         con.execute("PRAGMA foreign_keys = ON")
-        self.cache = (self.file_key(), con)
+        # The key from before the read: a write since then must reload next time.
+        self.cache = (key, con)
         return con
 
     def migrate(self, old, version):
