@@ -23,7 +23,7 @@ In the project's git repository (the one with `project-manager.toml`):
 - **Tasks**: every task. On top: pending decisions by how many open tasks answering each frees (it is their only blocker), the top one highlighted, each listing its waiting tasks; then executive interventions (exec tasks, no plan; add one there); then by milestone (queue index) and plan, done plans folded; open, closed or all
 - **Milestones**: open and on-hold cards grouped by queue index (lowest first), completed ones in their own column on the right (newest first); with progress and the number of pending decisions its open tasks wait for, linked to exactly those (`#/decisions?milestone=N`)
 - **Milestone**, **plans**: plans by priority with their tasks; filters by status and kind; change a milestone's queue index; put a milestone on hold or resume it (its plans and open tasks show "on hold")
-- **Task**: queue position or what blocks it, body, note, priority, decisions; after a failed run: pm's summary
+- **Task**: queue position or what blocks it, note, priority, decisions; after a failed run: pm's summary; the body last, at the bottom
   - done or dropped: rows its commit touched (Affected: tasks created first; tasks, plans, decisions, milestones: new, edited, done, dropped, answered, waits for …; each styled by kind; says why when empty), files changed, the full diff (syntax highlighted)
   - runs, worker log (live while it runs, following its end)
   - worker log always shown: a box 20 lines high, opened at its end, following it while scrolled there; scroll up for earlier lines (`?log` scrolls to it)
