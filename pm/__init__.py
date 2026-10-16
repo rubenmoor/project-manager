@@ -29,7 +29,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 60  # bump by one with every commit (AGENTS.md)
+VERSION = 61  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -84,7 +84,7 @@ SIGNOFF_INTROS = {
 IN_LOG = ("status = 'answered' AND signoff IS NULL AND kind = 'rule' AND id NOT IN (SELECT superseded_id FROM "
           "decision_supersedes s JOIN decision n ON n.id = s.decision_id WHERE s.note = '' AND n.status = 'answered')")
 
-SCHEMA_VERSION = 23
+SCHEMA_VERSION = 24
 # A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
 # run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
 # Columns and tables SCHEMA dropped are left behind, new ones get their defaults; so only renames, moved data and new
@@ -109,7 +109,7 @@ def exec_kind(con):
 
 
 MIGRATIONS = {12: "", 13: "", 14: revise_kind, 15: "", 16: "", 17: "", 18: drop_summary_kind, 19: exec_kind,
-              20: "", 21: "", 22: ""}
+              20: "", 21: "", 22: "", 23: ""}
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -189,6 +189,7 @@ CREATE TABLE run (                                         -- one worker run of 
     base_commit           TEXT,                            -- HEAD when the run started
     model                 TEXT,                            -- from here on: the worker's JSON output, if any
     session_id            TEXT,
+    continues_run         INTEGER REFERENCES run (id),     -- warm hand-off: the run whose Claude session it resumed
     turns                 INTEGER,
     input_tokens          INTEGER,
     output_tokens         INTEGER,
@@ -392,6 +393,7 @@ CLAUDE_FATAL = ("invalid api key", "please run /login", "oauth token has expired
 CLAUDE_PASSING = ("overloaded", "connection error", "timed out", "api error: 5", "api error: 429", "rate_limit_error")
 NETWORK_ERRORS = ("econnreset", "econnrefused", "etimedout", "eai_again", "enotfound", "socket hang up", "fetch failed")
 RETRY_MINUTES = (0, 1, 2, 5, 10, 20, 30, 60)
+HANDOFF_MINUTES = 5     # warm hand-off: the previous run ended at most this long ago, so its prompt cache is warm
 # A task that fails again after this many investigations stops `pm run`: else a fix that doesn't fix loops.
 MAX_INVESTIGATIONS = 3
 IDLE_POLL_SECONDS = 3   # `pm run` with an empty queue: how often it looks at tasks.sql
@@ -523,9 +525,8 @@ def load_config(root):
     w = config["worker"]
     if not isinstance(w, list) or not w or not all(isinstance(a, str) for a in w):
         errors.append("worker must be a non-empty list of strings")
-    m = config["limit_margin_minutes"]
-    if not isinstance(m, int) or isinstance(m, bool) or m < 0:
-        errors.append("limit_margin_minutes must be an integer >= 0")
+    errors += [f"{k} must be an integer >= 0" for k in ("limit_margin_minutes", "warm_handoff")
+               if not isinstance(config[k], int) or isinstance(config[k], bool) or config[k] < 0]
     errors += [f"{k} must be a string" for k in ("log_dir", "editor") if not isinstance(config[k], str)]
     errors += [f"{k} must be a non-empty string" for k in PROMPT_KEYS
                if not isinstance(config[k], str) or not config[k].strip()]
@@ -1789,6 +1790,8 @@ class Project:
             parts.append(f"{tokens / 1e6:.2f}M tokens" if tokens >= 1e5 else f"{tokens / 1e3:.0f}k tokens")
         if r["cost_usd"] is not None:
             parts.append(f"${r['cost_usd']:.2f}")
+        if r["continues_run"]:
+            parts.append(f"continues run {r['continues_run']}")
         return ", ".join(parts) + (f": {r['reason'].splitlines()[0][:120]}" if r["reason"] else "")
 
     # --- run ---------------------------------------------------------------------------------
@@ -1805,10 +1808,15 @@ class Project:
     def priority_prompts(self):
         return [text for k in PRIORITY_KEYS if (text := self.prompt(k))]
 
-    def worker_command(self, tid):
-        """(command, prompt): the prompt goes to the worker's stdin; None if the command holds it ("{prompt}")."""
+    def worker_command(self, tid, handoff=None):
+        """(command, prompt): the prompt goes to the worker's stdin; None if the command holds it ("{prompt}").
+        handoff (self.handoff): resume that run's Claude session."""
         show = "\n".join([self.show(tid), self.earlier_failure(tid), *self.priority_prompts()]).rstrip() + "\n"
         prompt = WORKER_PROMPT.format(id=tid, db=self.db, show=show, intro_rule=INTRO_RULE)
+        if handoff:
+            prompt = (f"Task {handoff['task_id']} is done and committed. This session goes on with the next task of its "
+                      f"plan: what you learned of the code still holds, what you were told about task "
+                      f"{handoff['task_id']} no longer does.\n\n" + prompt)
         hook = {"type": "command", "command": shlex.join([sys.executable, str(GUARD)])}
         permissions = {"deny": [f"Read(/{self.db_path.resolve()})"]}
         if self.web_granted(tid):
@@ -1817,7 +1825,29 @@ class Project:
                                "permissions": permissions, "env": WORKER_ENV})
         w = self.config["worker"]
         cmd = [a.replace("{prompt}", prompt).replace("{settings}", settings) for a in w]
+        if handoff:
+            cmd[1:1] = ["--resume", handoff["session_id"]]
         return cmd, None if any("{prompt}" in a for a in w) else prompt
+
+    def handoff(self, tid):
+        """Warm hand-off: the latest run, if task tid can resume its Claude session (run row with task_id,
+        session_id), else None. Both tasks are work tasks of one plan, the previous one done by that run less than
+        HANDOFF_MINUTES ago, the chain of resumed runs shorter than warm_handoff, the worker claude's stream-json."""
+        w, limit = self.config["worker"], self.config["warm_handoff"]
+        if not limit or Path(w[0]).name != "claude" or "stream-json" not in w:
+            return None
+        with self.connect() as db:
+            t = self.get(db, "task", tid)
+            r = db.execute("SELECT r.*, t.plan_id, t.kind, t.status FROM run r JOIN task t ON t.id = r.task_id "
+                           "ORDER BY r.id DESC LIMIT 1").fetchone()
+            if not (r and t["kind"] == r["kind"] == "work" and t["plan_id"] == r["plan_id"] and r["result"] == "done"
+                    and r["status"] == "done" and r["session_id"] and r["task_id"] != tid
+                    and seconds(r["ended_at"], None) < HANDOFF_MINUTES * 60):
+                return None
+            chain = db.execute("WITH RECURSIVE c(id, prev) AS (SELECT id, continues_run FROM run WHERE id = ? "
+                               "UNION ALL SELECT run.id, run.continues_run FROM run JOIN c ON run.id = c.prev) "
+                               "SELECT count(*) FROM c", (r["id"],)).fetchone()[0]
+        return dict(r) if chain < limit else None
 
     def worker_warnings(self):
         w = self.config["worker"]
@@ -1936,11 +1966,12 @@ class Project:
         except subprocess.CalledProcessError:
             return None
 
-    def start_run(self, tid):
+    def start_run(self, tid, continues=None):
         """The run row of the task now running (result 'running'); returns its id."""
         with self.connect(write=True) as db:
-            return db.execute("INSERT INTO run (task_id, started_at, result, base_commit, pid) "
-                              "VALUES (?, ?, 'running', ?, ?)", (tid, now(), self.head(), os.getpid())).lastrowid
+            return db.execute("INSERT INTO run (task_id, started_at, result, base_commit, pid, continues_run) "
+                              "VALUES (?, ?, 'running', ?, ?, ?)",
+                              (tid, now(), self.head(), os.getpid(), continues)).lastrowid
 
     def record_run(self, rid, code, info, result, reason=None):
         cols = ("model", "session_id", "turns", "input_tokens", "output_tokens", "cache_read_tokens",
@@ -2018,13 +2049,15 @@ class Project:
         Returns ("done" | "blocked" | "failed" | "error" | "limit", message); "failed": the task's own failure,
         "error": one that stops the run (the database, git, Claude needs the human). Claude's passing errors (network,
         overload, a limit without a reset time): the same task again, now, then after RETRY_MINUTES."""
-        cmd, prompt = self.worker_command(tid)
+        handoff = self.handoff(tid)
+        cmd, prompt = self.worker_command(tid, handoff)
         before = self.planning_snapshot()
         attempt = 0
         while True:
-            started, rid = now(), self.start_run(tid)
+            started, rid = now(), self.start_run(tid, handoff and handoff["id"])
             log = self.run_log(tid, rid)
-            self.say(f"\n== task {tid}, run {rid} (log: {log})")
+            self.say(f"\n== task {tid}, run {rid} (log: {log})"
+                     + (f", continues run {handoff['id']} (task {handoff['task_id']})" if handoff else ""))
             info = {}
             try:
                 code = self.run_worker(cmd, prompt, log, tid, info)
@@ -2033,6 +2066,18 @@ class Project:
                 raise
             except OSError as e:
                 return "error", self.failed(tid, rid, f"the worker command can't start: {e}", None, info, started)[1]
+            if handoff:
+                handoff = None
+                cmd, prompt = self.worker_command(tid)
+                if (code != 0 or info.get("is_error")) and not info.get("last_tool") and not self.unstaged() \
+                        and self.task_status(tid) == "open" and not self.limit_line(log, code, info):
+                    line = info.get("result") or next((l for l in reversed(tail_lines(log, 5))
+                                                       if l.strip() and not l.startswith("{")), "no output")
+                    line = line.strip()[:300]
+                    self.record_run(rid, code, info, "failed", f"resuming the session failed, the task runs fresh: {line}")
+                    self.commit_db(f"task {tid}: resuming the session failed", running=None)
+                    self.say(f"Resuming the session failed ({line}); the task runs fresh.")
+                    continue
             limit = self.limit_line(log, code, info)
             if limit and (reset := limit_reset(limit)) is not None:
                 self.record_run(rid, code, info, "limit", limit.strip())
@@ -2356,7 +2401,7 @@ class Project:
                 elif level := self.needs_signoff(q[0][1]):
                     self.say(f"task {q[0][1]} needs a sign-off ({level}); `pm run` would request it")
                 else:
-                    cmd, prompt = self.worker_command(q[0][1])
+                    cmd, prompt = self.worker_command(q[0][1], self.handoff(q[0][1]))
                     self.say(shlex.join(cmd) + ("" if prompt is None else f"\n\nstdin:\n{prompt}"))
                 return 0
             self.close_stale_run()
