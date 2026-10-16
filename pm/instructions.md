@@ -1,11 +1,11 @@
 # pm: instructions for agents
 
-`pm` keeps a project's work as **milestones → plans → tasks**, plus **decisions** that only the human can make. Everything lives in `tasks.sql` (SQL text, tracked by git) and is read and changed only through `pm` commands. `pm run` works the queue one task at a time with a `claude -p` worker, one per work tree: a task with a work tree runs in its own git work tree, in parallel with other work trees' tasks, and pm merges its branch when it is done; as a worker you are one task of that run (environment `PM_TASK=<your task>`). A work task right after a done work task of the same plan may continue that task's Claude session (warm hand-off): what you learned of the code still holds, but only the task in your newest prompt is yours.
+`pm` keeps a project's work as **milestones → plans → tasks**, plus **decisions** that only the human can make. Everything lives in `tasks.sql` (SQL text, tracked by git) and is read and changed only through `pm` commands. `pm run` works the queue one task at a time with a `claude -p` worker per work tree: every task but planning, cleanup and exec tasks runs in one of the git work trees named in the config, in parallel with the others, and pm merges it into the trunk (the main checkout) when it is done; as a worker you are one task of that run (environment `PM_TASK=<your task>`). A work task right after a done work task of the same plan may continue that task's Claude session (warm hand-off): what you learned of the code still holds, but only the task in your newest prompt is yours.
 
 ## Rules
 
 1. **Subject on the command line, body on stdin.** Without a subject, `pm milestone|plan|task add` opens an editor and fails without a terminal. Use a heredoc with a quoted delimiter (`<<'EOF'`), so `$`, backticks and `\` in Markdown stay as written. `--body -` reads stdin too.
-2. **Creating commands print the new integer id on stdout**, nothing else: `tid=$(pm task add 4 "…" <<'EOF' … EOF)`.
+2. **Creating commands print the new integer id on stdout**, nothing else: `tid=$(pm task add 4 "…" --worktree app <<'EOF' … EOF)`.
 3. **IDs are integers, unique per kind:** `pm show 12` is task 12, `pm plan edit 3` is plan 3; `pm show` also takes `d32` (decision), `p3`, `m1`, `s2` (summary), `r2` (report).
 4. **`tasks.sql` is pm's:** query it with pm (`pm show`, `pm queue`, `pm decision list`), never read, grep or edit the file; in a worker, pm's hooks block reading it. Edit it by hand only when the human asks, then run `pm validate`.
 5. **References:** a milestone, plan, task or decision always by id and full subject, e.g. `plan 2: Backend endpoint`: plain in a subject, in backticks in a body, note or decision text. Renaming an item updates its references in open tasks that aren't running and in pending decisions.
@@ -19,7 +19,7 @@
 
 - **Milestone:** subject, body, status `open` | `on-hold` | `implemented` (set by pm), queue index (default 0). On hold: its tasks stay out of the queue until resumed; a running task finishes.
 - **Plan:** belongs to a milestone; subject, intro, body, priority. The milestone's first plan is its **masterplan**. A plan's parent is the plan of the task that wrote it, else the masterplan. **Done:** it has tasks, none open, and every child plan is done; the masterplan, when every plan of its milestone is.
-- **Task:** belongs to a plan (an `exec` task: none); subject, body (required while open), kind, status `open` | `done` | `dropped`, note (done: date and files; dropped: the reason), priority (default: the plan's, else 0), web (see "Web access").
+- **Task:** belongs to a plan (an `exec` task: none); subject, body (required while open), kind, work tree (none: the trunk, for planning, cleanup and exec tasks), status `open` | `done` | `dropped`, note (done: date and files; dropped: the reason), priority (default: the plan's, else 0), web (see "Web access").
 - **Task kinds:**
   - `work` (default)
   - `plan`: writes a plan (`--kind plan`)
@@ -27,7 +27,7 @@
   - `exec`: the human's direct intervention; no plan, so no milestone; queued as if at milestone queue index 0; no task-queue sign-off; if it fails, dropped, not investigated
 - **Decision:** subject (the question), intro (what is to be decided, plain English), body (context), options (the recommended one first), status `pending` | `answered` | `irrelevant`, kind `rule` (default: lasting, in the log) | `once` (a go-ahead or check). A task linked to a pending decision waits; answered, its worker sees the answer in `pm show`; irrelevant, the open tasks waiting for it are dropped. Also: `decided_by_task` (a worker's own choice, `pm decision record`; empty: the human's), consequences (what changed because of the answer), supersede links (a newer answer replaces an older one, wholly or partly).
 - **Sign-off:** a decision pm makes itself, per `signoff` in project-manager.toml: before a masterplan or plan is split into tasks, before work tasks run, or before a web task gets the web. Its only answer is approve; shown as `Decision 4 (answered, sign-off): …`. Not for agents to create or answer.
-- **Queue:** open tasks of open milestones, and open `exec` tasks, that no pending decision blocks; by milestone queue index (lowest first), then highest priority first, then milestone, plan and task id. `pm run` takes the first.
+- **Queue:** open tasks of open milestones, and open `exec` tasks, that no pending decision blocks; by milestone queue index (lowest first), then highest priority first, then milestone, plan and task id. `pm run` takes the first of the trunk and of each work tree, in parallel: **priority orders tasks only within one work tree**.
 - **Recorded by pm:** `created_at`, `retired_at`, `implemented_at`, `closed_at`; `created_by_task` (your task, for what you create as a worker); one run per worker run, with result, time, tokens and cost.
 
 ## What pm queues
@@ -110,21 +110,21 @@ pm plan edit 2 --priority 910    # its tasks without their own priority move wit
 ## Tasks
 
 ```sh
-pm task add 2 "Stream one table as CSV" <<'EOF'
+pm task add 2 "Stream one table as CSV" --worktree app <<'EOF'
 Implement `GET /api/export/<table>.csv` in `app/api/export.py` with the stdlib `csv` module.
 
 Done when: a test exports a table with 3 rows and an empty table.
 EOF
-pm task add 1 "write plan: Export endpoint" --kind plan <<'EOF'
+pm task add 1 "write plan: Export endpoint" --kind plan --worktree app <<'EOF'
 Write the plan for part 1 of the masterplan.
 EOF
-pm task add 2 "Docs for the export endpoint" --priority 690 <<'EOF'
+pm task add 2 "Docs for the export endpoint" --priority 690 --worktree app <<'EOF'
 …
 EOF
-pm task add 2 "Untangle the cache invalidation" --model opus <<'EOF'   # needs deep reasoning
+pm task add 2 "Untangle the cache invalidation" --model opus --worktree app <<'EOF'   # needs deep reasoning
 …
 EOF
-pm task set 6 [--subject …] [--body -] [--priority N|none] [--web|--no-web] [--model opus|none] [--worktree <name>|base]   # open, not running
+pm task set 6 [--subject …] [--body -] [--priority N|none] [--web|--no-web] [--model opus|none] [--worktree <name>]   # open, not running
 pm task priority 6 710          # none: back to the plan's
 pm task done 5 "2026-10-10, app/api/export.py, tests/test_export.py"
 pm task drop 6 "covered by task 5"
@@ -134,7 +134,7 @@ A task fits one worker run: one change you can describe, check and commit.
 
 **Model:** pm picks the worker's model by task kind (`[models]` in the config: usually Sonnet for work, Opus for planning and investigations) and switches a task to Opus after a failed run. When splitting a plan, mark a work task that needs deep reasoning (subtle design, hard bugs, wide refactors) `--model opus`; leave the rest to pm.
 
-**Work trees:** `--worktree <name>` (e.g. `questions`) on `pm task add|set`: the task runs in its own git work tree, in parallel with other work trees' tasks, one task per work tree at a time, merged into the main checkout when done; `base`: the main checkout. Tasks you add get your own task's work tree unless you say otherwise. Give a work tree only to tasks the human or the plan assigned to one; don't invent work trees. In a work tree, stay in it; pm's commands still use the main checkout's database.
+**Work trees:** `pm task add` needs `--worktree <name>`, one of the work trees your prompt lists with what belongs in each; pick it by what the task is about, not by your own task's. A work tree runs one task at a time, in parallel with the other work trees; pm merges it into the trunk after each task. **Priority orders tasks only within one work tree:** a task that must wait for another belongs in the same work tree. In a work tree, stay in it; pm's commands still use the trunk's database.
 
 **Web access:** workers have no WebSearch or WebFetch, except for a task marked web (`--web`). Mark only a task that needs it, e.g. "verify the sourced figures"; its worker gets both tools once the human approves the sign-off (if `"web"` is in `signoff`). Your own task needs the web: `pm task set <your task> --web`, then stop without closing it, even when pm reminds you it is open; the next run has the tools. Don't ask for web access with a decision, and don't edit settings to grant it.
 
@@ -150,7 +150,7 @@ Work you find beyond your task is a follow-up task: add it, don't do it, don't l
 - It needs the human's answer first: also `pm decision add` and `pm task-pending-decision <new task> <decision>`
 
 ```sh
-pm task add 2 "Escape newlines in CSV cells" <<'EOF'
+pm task add 2 "Escape newlines in CSV cells" --worktree app <<'EOF'
 `app/api/export.py` writes cells with newlines unquoted; found in task 5.
 
 Done when: a test exports a cell with a newline and reads it back.
@@ -210,7 +210,7 @@ Each pm task's body says what to do; these are the mechanics.
 
 - **Write the masterplan** (plan P): read the milestone (`pm show <task>`) and the code; `pm plan edit P --intro "…" --body -`, divided into parts, stating that the masterplan's own tasks each write the plan for one part. That queues "create tasks for plan P: …".
 - **Revise a plan** (P): if it no longer fits its milestone or parent plan, `pm plan edit P --body -`; that queues its split and the revisions below it. If it still fits, change nothing.
-- **Split a plan into tasks** (P): keep the done and dropped tasks, drop open ones that no longer fit, add one `pm task add P …` per missing task, in the order they should run (`--model opus` for one that needs deep reasoning); the masterplan's tasks write plans (`--kind plan`). Raise a decision for each question only the human can answer, and link the tasks that wait for it. Note: `"<date>, tasks …"`.
+- **Split a plan into tasks** (P): keep the done and dropped tasks, drop open ones that no longer fit, add one `pm task add P … --worktree <name>` per missing task, in the order they should run (priority orders only within a work tree) (`--model opus` for one that needs deep reasoning); the masterplan's tasks write plans (`--kind plan`). Raise a decision for each question only the human can answer, and link the tasks that wait for it. Note: `"<date>, tasks …"`.
 - **Write a part's plan** (a task of the masterplan): `pm plan list` first, then `pm plan add <milestone> "<part>" --priority N --intro "…"` with the full body.
 - **Post-milestone cleanup:** work through the body for the whole project. For another milestone that needs a change, or a pending decision that seems obsolete: a new decision for the human.
 - **Executive summary** (`exec`): `pm summary show` is the previous one; store the new one with `pm summary add < summary.md` (only in an exec task).

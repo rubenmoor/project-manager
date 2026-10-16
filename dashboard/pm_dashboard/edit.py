@@ -73,7 +73,8 @@ def apply(project, op):
         k = op.get("kind", "work")
         if k not in ("work", "plan", "exec"):
             raise EditError("kind must be work, plan or exec")
-        tid = project.task_add(None if k == "exec" else int(op["plan"]), subject.strip(), text(op.get("body"), "the body"), prio(op.get("priority")), k)
+        tid = project.task_add(None if k == "exec" else int(op["plan"]), subject.strip(), text(op.get("body"), "the body"), prio(op.get("priority")), k,
+                               worktree=None if k == "exec" else op.get("worktree"))
         return f"task {tid} added: {subject.strip()}", tid
     if kind == "task_edit":
         fields = {}
@@ -90,8 +91,8 @@ def apply(project, op):
             fields["model"] = m.strip() if m else None
         if "worktree" in op:
             w = op["worktree"]
-            if w is not None and not (isinstance(w, str) and pm.WORKTREE_NAME.fullmatch(w)):
-                raise EditError("the work tree is a name of lowercase letters, digits and -, e.g. questions; empty: the main checkout")
+            if not isinstance(w, str):
+                raise EditError("the work tree is one of [worktrees] in the config")
             fields["worktree"] = w
         if not fields:
             raise EditError("nothing to change")

@@ -12,8 +12,9 @@ worker reads the previous summary and stores the new one in the summary table; a
 tokens and cost; a custom report (`pm report ask`) answers the human's question in one paragraph. The queue (the `queue` view): open
 tasks of open milestones, and open exec tasks, that no pending decision blocks, by the milestone's queue index (lowest
 first; exec: 0), then highest priority first, then by milestone, plan and task.
-Worked one task at a time by `claude -p`, one per work tree (task.worktree): a work tree's task runs in its own git
-work tree, in parallel, and its branch is merged into the main checkout when done. Standard library only (Python 3.11+).
+Worked one task at a time by `claude -p` per work tree ([worktrees] in the config, task.worktree), in parallel: a task
+runs in its git work tree, which is merged into the trunk (the project's own checkout) after it; the trunk runs the
+human's exec tasks and pm's planning and cleanup tasks. Standard library only (Python 3.11+).
 
     pm init | status | queue | show <task|d32|p3|m1> | validate | decide | run [--once] [--dry-run] | instructions
     pm milestone add|set|hold|resume|list|show …   pm plan add|edit|list …   pm task add|set|done|drop|priority …
@@ -30,7 +31,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 66  # bump by one with every commit (AGENTS.md)
+VERSION = 67  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -54,7 +55,7 @@ WRITE_MASTERPLAN_SUBJECT = "write the masterplan of {}"
 REVISE_MASTERPLAN_SUBJECT = "revise the masterplan of {}"
 REVISE_PLAN_SUBJECT = "revise {}"
 INVESTIGATE_SUBJECT = "investigate the failure of {}"
-MERGE_SUBJECT = "merge work tree {} into the main checkout"
+MERGE_SUBJECT = "merge the trunk and work tree {}"
 WORKTREE_BRANCH = "pm/wt/"     # + the work tree's name: the branch of its checkout
 SUMMARY_SUBJECT = "write an executive summary"
 SUMMARY_PRIORITY = 10000
@@ -66,6 +67,8 @@ NOT_RUNNING = "AND id NOT IN (SELECT task_id FROM run WHERE result = 'running')"
 # revise ("revise the masterplan of milestone N: …", "revise plan N: …"), investigate (a failed task), merge (a work
 # tree's branch that didn't merge); made by the human only: exec (an executive intervention, the only kind without a plan)
 TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup", "revise", "investigate", "merge", "exec")
+# Run in the trunk (no work tree); investigate: where the failed task ran; the others in a work tree.
+TRUNK_KINDS = ("exec", "masterplan", "split", "revise", "cleanup")
 PLANNING_KINDS = ("plan", "masterplan", "split")
 # `signoff` in project-manager.toml → decision.signoff; a sign-off's only answer is SIGNOFF_ANSWER
 SIGNOFF_LEVELS = {"masterplans": "masterplan", "plans": "plan", "task-queue": "task-queue", "web": "web"}
@@ -87,7 +90,7 @@ SIGNOFF_INTROS = {
 IN_LOG = ("status = 'answered' AND signoff IS NULL AND kind = 'rule' AND id NOT IN (SELECT superseded_id FROM "
           "decision_supersedes s JOIN decision n ON n.id = s.decision_id WHERE s.note = '' AND n.status = 'answered')")
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 27
 # A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
 # run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
 # Columns and tables SCHEMA dropped are left behind, new ones get their defaults; so only renames, moved data and new
@@ -111,8 +114,13 @@ def exec_kind(con):
     con.execute("UPDATE task SET kind = 'exec' WHERE plan_id IS NULL")
 
 
+def trunk_kinds(con):
+    """26 -> 27: exec, planning and cleanup tasks run in the trunk."""
+    con.execute("UPDATE task SET worktree = NULL WHERE kind IN ('exec', 'masterplan', 'split', 'revise', 'cleanup')")
+
+
 MIGRATIONS = {12: "", 13: "", 14: revise_kind, 15: "", 16: "", 17: "", 18: drop_summary_kind, 19: exec_kind,
-              20: "", 21: "", 22: "", 23: "", 24: "", 25: ""}
+              20: "", 21: "", 22: "", 23: "", 24: "", 25: "", 26: trunk_kinds}
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -151,11 +159,11 @@ CREATE TABLE task (
     created_by_task INTEGER REFERENCES task (id),
     web             INTEGER NOT NULL DEFAULT 0 CHECK (web IN (0, 1)),  -- 1: its worker gets WebSearch and WebFetch
     model           TEXT CHECK (model IS NULL OR trim(model) <> ''),  -- claude --model; NULL: [models] in the config
-    worktree        TEXT CHECK (worktree GLOB '[a-z0-9]*' AND worktree NOT GLOB '*[^a-z0-9-]*'),  -- NULL: the main checkout
+    worktree        TEXT CHECK (worktree GLOB '[a-z0-9]*' AND worktree NOT GLOB '*[^a-z0-9-]*'),  -- [worktrees]; NULL: the trunk
     CONSTRAINT "an open task needs a body" CHECK (status <> 'open' OR trim(body) <> ''),
     CONSTRAINT "retired_at is set exactly when done or dropped" CHECK ((status = 'open') = (retired_at IS NULL)),
     CONSTRAINT "an exec task has no plan, every other task has one" CHECK ((kind = 'exec') = (plan_id IS NULL)),
-    CONSTRAINT "an exec task runs in the main checkout" CHECK (kind <> 'exec' OR worktree IS NULL)
+    CONSTRAINT "exec, planning and cleanup tasks run in the trunk" CHECK (kind NOT IN ('exec', 'masterplan', 'split', 'revise', 'cleanup') OR worktree IS NULL)
 ) STRICT;
 
 CREATE TABLE decision (
@@ -193,7 +201,7 @@ CREATE TABLE run (                                         -- one worker run of 
     reason                TEXT,                            -- failed: why; limit: the message
     exit_code             INTEGER,
     base_commit           TEXT,                            -- HEAD when the run started
-    worktree              TEXT,                            -- the task's work tree then; NULL: the main checkout
+    worktree              TEXT,                            -- the task's work tree then; NULL: the trunk
     model                 TEXT,                            -- from here on: the worker's JSON output, if any
     session_id            TEXT,
     continues_run         INTEGER REFERENCES run (id),     -- warm hand-off: the run whose Claude session it resumed
@@ -294,7 +302,7 @@ Refer to a milestone, plan, task or decision by id and full subject, `plan 12: <
 in backticks in a body, a note or a decision's text.
 
 Work you find beyond task {id} (a bug, a missing test, a part the plan forgot, cleanup your change makes necessary) \
-is a follow-up task, not part of yours: `pm task add <plan id> "<subject>" < body.md`, in the plan it belongs to \
+is a follow-up task, not part of yours: `pm task add <plan id> "<subject>" --worktree <name> < body.md`, in the plan it belongs to \
 (usually task {id}'s, above), with a body that lets another worker do it without your context; don't add one the \
 plan already lists.
 
@@ -303,11 +311,12 @@ Milestones, plans, tasks and decisions are in {db}; change them only with these 
   pm plan edit <plan id> [--subject …] [--body …] [--intro …] [--priority N]
   pm plans list     plans with open tasks, by milestone queue index, then highest priority first
   pm milestone list     every milestone; pm milestone show <milestone id>
-  pm task add <plan id> "<subject>" [--kind plan] [--priority N] [--web] [--model opus] < body.md     --kind plan: the
-      task writes a plan; --web: its worker gets WebSearch and WebFetch (after the human's sign-off); --model opus:
-      a work task that needs deep reasoning (subtle design, hard bugs, wide refactors), else pm picks by kind
-  pm task set <task id> [--subject …] [--body …] [--priority N] [--web|--no-web] [--model opus|none]     an open
-      task that isn't running
+  pm task add <plan id> "<subject>" --worktree <name> [--kind plan] [--priority N] [--web] [--model opus] < body.md
+      --worktree: where it runs, below; --kind plan: the task writes a plan; --web: its worker gets WebSearch and
+      WebFetch (after the human's sign-off); --model opus: a work task that needs deep reasoning (subtle design, hard
+      bugs, wide refactors), else pm picks by kind
+  pm task set <task id> [--subject …] [--body …] [--priority N] [--web|--no-web] [--model opus|none]
+      [--worktree <name>]     an open task that isn't running
   pm decision add "<subject>" --intro "<intro>" [--body "<text>"] [--option "<recommended>"] [--option …]
       prints its id
   pm task-pending-decision <task id> <decision id>     the task waits until the human answers
@@ -317,6 +326,8 @@ Milestones, plans, tasks and decisions are in {db}; change them only with these 
   pm decision consequences <decision id> "<text>"     what changed because of an answer
   pm show <task id>     also d<decision id>, p<plan id>, m<milestone id>
 Every command with examples, and recipes for the usual tasks: `pm instructions`.
+
+{worktrees}
 
 Stop processes you started by PID (`kill $!`), never with `pkill -f` or `killall`: the pattern can match your own \
 process. Run long checks in the foreground (a Bash call with a timeout): your session ends with your turn, \
@@ -515,8 +526,8 @@ def init(root, out=sys.stdout):
         print(f"pm: wrote and committed {CONFIG_FILE}", file=out)
     except subprocess.CalledProcessError as e:
         print(f"pm: wrote {CONFIG_FILE}; committing failed: {e.stderr.strip()}", file=out)
-    print(f"pm: check and adjust the defaults in {CONFIG_FILE} (e.g. the database file name, the worker command)",
-          file=out)
+    print(f"pm: name the work trees in {CONFIG_FILE} ([worktrees], at least one), then check and adjust its defaults "
+          "(e.g. the database file name, the worker command)", file=out)
 
 
 def load_config(root):
@@ -549,6 +560,14 @@ def load_config(root):
         errors.append("max_parallel must be an integer >= 1")
     if not isinstance(config["worktree_dir"], str) or not config["worktree_dir"].strip():
         errors.append("worktree_dir must be a folder")
+    w = config["worktrees"]
+    if not isinstance(w, dict) or not w:
+        errors.append("[worktrees] names no work tree: add at least one, name = what belongs there (see pm's template, "
+                      f"pm/{CONFIG_FILE})")
+    else:
+        errors += [f"worktrees: {k!r} is no name (lowercase letters, digits and -)" for k in w if not WORKTREE_NAME.fullmatch(k)]
+        errors += [f"worktrees.{k} must be a non-empty string: what belongs there" for k, v in w.items()
+                   if not isinstance(v, str) or not v.strip()]
     errors += [f"{k} must be a non-empty string" for k in PROMPT_KEYS
                if not isinstance(config[k], str) or not config[k].strip()]
     errors += [f"{k} must be a string" for k in PRIORITY_KEYS if not isinstance(config[k], str)]
@@ -587,7 +606,7 @@ def dump(con):
 
 
 def running_run(db):
-    """The run row of the worker running in the main checkout now, or None."""
+    """The run row of the worker running in the trunk now, or None."""
     r = db.execute("SELECT * FROM run WHERE result = 'running' AND worktree IS NULL").fetchone()
     return dict(r) if r else None
 
@@ -597,11 +616,8 @@ STASH_LOCK = threading.Lock()   # git's stash is one for all work trees
 
 
 def worktree_arg(v):
-    """--worktree: a name, or "base" (or "none") for the main checkout (None)."""
-    if v in ("base", "none"):
-        return None
     if not WORKTREE_NAME.fullmatch(v):
-        raise argparse.ArgumentTypeError(f"{v!r}: lowercase letters, digits and -, e.g. questions; base: the main checkout")
+        raise argparse.ArgumentTypeError(f"{v!r}: a work tree's name from [worktrees] in {CONFIG_FILE}")
     return v
 
 
@@ -680,7 +696,7 @@ class Project:
         self.cache = None           # (file_key(), the loaded database)
         self.mutex = threading.RLock()
         self.locked = False
-        self.base = None            # a work tree's task: the main checkout's Project (database, `pm run` state)
+        self.base = None            # a work tree's task: the trunk's Project (database, `pm run` state)
         self.worktree = None        # its name
         self.killed = None          # `pm run` stops now: the signal's name; its workers are killed
         self.limit_until = None     # a worker waits for the usage limit's reset: start no other task until then
@@ -689,7 +705,7 @@ class Project:
 
     @property
     def top(self):
-        """The main checkout's Project: `pm run`'s state lives there."""
+        """The trunk's Project: `pm run`'s state lives there."""
         return self.base or self
 
     def child(self, name, path):
@@ -836,8 +852,8 @@ class Project:
         os.replace(tmp, self.db_path)
 
     def commit_db(self, message, running=...):
-        """Commit the database file if it changed. Not in a worker, nor while one runs in the main checkout: `pm run`
-        commits the file with the task. In a work tree: never, the main checkout commits it. Returns False if git
+        """Commit the database file if it changed. Not in a worker, nor while one runs in the trunk: `pm run`
+        commits the file with the task. In a work tree: never, the trunk commits it. Returns False if git
         failed."""
         if self.base or os.environ.get("PM_WORKER") or not self.git("status", "--porcelain", "--", self.db).strip():
             return True
@@ -1705,24 +1721,30 @@ class Project:
             queued = [self.queue_plan_tasks(db, pid)] + [self.queue_revision(db, c, pid) for c in self.child_plans(db, pid)]
             return [q for q in queued if q]
 
-    def task_add(self, pid, subject, body, prio=None, kind="work", web=False, model=None, worktree=...):
-        """A new task; a plan-writing one gets planning_priority unless prio is given. kind exec: the human's, pid None.
-        worktree: its work tree's name, None: the main checkout; not given: a worker's task gets its own task's."""
+    def task_add(self, pid, subject, body, prio=None, kind="work", web=False, model=None, worktree=None):
+        """A new task; a plan-writing one gets planning_priority unless prio is given. kind exec: the human's, pid None,
+        no work tree; any other: a work tree of [worktrees]."""
         if prio is None and kind in PLANNING_KINDS:
             prio = self.config["planning_priority"]
         if kind == "exec":
             human_only("add an exec task")
-            if worktree not in (None, ...):
-                raise FormatError("an exec task runs in the main checkout, it has no work tree")
+            if worktree is not None:
+                raise FormatError("an exec task runs in the trunk, it has no work tree")
+        else:
+            self.check_worktree(worktree)
         with self.connect(write=True) as db:
             if kind != "exec":
                 self.check_plan_open(db, pid)
-            if worktree is ...:
-                own = creator() and db.execute("SELECT worktree FROM task WHERE id = ?", (creator(),)).fetchone()
-                worktree = own[0] if own and kind != "exec" else None
             return db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task, web, model, "
                               "worktree) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                               (pid, subject, kind, prio, body.strip(), creator(), int(web), model, worktree)).lastrowid
+
+    def check_worktree(self, name):
+        names = self.config["worktrees"]
+        if name not in names:
+            raise FormatError(("a task needs its work tree: --worktree <name>" if name is None else f"no work tree {name!r}")
+                              + "; [worktrees] in " + CONFIG_FILE + ": "
+                              + "; ".join(f"{k}: {v.strip()}" for k, v in names.items()))
 
     def task_set(self, tid, **fields):
         """Set fields of an open task (status, note, priority, subject, body, web, model, worktree); a value None clears
@@ -1736,8 +1758,11 @@ class Project:
                 if {"subject", "body", "worktree"} & fields.keys():
                     raise FormatError(f"task {tid} is running; its subject, body and work tree can't be changed. "
                                       f"Add a follow-up task instead: pm task add {t['plan_id']}")
-            if fields.get("worktree") and t["kind"] == "exec":
-                raise FormatError(f"task {tid} is an exec task: it runs in the main checkout, it has no work tree")
+            if "worktree" in fields:
+                if t["kind"] in TRUNK_KINDS:
+                    raise FormatError(f"task {tid} is a{'n' if t['kind'][0] in 'aeiou' else ''} {t['kind']} task: it runs "
+                                      "in the trunk, it has no work tree")
+                self.check_worktree(fields["worktree"])
             for k, v in fields.items():
                 if k == "status":
                     db.execute("UPDATE task SET status = ?, retired_at = CASE WHEN ? <> 'open' THEN ? END WHERE id = ?",
@@ -1902,16 +1927,16 @@ class Project:
         """(command, prompt): the prompt goes to the worker's stdin; None if the command holds it ("{prompt}").
         handoff (self.handoff): resume that run's Claude session."""
         show = "\n".join([self.show(tid), self.earlier_failure(tid), *self.priority_prompts()]).rstrip() + "\n"
-        prompt = WORKER_PROMPT.format(id=tid, db=self.db, show=show, intro_rule=INTRO_RULE)
+        prompt = WORKER_PROMPT.format(id=tid, db=self.db, show=show, intro_rule=INTRO_RULE, worktrees=self.worktree_lines())
         if handoff:
             prompt = (f"Task {handoff['task_id']} is done and committed. This session goes on with the next task of its "
                       f"plan: what you learned of the code still holds, what you were told about task "
                       f"{handoff['task_id']} no longer does.\n\n" + prompt)
         if self.base:
-            prompt += (f"\n\nYou work in a git work tree of your own, {self.root}, on the branch "
-                       f"{WORKTREE_BRANCH}{self.worktree}; other tasks run at the same time in the main checkout, "
-                       f"{self.base.root}, and other work trees. Stay in yours: pm commits what you stage here and "
-                       "merges it into the main checkout. pm's commands use the main checkout's database; the copy "
+            prompt += (f"\n\nYou work in work tree {self.worktree}: {self.root}, on the branch "
+                       f"{WORKTREE_BRANCH}{self.worktree}; other tasks run at the same time in the trunk, "
+                       f"{self.base.root}, and the other work trees. Stay in yours: pm commits what you stage here and "
+                       "merges it into the trunk. pm's commands use the trunk's database; the copy "
                        f"of {self.db} here is stale.")
         hook = {"type": "command", "command": shlex.join([sys.executable, str(GUARD)])}
         permissions = {"deny": [f"Read(/{p.resolve()})" for p in {self.db_path, self.root / self.db}]}
@@ -1926,6 +1951,12 @@ class Project:
         if self.picks_model() and (model := self.model_for(tid)[0]):
             cmd[1:1] = ["--model", model]
         return cmd, None if any("{prompt}" in a for a in w) else prompt
+
+    def worktree_lines(self):
+        """For workers: the work trees and what belongs in each."""
+        return ("Work trees: every task but planning and cleanup runs in one; `pm task add` needs `--worktree <name>`, "
+                "by what the task is about. A task's priority orders it only among the tasks of its work tree.\n"
+                + "\n".join(f"  {k}: {v.strip()}" for k, v in self.config["worktrees"].items()))
 
     def picks_model(self):
         """pm picks the model ([models]): the worker is claude and its command names none."""
@@ -2161,7 +2192,7 @@ class Project:
 
     def close_stale_run(self):
         """Under the run lock, a 'running' run is one whose `pm run` died: it becomes failed and is committed; what it
-        left in its work tree is stashed for the task's next run, and the work tree removed."""
+        left in its work tree is stashed for the task's next run."""
         rs = self.rows("SELECT * FROM run WHERE result = 'running' ORDER BY id")
         if not rs:
             return
@@ -2170,12 +2201,11 @@ class Project:
                 db.execute("UPDATE run SET ended_at = ?, result = 'failed', reason = ? WHERE id = ?",
                            (now(), f"pm run crashed: {self.crash['error']}" if self.crash else "interrupted", r["id"]))
         for r in rs:
-            if r["worktree"] and (path := self.worktree_path(r["worktree"])).is_dir():
+            if r["worktree"] and (path := self.worktree_path(r["worktree"])) in self.worktrees():
                 with contextlib.suppress(subprocess.CalledProcessError, OSError):
                     if stash := self.child(r["worktree"], path).stash_leftovers(
                             f"pm: task {r['task_id']} run {r['id']} failed"):
                         self.say(f"[{r['worktree']}] {stash}")
-                self.worktree_remove(r["worktree"])
         self.commit_db(", ".join(f"run {r['id']} (task {r['task_id']})" for r in rs)
                        + (" crashed" if self.crash else " interrupted"))
 
@@ -2184,97 +2214,131 @@ class Project:
     def worktree_path(self, name):
         return (self.root / self.config["worktree_dir"].replace("{repo}", self.root.name) / name).resolve()
 
-    def worktree_add(self, name):
-        """A fresh work tree for `name`, on its branch, at the main checkout's HEAD; returns its path."""
-        path = self.worktree_path(name)
+    def worktrees(self):
+        """The paths of the repository's git work trees."""
+        return {Path(l[9:]).resolve() for l in self.git("worktree", "list", "--porcelain").splitlines()
+                if l.startswith("worktree ")}
+
+    def worktree_ensure(self, name):
+        """Work tree name's checkout, on its branch; made from the trunk's HEAD if missing. Returns its path."""
+        path, branch = self.worktree_path(name), WORKTREE_BRANCH + name
+        if path in self.worktrees():
+            return path
         self.git("worktree", "prune")
         if path.exists():
-            self.worktree_remove(name)
-            if path.exists():
-                raise FormatError(f"{path} is in the way of work tree {name}: move it away")
+            raise FormatError(f"{path} is in the way of work tree {name}: move it away")
         path.parent.mkdir(parents=True, exist_ok=True)
-        self.git("worktree", "add", "-q", "-B", WORKTREE_BRANCH + name, str(path), "HEAD")
+        have = subprocess.run(["git", "rev-parse", "-q", "--verify", f"refs/heads/{branch}"], cwd=self.root,
+                              capture_output=True).returncode == 0
+        self.git("worktree", "add", "-q", *([str(path), branch] if have else ["-b", branch, str(path), "HEAD"]))
         return path
 
-    def worktree_remove(self, name):
-        with contextlib.suppress(subprocess.CalledProcessError):
-            self.git("worktree", "remove", "--force", str(self.worktree_path(name)))
+    def trunk_ref(self):
+        """The trunk's branch, or its HEAD if detached: what a work tree merges."""
+        r = subprocess.run(["git", "symbolic-ref", "-q", "--short", "HEAD"], cwd=self.root, capture_output=True, text=True)
+        return r.stdout.strip() or self.head()
 
-    def worktree_branches(self):
-        """{work tree name: its branch is merged into HEAD}."""
-        refs = self.git("for-each-ref", "--format=%(refname:short)", "refs/heads/" + WORKTREE_BRANCH).split()
-        return {ref[len(WORKTREE_BRANCH):]: subprocess.run(["git", "merge-base", "--is-ancestor", ref, "HEAD"],
-                                                           cwd=self.root).returncode == 0 for ref in refs}
+    def update_worktree(self, child, tid):
+        """Before task tid in a work tree: what was left there stashed, then the trunk merged in. False on a conflict:
+        a merge task is queued there."""
+        name = child.worktree
+        if stash := child.stash_leftovers(f"pm: work tree {name} left before task {tid}"):
+            child.say(stash)
+        try:
+            child.git("merge", "-q", "--no-edit", "-m", f"pm: merge the trunk into work tree {name}", self.head())
+            return True
+        except subprocess.CalledProcessError as e:
+            conflict = child.merging() and child.git("diff", "--name-only", "--diff-filter=U").split()
+            if child.merging():
+                child.git("merge", "--abort")
+            if not conflict:
+                raise FormatError(f"[{name}] merging the trunk failed: {((e.stdout or '') + (e.stderr or '')).strip()}")
+        self.queue_merge(name, conflict)
+        return False
 
     def merging(self):
         """A merge is in progress in this checkout."""
         return (self.root / self.git("rev-parse", "--git-path", "MERGE_HEAD").strip()).exists()
 
     def merge_task(self, name):
-        """The open task that merges work tree name's branch, or None."""
-        r = self.rows("SELECT id FROM task WHERE kind = 'merge' AND status = 'open' AND subject = ?",
-                      MERGE_SUBJECT.format(name))
+        """The open task that merges the trunk and work tree name, or None."""
+        r = self.rows("SELECT id FROM task WHERE kind = 'merge' AND status = 'open' AND worktree = ?", name)
         return r[0]["id"] if r else None
 
-    def merge_worktrees(self, running):
-        """While no task runs in the main checkout: merge the branches of the work trees that run nothing, delete the
-        merged ones. A work tree runs nothing more until its branch is merged."""
-        for name, merged in self.worktree_branches().items():
-            if name in running:
+    def merge_worktrees(self):
+        """While no task runs in the trunk and nothing is staged there: merge the work trees' branches that the trunk
+        lacks, one after another; one that conflicts gets a merge task."""
+        if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=self.root).returncode:
+            if self.merge_errors.get("") != "staged":
+                self.merge_errors[""] = "staged"
+                self.say("The trunk has staged changes: work trees are merged once they are committed or unstaged.")
+            return
+        self.merge_errors.pop("", None)
+        for name in self.config["worktrees"]:
+            branch = WORKTREE_BRANCH + name
+            sha = subprocess.run(["git", "rev-parse", "-q", "--verify", f"refs/heads/{branch}"], cwd=self.root,
+                                 capture_output=True, text=True).stdout.strip()
+            if not sha or self.merge_task(name) or subprocess.run(
+                    ["git", "merge-base", "--is-ancestor", sha, "HEAD"], cwd=self.root).returncode == 0:
                 continue
-            if merged:
-                self.worktree_remove(name)
-                with contextlib.suppress(subprocess.CalledProcessError):
-                    self.git("branch", "-D", WORKTREE_BRANCH + name)
-            elif not self.merge_task(name):
-                self.merge_worktree(name)
+            self.merge_worktree(name, sha)
 
-    def merge_worktree(self, name):
-        """Merge work tree name's branch into the main checkout, with the database, and delete it. A conflict is
-        aborted and queues a merge task; another failure is reported once and tried again later."""
-        branch = WORKTREE_BRANCH + name
-        ids = sorted({int(m[1]) for l in self.git("log", "--format=%s", f"HEAD..{branch}").splitlines()
+    def merge_worktree(self, name, sha):
+        """Merge work tree name's branch (at sha) into the trunk, with the database. A conflict is aborted and queues
+        a merge task in the work tree; another failure is reported once and tried again later."""
+        ids = sorted({int(m[1]) for l in self.git("log", "--format=%s", f"HEAD..{sha}").splitlines()
                       if (m := re.match(r"task (\d+): ", l))})
         message = f"pm: merge work tree {name}" + (f": task {', '.join(map(str, ids))}" if ids else "")
         try:
-            self.git("merge", "--no-ff", "--no-commit", branch)
+            self.git("merge", "--no-ff", "--no-commit", sha)
             self.git("add", "--", self.db)
             self.git("commit", "-q", "-m", message)
         except subprocess.CalledProcessError as e:
-            conflict = self.merging() and self.git("diff", "--name-only", "--diff-filter=U").strip()
+            conflict = self.merging() and self.git("diff", "--name-only", "--diff-filter=U").split()
             if self.merging():
                 self.git("merge", "--abort")
             if conflict:
-                tid = self.queue_merge(name, ids)
-                self.say(f"[{name}] merging {branch} conflicts ({', '.join(conflict.split())}); "
-                         + (f"task {tid} merges it" if tid else f"merge it yourself: git merge {branch}"))
-                self.commit_db(f"work tree {name}: task {tid} merges it")
+                self.queue_merge(name, conflict)
             elif self.merge_errors.get(name) != (err := ((e.stdout or "") + (e.stderr or "")).strip()):
                 self.merge_errors[name] = err
-                self.say(f"[{name}] merging {branch} failed; it waits, pm tries again later:\n  {err}")
+                self.say(f"[{name}] merging into the trunk failed; pm tries again later:\n  {err}")
             return
         self.merge_errors.pop(name, None)
         self.gc()
-        self.say(f"[{name}] merged into the main checkout")
-        self.worktree_remove(name)
-        with contextlib.suppress(subprocess.CalledProcessError):
-            self.git("branch", "-D", branch)
+        self.say(f"[{name}] merged into the trunk" + (f" (task {', '.join(map(str, ids))})" if ids else ""))
 
-    def queue_merge(self, name, ids):
-        """A merge task for work tree name's branch, in the main checkout, in the plan of the tree's last task; its id,
-        or None without such a task."""
+    def queue_merge(self, name, files):
+        """A merge task in work tree name, in the plan of its last task, above it; commits the database."""
         with self.connect(write=True) as db:
             t = db.execute("SELECT t.* FROM run r JOIN task t ON t.id = r.task_id WHERE r.worktree = ? "
-                           "AND t.plan_id IS NOT NULL ORDER BY r.id DESC LIMIT 1", (name,)).fetchone()
+                           "AND t.plan_id IS NOT NULL ORDER BY r.id DESC LIMIT 1", (name,)).fetchone() or db.execute(
+                "SELECT * FROM task WHERE worktree = ? AND status = 'open' ORDER BY id LIMIT 1", (name,)).fetchone()
             if t is None:
+                self.say(f"[{name}] the trunk and work tree {name} conflict ({', '.join(files)}); no task to queue the "
+                         f"merge with: merge them yourself, `git merge {self.trunk_ref()}` in {self.worktree_path(name)}")
                 return None
             p = self.get(db, "plan", t["plan_id"])
             prio = t["priority"] if t["priority"] is not None else p["priority"] or 0
-            tasks = [db.execute("SELECT id, subject FROM task WHERE id = ?", (i,)).fetchone() for i in ids]
-            body = self.prompt("merge_prompt", worktree=name, branch=WORKTREE_BRANCH + name,
-                               tasks=", ".join(ref("task", r["id"], r["subject"], True) for r in tasks if r) or "its tasks")
-            return db.execute("INSERT INTO task (plan_id, subject, kind, priority, body) VALUES (?, ?, 'merge', ?, ?)",
-                              (t["plan_id"], MERGE_SUBJECT.format(name), prio + 2, body)).lastrowid
+            branch = WORKTREE_BRANCH + name
+            tasks = [db.execute("SELECT id, subject FROM task WHERE id = ?", (int(m[1]),)).fetchone()
+                     for l in self.git("log", "--format=%s", f"HEAD..{branch}").splitlines()
+                     if (m := re.match(r"task (\d+): ", l))]
+            body = self.prompt("merge_prompt", worktree=name, branch=branch, trunk=self.trunk_ref(),
+                               tasks=", ".join(ref("task", r["id"], r["subject"], True) for r in tasks if r) or "no task yet")
+            body += "\n\nConflicting files: " + ", ".join(files)
+            tid = db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, worktree) "
+                             "VALUES (?, ?, 'merge', ?, ?, ?)",
+                             (t["plan_id"], MERGE_SUBJECT.format(name), prio + 2, body, name)).lastrowid
+        self.say(f"[{name}] the trunk and work tree {name} conflict ({', '.join(files)}); task {tid} merges them")
+        self.commit_db(f"work tree {name}: task {tid} merges the trunk")
+        return tid
+
+    def misplaced(self):
+        """Open tasks that can't run where they are: [(task id, why)]."""
+        names = self.config["worktrees"]
+        return [(r["id"], f"work tree {r['worktree']!r} isn't in [worktrees]" if r["worktree"] else "needs a work tree")
+                for r in self.rows("SELECT id, kind, worktree FROM task WHERE status = 'open' ORDER BY id")
+                if r["worktree"] not in names and (r["worktree"] or r["kind"] not in (*TRUNK_KINDS, "investigate"))]
 
     def work(self, tid):
         """Run the worker for a task until no usage limit stops it; record each run and commit the task.
@@ -2585,7 +2649,7 @@ class Project:
             self.commit_db(", ".join(done))
 
     def run(self, once=False, dry_run=False):
-        """Work the queue, a task per work tree at a time (the main checkout is one). The first Ctrl-C (SIGINT) or a
+        """Work the queue, a task per work tree at a time (the trunk is one). The first Ctrl-C (SIGINT) or a
         SIGUSR1 (`pm stop`): start nothing new, stop after the running tasks; a second Ctrl-C, SIGTERM or SIGHUP: stop
         now, the workers get SIGTERM."""
         def stop_later(sig, _):
@@ -2609,17 +2673,17 @@ class Project:
             for sig, handler in old.items():
                 signal.signal(sig, handler)
 
-    def wait_for_change(self):
-        """Sleep until tasks.sql changes; False if `pm stop` or Ctrl-C came first."""
+    def wait_for_change(self, timeout=None):
+        """Sleep until tasks.sql changes or timeout seconds passed; False if `pm stop` or Ctrl-C came first."""
         def key():
             with contextlib.suppress(OSError):
                 st = self.db_path.stat()
                 return st.st_ino, st.st_mtime_ns, st.st_size
-        before, self.idle = key(), True
+        before, self.idle, end = key(), True, time.monotonic() + (timeout or float("inf"))
         try:
             while not self.stopping:
                 time.sleep(IDLE_POLL_SECONDS)
-                if key() != before:
+                if key() != before or time.monotonic() > end:
                     return True
             return False
         finally:
@@ -2653,11 +2717,23 @@ class Project:
                 cmd, prompt = self.worker_command(q[0][1], self.handoff(q[0][1]))
                 self.say(shlex.join(cmd) + ("" if prompt is None else f"\n\nstdin:\n{prompt}"))
             return 0
-        self.finished, self.merge_errors = queue.Queue(), {}
-        running = {}                # work tree ("": the main checkout) -> (thread, task id)
+        self.finished, self.merge_errors, self.said = queue.Queue(), {}, set()
+        running = {}                # work tree ("": the trunk) -> (thread, task id)
         code, last, waiting = 0, None, None
         self.git("worktree", "prune")
         self.close_stale_run()
+        if bad := self.misplaced():
+            if len(names := list(self.config["worktrees"])) == 1 and all(why == "needs a work tree" for _, why in bad):
+                with self.connect(write=True) as db:
+                    db.executemany("UPDATE task SET worktree = ? WHERE id = ?", [(names[0], t) for t, _ in bad])
+                self.commit_db(f"open tasks: work tree {names[0]}")
+                self.say(f"Open tasks without a work tree go to work tree {names[0]}, the only one: "
+                         + ", ".join(str(t) for t, _ in bad))
+            else:
+                self.say("Open tasks that can't run: give each a work tree of [worktrees] in "
+                         f"{CONFIG_FILE} (`pm task set <id> --worktree <name>`):\n"
+                         + "\n".join(f"  task {t}: {why}" for t, why in bad))
+                return 1
         while True:
             while not self.finished.empty():
                 tree, tid, result, message = self.finished.get()
@@ -2671,7 +2747,7 @@ class Project:
                 self.say("\nStopped. `pm run` continues with the same task(s).")
                 return 130
             if "" not in running:
-                self.merge_worktrees(running)
+                self.merge_worktrees()
                 self.close_and_commit()
             if not code and (errors := self.validate()):
                 self.say("the database has errors:\n  " + "\n  ".join(errors))
@@ -2701,38 +2777,42 @@ class Project:
                     n = len(self.pending())
                     msg = f"Queue empty; {n} pending decision(s)." + (" Answer them with `pm decide`." if n else "")
             else:
-                trees = sorted({t for *_, t in q if t})
-                msg = f"{len(q)} task(s) queued, none can start: work tree(s) {', '.join(trees)} wait for their " \
-                      f"branch to be merged (`git branch --list '{WORKTREE_BRANCH}*'`)."
+                msg = f"{len(q)} task(s) queued, none can start (see above)."
             if once:
                 self.say(msg)
                 return 0
             if msg != waiting:
                 self.say(msg + " Waiting for tasks (Ctrl-C or `pm stop` ends it).")
                 waiting = msg
-            if not self.wait_for_change():
+            if not self.wait_for_change(timeout=30 if q else None):
                 self.say("Stopped as asked.")
                 return 0
 
     def start_tasks(self, running, once):
-        """Start the first queued task of each work tree (the main checkout is one) that runs nothing and whose branch
-        is merged, within the lowest milestone queue index in the queue, up to max_parallel (once: one task); none
-        while a worker waits for the usage limit. Returns 1 if `pm run` has to stop (the main checkout has changes,
-        git failed), else 0."""
+        """Start the first queued task of the trunk and of each work tree that runs nothing, within the lowest milestone
+        queue index in the queue, up to max_parallel (once: one task); none while a worker waits for the usage limit.
+        A work tree with an open merge task runs only that; the trunk's tasks wait while it has changes. Returns 1 if
+        `pm run` has to stop (git failed), else 0."""
         if (until := self.limit_until) and datetime.datetime.now(until.tzinfo) < until:
             return 0
         q = self.queue()
         limit = 1 if once else self.config["max_parallel"]
-        unmerged = {n for n, merged in self.worktree_branches().items() if not merged} if q else set()
         seen = set()
-        for _, tid, _, _, index, tree in q:
+        for _, tid, _, kind, index, tree in q:
             if index != q[0][4] or len(running) >= limit:
                 break
             tree = tree or ""
             if tree in seen:
                 continue
             seen.add(tree)
-            if tree in running or tree in unmerged:
+            if tree in running:
+                continue
+            if tree and tree not in self.config["worktrees"] or not tree and kind not in (*TRUNK_KINDS, "investigate"):
+                self.say_once(f"task {tid} can't run: " + (f"work tree {tree!r} isn't in [worktrees]" if tree else
+                              "it needs a work tree") + f"; `pm task set {tid} --worktree <name>`")
+                continue
+            if tree and kind != "merge" and (mid := self.merge_task(tree)):
+                self.say_once(f"[{tree}] task {mid} merges the trunk first")
                 continue
             if level := self.needs_signoff(tid):
                 did = self.request_signoff(tid)
@@ -2741,21 +2821,30 @@ class Project:
                 continue
             if not tree:
                 if self.dirty():
-                    self.say(self.dirty_message())
-                    return 1
+                    self.say_once(self.dirty_message())
+                    continue
                 if not self.commit_db("uncommitted changes"):
                     return 1
                 project = self
             else:
                 try:
-                    project = self.child(tree, self.worktree_add(tree))
+                    project = self.child(tree, self.worktree_ensure(tree))
+                    if kind != "merge" and not self.update_worktree(project, tid):
+                        continue
                 except (subprocess.CalledProcessError, FormatError) as e:
-                    self.say(f"[{tree}] making the work tree failed: {getattr(e, 'stderr', None) or e}".rstrip())
+                    self.say(f"[{tree}] preparing the work tree failed: {getattr(e, 'stderr', None) or e}".rstrip())
                     return 1
+            self.said.clear()
             thread = threading.Thread(target=self.run_task, args=(project, tree, tid), name=f"task {tid}", daemon=True)
             running[tree] = thread, tid
             thread.start()
         return 0
+
+    def say_once(self, msg):
+        """Say it unless said since a task last started."""
+        if msg not in self.said:
+            self.said.add(msg)
+            self.say(msg)
 
     def run_task(self, project, tree, tid):
         """A task's thread: the worker, then its result to `pm run` (self.finished)."""
@@ -2768,11 +2857,8 @@ class Project:
         self.finished.put((tree, tid, result, message))
 
     def finished_task(self, tree, tid, result, message):
-        """After a task's thread: its work tree removed (the branch stays until merged), a failure handled. Returns 1
-        if `pm run` has to stop."""
+        """After a task's thread: a failure handled. Returns 1 if `pm run` has to stop."""
         at = f"[{tree}] " if tree else ""
-        if tree:
-            self.worktree_remove(tree)
         if result == "error":
             self.say(f"\n{at}task {tid} failed: {message}\nStopping: this may hit every task.")
             return 1
@@ -2912,7 +2998,7 @@ class Project:
 
 
 def git_root():
-    """PM_ROOT (a worker in a work tree: the main checkout, whose database it uses), else the repository around the
+    """PM_ROOT (a worker in a work tree: the trunk, whose database it uses), else the repository around the
     current directory."""
     if os.environ.get("PM_ROOT"):
         return os.environ["PM_ROOT"]
@@ -2932,8 +3018,8 @@ def prio_arg(v):
 MODEL_HELP = "claude --model for its worker, e.g. opus for a task that needs deep reasoning; default: by kind ([models])"
 
 
-WORKTREE_HELP = ("the work tree it runs in, e.g. questions: its own git work tree and branch, in parallel with "
-                 "other work trees' tasks, merged when done; base: the main checkout")
+WORKTREE_HELP = ("the work tree it runs in, a name of [worktrees] in the config: tasks of different work trees run in "
+                 "parallel, each work tree merged into the trunk after its task")
 
 
 def model_arg(v):
@@ -3015,8 +3101,7 @@ def main(argv=None):
     a.add_argument("--kind", choices=("work", "plan"), default="work", help="plan: the task writes a plan")
     a.add_argument("--web", action="store_true", help="its worker gets WebSearch and WebFetch (sign-off: web)")
     a.add_argument("--model", type=model_arg, help=MODEL_HELP)
-    a.add_argument("--worktree", type=worktree_arg, default=argparse.SUPPRESS, help=WORKTREE_HELP + "; default: in a "
-                   "worker, its own task's work tree, else base")
+    a.add_argument("--worktree", type=worktree_arg, help="required, but not with --exec: " + WORKTREE_HELP)
     for verb, text in [("done", "note: date, files or commit"), ("drop", "reason")]:
         x = t.add_parser(verb)
         x.add_argument("task", type=int)
@@ -3193,11 +3278,11 @@ def main(argv=None):
                         raise FormatError("the plan's id is missing (an exec task: --exec)")
                     plan, subject, kind = int(args.plan), args.subject, args.kind
                     pm.require("plan", plan)
+                    pm.check_worktree(args.worktree)
                 if not (entry := pm.subject_and_body("task", subject)):
                     print("pm: aborted, no task added")
                     return 1
-                tid = pm.task_add(plan, *entry, args.priority, kind, args.web, args.model,
-                                  getattr(args, "worktree", ...))
+                tid = pm.task_add(plan, *entry, args.priority, kind, args.web, args.model, args.worktree)
                 print(tid)
                 msg = f"task {tid} added: {entry[0]}"
             elif args.action in ("done", "drop"):

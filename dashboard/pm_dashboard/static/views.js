@@ -252,7 +252,7 @@ export function Plan({ d, id }) {
     <${Progress} ...${counts(tasks)} />
     <h2>Tasks</h2>
     <div class="tablewrap">${tasks.length ? html`<${TaskRows} d=${d} tasks=${tasks} />` : html`<div class="empty" style="padding:10px 12px">No tasks yet.</div>`}</div>
-    ${d.planDone.has(p.id) ? null : html`<div style="margin-top:12px"><${AddButton} kind="task" parent=${p.id} /></div>`}`;
+    ${d.planDone.has(p.id) ? null : html`<div style="margin-top:12px"><${AddButton} kind="task" parent=${p.id} worktrees=${d.state.worktrees} /></div>`}`;
 }
 
 function RunsTable({ d, runs, showTask = false }) {
@@ -358,18 +358,22 @@ function ModelPick({ d, t, disabled }) {
     ${error ? html` <span class="err">${error}</span>` : null}`;
 }
 
-// A task's work tree: its name, editable while it is open and not running; empty: the main checkout ("base").
-function WorktreePick({ t, disabled }) {
+// Exec, planning and cleanup tasks run in the trunk (pm/__init__.py: TRUNK_KINDS).
+const TRUNK_KINDS = ["exec", "masterplan", "split", "revise", "cleanup"];
+
+// A task's work tree, one of [worktrees] in the config; a select while the task is open and not running.
+function WorktreePick({ d, t, disabled }) {
   const [error, setError] = useState(null);
-  if (t.status !== "open" || disabled) return html`<span>${t.worktree || "base (the main checkout)"}</span>`;
+  const names = d.state.worktrees || {};
+  if (TRUNK_KINDS.includes(t.kind) || !t.worktree && t.kind === "investigate") return html`<span>trunk</span>`;
+  if (t.status !== "open" || disabled) return html`<span title=${names[t.worktree] || ""}>${t.worktree || "none"}</span>`;
   const change = async (v) => {
-    v = v.trim();
-    if (v === (t.worktree || "")) return;
-    try { await post({ op: "task_edit", id: t.id, worktree: v || null }); setError(null); } catch (e) { setError(e.message); }
+    try { await post({ op: "task_edit", id: t.id, worktree: v }); setError(null); } catch (e) { setError(e.message); }
   };
-  return html`<input class="small" key=${t.worktree || ""} value=${t.worktree || ""} placeholder="base (the main checkout)"
-      title="its own git work tree, e.g. questions: runs in parallel with other work trees' tasks, merged when done; empty: the main checkout"
-      onChange=${(e) => change(e.target.value)} onKeyDown=${(e) => e.key === "Enter" && e.target.blur()} />
+  return html`<select class="small" value=${t.worktree || ""} onChange=${(e) => change(e.target.value)}
+      title="tasks of different work trees run in parallel; a work tree is merged into the trunk after its task">
+      ${t.worktree && names[t.worktree] ? null : html`<option value="">${t.worktree ? `${t.worktree} (not in [worktrees])` : "pick one"}</option>`}
+      ${Object.entries(names).map(([n, why]) => html`<option value=${n}>${n}: ${why}</option>`)}</select>
     ${error ? html` <span class="err">${error}</span>` : null}`;
 }
 
@@ -398,7 +402,7 @@ export function Task({ d, id, query, embedded = false }) {
       <dt>created</dt><dd>${stamp(t.created_at)}${t.created_by_task != null ? html` by <a href=${`#/task/${t.created_by_task}`}>task ${t.created_by_task}</a>` : " by the human or pm"}</dd>
       ${t.retired_at ? html`<dt>${t.status}</dt><dd>${stamp(t.retired_at)} · <${Time} ts=${t.retired_at} /></dd>` : null}
       ${t.note ? html`<dt>note</dt><dd>${t.note}</dd>` : null}
-      ${t.kind !== "exec" ? html`<dt>work tree</dt><dd><${WorktreePick} t=${t} disabled=${running} /></dd>` : null}
+      ${t.kind !== "exec" ? html`<dt>work tree</dt><dd><${WorktreePick} d=${d} t=${t} disabled=${running} /></dd>` : null}
       ${t.model_pick || t.model ? html`<dt>model</dt><dd><${ModelPick} d=${d} t=${t} disabled=${running} /></dd>` : null}
       ${runs.length ? html`<dt>runs</dt><dd>${runs.length}, ${duration(runs.reduce((s, r) => s + seconds(r.started_at, r.ended_at), 0))}, ${usd(d.cost(runs))}</dd>` : null}
     </dl>

@@ -20,7 +20,7 @@ export function InlineMd({ text }) {
 
 export const Pill = ({ status, label }) => html`<span class="pill ${status}"><span class="dot"></span>${label || status.replace("-", " ")}</span>`;
 export const Kind = ({ kind }) => (kind && kind !== "work" ? html`<span class="tag">${kind}</span>` : null);
-// A task's or run's work tree; none: the main checkout.
+// A task's or run's work tree; none: the trunk.
 export const Worktree = ({ name }) => (name ? html`<span class="tag worktree" title="work tree">⎇ ${name}</span>` : null);
 
 export function Prio({ p }) {

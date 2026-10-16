@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-PM_MIN_VERSION = 66     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
+PM_MIN_VERSION = 67     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
                         # summary_request, exec tasks, open_summary, report_request, report_rows, report_ask, WORKTREE_NAME)
 try:
     import pm
@@ -99,7 +99,8 @@ def read_state(project, last_good=None):
     dirty = [l[3:] for l in project.git("status", "--porcelain").splitlines()]
     base = {"root": str(project.root), "db": project.db, "head": head, "dirty": dirty, "read_at": pm.now(),
             "schema_version": pm.SCHEMA_VERSION, "planning_priority": project.config.get("planning_priority"),
-            "warm_handoff": project.config.get("warm_handoff"), "models": project.config.get("models")}
+            "warm_handoff": project.config.get("warm_handoff"), "models": project.config.get("models"),
+            "worktrees": project.config.get("worktrees") or {}}
     if not project.db_path.exists():               # written by the first pm command, e.g. adding a milestone
         return base | {"tables": {t: [] for t in TABLES}, "queue": [], "head_signoff": None, "done_plans": [], "errors": []}
     try:

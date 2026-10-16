@@ -23,10 +23,11 @@ limit_margin_minutes = 5
 # session, then a fresh one; 0 or 1: every task fresh. Still one run, one commit and one cost record per task.
 warm_handoff = 3
 
-# Work trees: a task with a work tree (`pm task add|set --worktree <name>`) runs in its own git work tree,
-# <worktree_dir>/<name> on the branch pm/wt/<name>, made from the main checkout's HEAD; pm commits its work there,
-# merges the branch into the main checkout once no task runs there, and removes the work tree. Tasks of different work
-# trees (the main checkout is one) run at the same time, at most max_parallel; 1: one task at a time.
+# Work trees ([worktrees] at the end): every task but the human's exec tasks and pm's planning and cleanup tasks
+# (they run in the trunk, the project's own checkout) runs in one of them: <worktree_dir>/<name>, on the branch
+# pm/wt/<name>, kept between tasks. Before a task pm merges the trunk into it; after the task, pm commits there and
+# merges the branch into the trunk while no task runs there and nothing is staged there. Tasks of different work trees
+# (and the trunk) run at the same time, at most max_parallel; 1: one task at a time.
 # worktree_dir: relative to the project root, "{repo}" is the project folder's name; keep it outside the project.
 max_parallel = 4
 worktree_dir = "../{repo}-worktrees"
@@ -98,16 +99,17 @@ If earlier investigations of this task are listed below, don't repeat their fix:
 Your note on `pm task done`: the cause and what you queued.
 '''
 
-# The task pm queues in the main checkout when a work tree's branch doesn't merge cleanly (kind merge, priority of the
-# merged task + 2); the work tree runs nothing until its branch is merged. {worktree}, {branch}, {tasks} (the tasks
-# the branch holds) are replaced.
+# The task pm queues in a work tree when it and the trunk don't merge cleanly (kind merge, priority of the work tree's
+# last task + 2); the work tree runs nothing else until it is done. {worktree}, {branch}, {trunk} (the trunk's HEAD
+# then), {tasks} (the tasks on the branch the trunk doesn't have) are replaced.
 merge_prompt = '''
-Merging the branch `{branch}` of work tree {worktree} into the main checkout conflicts. It holds the work of {tasks}.
-* `git merge --no-commit --no-ff {branch}`, then resolve every conflict so both sides' intent survives; read both
-  tasks (`pm show <id>`) and the commits (`git log -p HEAD...{branch}`) where it isn't obvious
+The trunk and work tree {worktree} (this checkout, branch `{branch}`) conflict: merging one into the other fails. The
+work tree holds the work of {tasks}.
+* `git merge --no-commit {trunk}` (the trunk's HEAD), then resolve every conflict so both sides' intent survives;
+  read the tasks involved (`pm show <id>`) and the commits (`git log -p HEAD...{trunk}`) where it isn't obvious
 * run the checks the project has for the files involved
-* stage the result (`git add`); pm commits the merge. Don't `git merge --abort` unless you queue a task that redoes the
-  branch's work instead
+* stage the result (`git add`); pm commits the merge and merges this work tree into the trunk. Don't
+  `git merge --abort`
 Your note on `pm task done`: what conflicted and how you resolved it.
 '''
 
@@ -232,3 +234,10 @@ split = "opus"
 revise = "opus"
 investigate = "opus"
 escalate = "opus"
+
+# The work trees pm's workers run in, name = what belongs there (one line; workers read it to pick one for each task
+# they add). At least one; `pm task add` needs `--worktree <name>` (or `--exec`). Names: lowercase letters, digits, -.
+# Example, a game with question authoring apart from the app:
+#   app = "the game itself: code, UI, assets, builds"
+#   questions = "question authoring: generating, quality checking, translating and reworking questions"
+[worktrees]

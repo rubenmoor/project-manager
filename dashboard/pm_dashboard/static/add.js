@@ -11,19 +11,24 @@ const WHAT = {
     hint: "A task of yours outside every plan and milestone: queued as if at milestone queue index 0, by priority." },
 };
 
-export function AddForm({ kind, parent, onClose }) {
+export function AddForm({ kind, parent, onClose, worktrees = {} }) {
   const w = WHAT[kind];
   const [subject, setSubject] = useState("");
   const [prio, setPrio] = useState("");
   const [queue, setQueue] = useState("");
   const [taskKind, setTaskKind] = useState("work");
+  const names = Object.keys(worktrees);
+  const [tree, setTree] = useState(names.length === 1 ? names[0] : "");
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
   const body = useRef(w.body);
   const submit = async () => {
     if (busy) return;
     const op = { op: `${kind === "exec" ? "task" : kind}_add`, subject, body: body.current };
-    if (kind === "task") { op.plan = parent; op.kind = taskKind; }
+    if (kind === "task") {
+      if (!tree) { setError("pick the work tree it runs in"); return; }
+      op.plan = parent; op.kind = taskKind; op.worktree = tree;
+    }
     if (kind === "exec") op.kind = "exec";
     if (kind === "milestone" && queue.trim() !== "") {
       if (!/^-?\d+$/.test(queue.trim())) { setError("the queue index is a whole number, or empty"); return; }
@@ -56,6 +61,9 @@ export function AddForm({ kind, parent, onClose }) {
         onInput=${(e) => setPrio(e.target.value)} /></label>` : null}
       ${kind === "task" ? html`<label class="sub">kind <select class="small" value=${taskKind} onChange=${(e) => setTaskKind(e.target.value)}>
         <option value="work">work</option><option value="plan">plan (writes a plan)</option></select></label>` : null}
+      ${kind === "task" ? html`<label class="sub" title="tasks of different work trees run in parallel">work tree <select class="small" value=${tree} onChange=${(e) => setTree(e.target.value)}>
+        ${names.length === 1 ? null : html`<option value="">pick one</option>`}
+        ${names.map((n) => html`<option value=${n}>${n}: ${worktrees[n]}</option>`)}</select></label>` : null}
       <span class="grow"></span>
       ${error ? html`<span class="err">${error}</span>` : null}
       <button class="btn primary" onClick=${submit} disabled=${busy}>Add ${kind === "exec" ? "exec task" : kind}</button>
@@ -86,9 +94,9 @@ export function MilestoneAdded({ d, id }) {
   </div></div>`;
 }
 
-export function AddButton({ kind, parent, label }) {
+export function AddButton({ kind, parent, label, worktrees }) {
   const [open, setOpen] = useState(false);
-  if (open) return html`<${AddForm} kind=${kind} parent=${parent} onClose=${() => setOpen(false)} />`;
+  if (open) return html`<${AddForm} kind=${kind} parent=${parent} worktrees=${worktrees} onClose=${() => setOpen(false)} />`;
   return html`<button class="btn" onClick=${() => setOpen(true)}>+ ${label || `Add ${kind}`}</button>`;
 }
 
