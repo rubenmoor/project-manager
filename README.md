@@ -16,27 +16,16 @@ pm run             # work the queue, then wait for new tasks; Ctrl-C: stop after
 
 ### Writing a milestone
 
-The milestone is the only text a worker gets from you; the masterplan, the plans and the tasks are derived from it, and every worker sees it. So write it for an engineer who knows the code but not your intentions: what should be true afterwards, why, what is fixed, what is out of scope, how to tell it's done. Leave the how to the masterplan. In the editor (`pm milestone add`):
+The milestone is the only text a worker gets from you; the masterplan, the plans and the tasks are derived from it. A description of what you want, and a few constraints as bullet points; no fixed structure. Leave the how to the masterplan. In the editor (`pm milestone add`):
 
 ```markdown
 Users can export their data as CSV
 
-Users ask for their data outside the app; support exports it by hand today.
+"Export" on the account page downloads one CSV per table the user owns; support exports it by hand today.
 
-## Outcome
-- "Export" on the account page downloads one CSV per table the user owns (projects, entries, tags).
-- Large accounts (100 000 entries) export in under 10 s without blocking the web server.
-
-## Constraints
 - No new dependencies; the stdlib `csv` module is enough.
 - Columns are named as in the API, not the database.
-
-## Out of scope
-- Import, other formats, scheduled exports.
-
-## Done when
-- The export is covered by tests, including an account with no data.
-- The API docs describe the endpoint.
+- No import, no other formats.
 ```
 
 The first line is the subject, the rest the body. The same without the editor, e.g. from a script:

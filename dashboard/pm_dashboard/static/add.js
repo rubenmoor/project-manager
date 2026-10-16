@@ -3,23 +3,9 @@ import { html, useState, useRef } from "/vendor/preact-htm.js";
 import { CodeEditor, post, autofocus } from "/editor.js";
 import { NamedLink } from "/ui.js";
 
-const MILESTONE_TEMPLATE = `What should be true afterwards, and why.
-
-## Outcome
--
-
-## Constraints
--
-
-## Out of scope
--
-
-## Done when
-- `;
-
 const WHAT = {
-  milestone: { title: "New milestone", ph: "Users can export their data as CSV", body: MILESTONE_TEMPLATE,
-    hint: "The milestone is the only text a worker gets from you: what should be true afterwards, why, what is fixed, what is out of scope, how to tell it's done. pm adds the masterplan and the task that writes it." },
+  milestone: { title: "New milestone", ph: "Users can export their data as CSV", body: "", bodyPh: "A description, and a few constraints as bullet points",
+    hint: "The milestone is the only text a worker gets from you. pm adds the masterplan and the task that writes it." },
   task: { title: "New task", ph: "Add the export endpoint", body: "", hint: "" },
   exec: { title: "New executive intervention", ph: "Check the CI config before the next release", body: "",
     hint: "A task of yours outside every plan and milestone: queued as if at milestone queue index 0, by priority." },
@@ -62,7 +48,7 @@ export function AddForm({ kind, parent, onClose }) {
     <div class="section-head"><b>${w.title}</b>${onClose ? html`<button class="iconbtn" onClick=${onClose}>cancel</button>` : null}</div>
     ${w.hint ? html`<div class="sub" style="margin:4px 0 10px">${w.hint}</div>` : null}
     <input class="line-edit h1" placeholder=${w.ph} value=${subject} onInput=${(e) => setSubject(e.target.value)} ref=${autofocus} />
-    <div class="cm-frame"><${CodeEditor} value=${w.body} autofocus=${false} onChange=${(v) => (body.current = v)} ph="Body (Markdown)" /></div>
+    <div class="cm-frame"><${CodeEditor} value=${w.body} autofocus=${false} onChange=${(v) => (body.current = v)} ph=${w.bodyPh || "Body (Markdown)"} /></div>
     <div class="row" style="margin-top:10px">
       ${kind === "milestone" ? html`<label class="sub" title="tasks of milestones with a lower queue index are worked first">queue index
         <input class="small" value=${queue} placeholder="0" onInput=${(e) => setQueue(e.target.value)} /></label>` : null}

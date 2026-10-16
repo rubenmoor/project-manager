@@ -76,16 +76,10 @@ Queue (3):
 
 ```sh
 pm milestone add "Users can export their data as CSV" [--queue N] <<'EOF'
-Users ask for their data outside the app; support exports it by hand today.
+"Export" on the account page downloads one CSV per table the user owns.
 
-## Outcome
-- "Export" on the account page downloads one CSV per table the user owns.
-
-## Out of scope
-- Import, other formats.
-
-## Done when
-- Covered by tests, including an account with no data.
+- No new dependencies.
+- No import, no other formats.
 EOF
 pm milestone set 1 [--subject …] [--body -] [--queue N]
 pm milestone hold 1 ; pm milestone resume 1
