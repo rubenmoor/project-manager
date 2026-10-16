@@ -219,6 +219,9 @@ td.subject { min-width: 220px; }
 /* log */
 .log { background: var(--code); border-radius: 8px; padding: 10px 12px; font-family: var(--mono); font-size: 12px; line-height: 18px;
        white-space: pre-wrap; overflow-wrap: anywhere; box-sizing: content-box; height: calc(20 * 18px); overflow-y: auto; }
+.log .line { display: flex; gap: 10px; }
+.log .line > span:last-child { flex: 1; min-width: 0; }
+.log .ts { flex: none; width: 8ch; color: var(--muted); font-weight: 400; user-select: none; }
 .log .tool { color: var(--ink-2); }
 .log .res { color: var(--good-text); font-weight: 600; }
 

@@ -144,7 +144,7 @@ def usage(project):
             if '"rate_limit_event"' not in line:
                 continue
             try:
-                info = json.loads(line)["rate_limit_info"]
+                info = json.loads(pm.unstamp(line)[1])["rate_limit_info"]
             except (ValueError, KeyError, TypeError):
                 continue
             windows = info.get("unifiedWindows") or {}
@@ -166,7 +166,8 @@ def git_head(project):
 
 def read_log(project, tid, start=0, rid=None):
     """The worker log of task tid (its latest run, or run rid) from byte `start`, as pm shows it in the terminal:
-    (lines, end offset). Logs from before per-run logs: task-<id>.log is a file, not a link."""
+    ([[UTC timestamp or None, line]], end offset), the timestamp on an event's first line only. Logs from before per-run
+    logs: task-<id>.log is a file, not a link."""
     path = project.logs / f"task-{tid}.log"
     if rid is not None and (project.logs / f"task-{tid}-run-{rid}.log").exists():
         path = project.logs / f"task-{tid}-run-{rid}.log"
@@ -181,7 +182,8 @@ def read_log(project, tid, start=0, rid=None):
     for raw in data[:cut].decode("utf-8", errors="replace").splitlines(keepends=True):
         shown = pm.Project.read_event(raw, info)
         if shown:
-            lines += shown.rstrip("\n").split("\n")
+            stamp = pm.unstamp(raw)[0]
+            lines += [[stamp if i == 0 else None, l] for i, l in enumerate(shown.rstrip("\n").split("\n"))]
     return lines, start + cut
 
 

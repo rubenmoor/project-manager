@@ -29,7 +29,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 56  # bump by one with every commit (AGENTS.md)
+VERSION = 57  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -442,11 +442,25 @@ def exit_text(code):
 
 
 def tail_lines(path, n, chunk=1 << 16):
-    """The last n lines of a file, read from its end."""
+    """The last n lines of a worker log, read from its end, without their timestamps."""
     with open(path, "rb") as f:
         f.seek(0, os.SEEK_END)
         f.seek(max(0, f.tell() - chunk))
-        return f.read().decode("utf-8", errors="replace").splitlines()[-n:]
+        return [unstamp(l)[1] for l in f.read().decode("utf-8", errors="replace").splitlines()[-n:]]
+
+
+LOG_STAMP = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\t")
+
+
+def unstamp(line):
+    """A worker log line: (when pm got it, as now() wrote it, or None in logs from before pm 57; the line)."""
+    m = LOG_STAMP.match(line)
+    return (m[1], line[m.end():]) if m else (None, line)
+
+
+def clock(stamp):
+    """now()'s UTC timestamp as local HH:MM:SS."""
+    return datetime.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).astimezone().strftime("%H:%M:%S")
 
 
 def init(root, out=sys.stdout):
@@ -1802,12 +1816,13 @@ class Project:
                         with contextlib.suppress(BrokenPipeError):
                             proc.stdin.close()
                     for line in proc.stdout:
-                        f.write(line)
+                        stamp = now()
+                        f.write(f"{stamp}\t{line}")
                         f.flush()                   # read live by pm-dashboard
                         shown = self.read_event(line, info)
                         if shown is not None:
                             shown_lines.extend(shown.rstrip("\n").split("\n"))
-                            self.out.write(shown)
+                            self.out.write(f"{clock(stamp)} " + shown.rstrip("\n").replace("\n", "\n         ") + "\n")
                             self.out.flush()
                     return proc.wait()
                 except BaseException:
@@ -1821,7 +1836,8 @@ class Project:
     @staticmethod
     def read_event(line, info):
         """A line of the worker's output: plain text is shown as it is; a JSON event of claude's stream-json adds to
-        `info` and is shown as text, tool calls or a summary (None: nothing to show)."""
+        `info` and is shown as text, tool calls or a summary (None: nothing to show). A log line's timestamp is dropped."""
+        line = unstamp(line)[1]
         try:
             e = json.loads(line)
         except ValueError:

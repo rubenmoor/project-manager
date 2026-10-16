@@ -256,6 +256,8 @@ const MAX_LINES = 5000;
 
 // One fetch at a time: a size change while one is out fetches again when it returns, from where it ended.
 // A box 20 lines high that opens at its end and follows it while scrolled to the end. reveal: scroll it into view once.
+const clock = (ts) => { const d = new Date(ts); return [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":"); };
+
 export function Log({ d, t, live, run = null, reveal = false }) {
   const [lines, setLines] = useState(null);
   const [cut, setCut] = useState(0);
@@ -295,7 +297,8 @@ export function Log({ d, t, live, run = null, reveal = false }) {
   if (lines === null) return html`<div class="empty">Loading the log…</div>`;
   if (!lines.length) return html`<div class="empty">No log for this task.</div>`;
   return html`<div class="log" ref=${box}>${cut ? html`<div class="muted">… ${cut} earlier lines</div>` : null}
-    ${lines.map((l) => html`<div class=${l.startsWith("  → ") ? "tool" : /^\[\w+: \d+ turns/.test(l) ? "res" : ""}>${l || " "}</div>`)}</div>`;
+    ${lines.map(([ts, l]) => html`<div class=${"line " + (l.startsWith("  → ") ? "tool" : /^\[\w+: \d+ turns/.test(l) ? "res" : "")}>
+      <span class="ts">${ts ? clock(ts) : ""}</span><span>${l || " "}</span></div>`)}</div>`;
 }
 
 // The commit pm made for a closed task: the rows it touched in tasks.sql, its files, the full diff (hidden until shown).
