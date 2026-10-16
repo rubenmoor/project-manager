@@ -31,7 +31,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 67  # bump by one with every commit (AGENTS.md)
+VERSION = 68  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -68,6 +68,7 @@ NOT_RUNNING = "AND id NOT IN (SELECT task_id FROM run WHERE result = 'running')"
 # tree's branch that didn't merge); made by the human only: exec (an executive intervention, the only kind without a plan)
 TASK_KINDS = ("work", "plan", "masterplan", "split", "cleanup", "revise", "investigate", "merge", "exec")
 # Run in the trunk (no work tree); investigate: where the failed task ran; the others in a work tree.
+REPLANNING_KINDS = ("masterplan", "split", "revise")   # hold back the tasks of their plan and the plans below it
 TRUNK_KINDS = ("exec", "masterplan", "split", "revise", "cleanup")
 PLANNING_KINDS = ("plan", "masterplan", "split")
 # `signoff` in project-manager.toml → decision.signoff; a sign-off's only answer is SIGNOFF_ANSWER
@@ -2791,18 +2792,22 @@ class Project:
     def start_tasks(self, running, once):
         """Start the first queued task of the trunk and of each work tree that runs nothing, within the lowest milestone
         queue index in the queue, up to max_parallel (once: one task); none while a worker waits for the usage limit.
-        A work tree with an open merge task runs only that; the trunk's tasks wait while it has changes. Returns 1 if
+        A task waits while a planning task above it is queued (planning_holds). A work tree with an open merge task runs
+        only that; the trunk's tasks wait while it has changes. Returns 1 if
         `pm run` has to stop (git failed), else 0."""
         if (until := self.limit_until) and datetime.datetime.now(until.tzinfo) < until:
             return 0
         q = self.queue()
         limit = 1 if once else self.config["max_parallel"]
-        seen = set()
+        seen, holds = set(), self.planning_holds(q)
         for _, tid, _, kind, index, tree in q:
             if index != q[0][4] or len(running) >= limit:
                 break
             tree = tree or ""
             if tree in seen:
+                continue
+            if tid in holds:
+                self.say_once(f"task {tid} waits for task {holds[tid]}, which plans above it and may rewrite it")
                 continue
             seen.add(tree)
             if tree in running:
@@ -2839,6 +2844,31 @@ class Project:
             running[tree] = thread, tid
             thread.start()
         return 0
+
+    def planning_holds(self, q):
+        """{task id: planning task id} for the queued tasks (q) that a queued masterplan, split or revise task of their
+        plan or a plan above it may rewrite; merge and investigate tasks aside."""
+        queued = {r[1] for r in q}
+        with self.connect() as db:
+            rows = [r for r in db.execute("SELECT t.id, t.plan_id, t.kind, p.milestone_id FROM task t "
+                                          "JOIN plan p ON p.id = t.plan_id WHERE t.status = 'open'") if r[0] in queued]
+            planners = {}
+            for tid, pid, kind, _ in rows:
+                if kind in REPLANNING_KINDS:
+                    planners.setdefault(pid, []).append(tid)
+            if not planners:
+                return {}
+            parent = {c: p for mid in {r[3] for r in rows} for p, cs in self.plan_children(db, mid).items() for c in cs}
+        holds = {}
+        for tid, pid, kind, _ in rows:
+            seen = set()
+            while kind not in ("merge", "investigate") and pid is not None and pid not in seen:
+                seen.add(pid)
+                if b := [x for x in planners.get(pid, ()) if x != tid]:
+                    holds[tid] = b[0]
+                    break
+                pid = parent.get(pid)
+        return holds
 
     def say_once(self, msg):
         """Say it unless said since a task last started."""

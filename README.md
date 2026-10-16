@@ -138,6 +138,7 @@ One `pm run` per repository: it holds a lock (`.git/pm-run.lock`, with its pid) 
 
 - Assignment: `pm task add` needs `--worktree <name>` unless `--exec`; workers pick it by the `[worktrees]` descriptions (their prompt lists them); `pm task set --worktree`, the dashboard's task page and add form: a dropdown; investigations get the failed task's; pm never guesses
 - Priority orders tasks only within one work tree: tasks of different work trees run side by side, whatever their priorities
+- Planning first: a task doesn't start while a masterplan, split or revise task of its plan or a plan above it is queued (it may rewrite the task); other tasks of its work tree go on
 - Old tasks without a work tree: with one `[worktrees]` entry, `pm run` puts them there; with several, it lists them and stops until you `pm task set` them
 - Scheduling: `pm run` starts the first queued task of the trunk and of every work tree that runs nothing, within the lowest milestone queue index in the queue, up to `max_parallel` (default 4; 1: one at a time); within one work tree, the queue order holds
 - Work tree `questions`: kept at `worktree_dir`/questions (default `../<repo>-worktrees`, outside the project) on branch `pm/wt/questions`, made on first use; before each task pm merges the trunk's HEAD into it; the worker runs there; pm commits what it staged (`task <id>: <subject>`)
