@@ -97,7 +97,7 @@ def read_state(project, last_good=None):
     dirty = [l[3:] for l in project.git("status", "--porcelain").splitlines()]
     base = {"root": str(project.root), "db": project.db, "head": head, "dirty": dirty, "read_at": pm.now(),
             "schema_version": pm.SCHEMA_VERSION, "planning_priority": project.config.get("planning_priority"),
-            "warm_handoff": project.config.get("warm_handoff")}
+            "warm_handoff": project.config.get("warm_handoff"), "models": project.config.get("models")}
     if not project.db_path.exists():               # written by the first pm command, e.g. adding a milestone
         return base | {"tables": {t: [] for t in TABLES}, "queue": [], "head_signoff": None, "done_plans": [], "errors": []}
     try:
@@ -106,8 +106,11 @@ def read_state(project, last_good=None):
             queue = [r["task_id"] for r in db.execute("SELECT task_id FROM queue")]
             in_log = project.log_ids(db)
         plan_prio = {p["id"]: p["priority"] for p in tables["plan"]}
+        picks = project.picks_model()
         for t in tables["task"]:
             t["effective_priority"] = t["priority"] if t["priority"] is not None else plan_prio.get(t["plan_id"]) or 0
+            if picks and t["status"] == "open":
+                t["model_pick"] = project.model_for(t["id"])    # [model, "set" | "escalated" | "kind"]
         for d in tables["decision"]:
             d["options"] = json.loads(d["options"])
             d["in_log"] = d["id"] in in_log

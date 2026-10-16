@@ -339,6 +339,24 @@ function Commit({ d, t }) {
     <${Fold} key=${"diff" + t.id} head=${html`<h2>Full diff</h2>`}><${TaskDiff} task=${t} c=${c} /></${Fold}>`;
 }
 
+// The worker's model for an open task: the task's own, or pm's pick ([models]: by kind, escalated after a failure).
+function ModelPick({ d, t, disabled }) {
+  const [error, setError] = useState(null);
+  const [pick, why] = t.model_pick || [t.model, "set"];
+  const auto = why === "set" ? null : `${pick || "claude default"} (${why === "kind" ? `by kind` : "escalated after a failure"})`;
+  if (t.status !== "open" || disabled) return html`<span>${t.model || auto}</span>`;
+  const kindPick = (d.state.models || {})[t.kind] ?? (d.state.models || {}).default;
+  const names = [...new Set(["sonnet", "opus", ...(t.model ? [t.model] : [])])];
+  const change = async (v) => {
+    try { await post({ op: "task_edit", id: t.id, model: v || null }); setError(null); } catch (e) { setError(e.message); }
+  };
+  return html`<select class="small" value=${t.model || ""} onChange=${(e) => change(e.target.value)}
+      title="the model of this task's next run; pm's pick: by kind ([models]), Opus after a failed run">
+      <option value="">${auto || `pm's pick (${kindPick || "claude default"})`}</option>
+      ${names.map((n) => html`<option value=${n}>${n}</option>`)}</select>
+    ${error ? html` <span class="err">${error}</span>` : null}`;
+}
+
 // The task page; the live page shows the same for its selected task (`embedded`: with a link to this page).
 export function Task({ d, id, query, embedded = false }) {
   const t = d.task.get(id);
@@ -364,6 +382,7 @@ export function Task({ d, id, query, embedded = false }) {
       <dt>created</dt><dd>${stamp(t.created_at)}${t.created_by_task != null ? html` by <a href=${`#/task/${t.created_by_task}`}>task ${t.created_by_task}</a>` : " by the human or pm"}</dd>
       ${t.retired_at ? html`<dt>${t.status}</dt><dd>${stamp(t.retired_at)} · <${Time} ts=${t.retired_at} /></dd>` : null}
       ${t.note ? html`<dt>note</dt><dd>${t.note}</dd>` : null}
+      ${t.model_pick || t.model ? html`<dt>model</dt><dd><${ModelPick} d=${d} t=${t} disabled=${running} /></dd>` : null}
       ${runs.length ? html`<dt>runs</dt><dd>${runs.length}, ${duration(runs.reduce((s, r) => s + seconds(r.started_at, r.ended_at), 0))}, ${usd(d.cost(runs))}</dd>` : null}
     </dl>
     ${running ? html`<div class="banner warn">A worker is on this task: it can't be changed until the run ends.</div>` : null}
@@ -602,6 +621,17 @@ export function Runs({ d }) {
   const work = finished.filter((r) => r.result === "done" && kindOf(r) === "work");
   const resumed = work.filter((r) => r.continues_run != null), fresh = work.filter((r) => r.continues_run == null);
   const avg = (rs) => (rs.length ? d.cost(rs) / rs.length : 0);
+  // Per task kind and model: runs, failures (a warm hand-off's failed resume aside), cost.
+  const byModel = new Map();
+  for (const r of finished.filter((r) => r.result !== "limit")) {
+    const k = `${kindOf(r)}\t${r.model || "unknown"}`;
+    (byModel.get(k) || byModel.set(k, []).get(k)).push(r);
+  }
+  const modelRows = [...byModel].map(([k, rs]) => {
+    const [kind, model] = k.split("\t");
+    const failed = rs.filter((r) => r.result === "failed" && !(r.reason || "").startsWith("resuming the session failed")).length;
+    return { kind, model, n: rs.length, failed, cost: d.cost(rs) };
+  }).sort((a, b) => KINDS.indexOf(a.kind) - KINDS.indexOf(b.kind) || b.cost - a.cost);
   return html`<h1>Runs and cost</h1>
     <div class="tiles">
       <${Tile} label="Cost" value=${usd(d.cost(finished))} sub=${`${finished.length} runs`} />
@@ -617,6 +647,13 @@ export function Runs({ d }) {
       <div class="card"><b>Cost per task kind</b><${Bars} data=${byKind} fmt=${usd} horizontal /></div>
       <div class="card"><b>Cost per milestone</b><${Bars} data=${byMilestone} fmt=${usd} horizontal /></div>
     </div>
+    <h2>Per task kind and model</h2>
+    ${modelRows.length ? html`<div class="tablewrap"><table class="compact">
+      <thead><tr><th>kind</th><th>model</th><th class="r">runs</th><th class="r">failed</th><th class="r">cost per run</th><th class="r">cost</th></tr></thead>
+      <tbody>${modelRows.map((x) => html`<tr><td>${x.kind}</td><td class="mono">${x.model}</td><td class="r num">${x.n}</td>
+        <td class="r num">${x.failed ? `${x.failed} (${Math.round((100 * x.failed) / x.n)}%)` : "0"}</td>
+        <td class="r num">${usd(x.cost / x.n)}</td><td class="r num">${usd(x.cost)}</td></tr>`)}</tbody></table></div>`
+      : html`<div class="empty">No runs yet.</div>`}
     <div class="card" style="margin-top:12px"><b>Tasks per cost bracket</b>
       <span class="muted"> · ${closed.length} done or dropped tasks with runs, cost over all their runs${closed.length ? `, median ${usd(median)}` : ""}</span>
       <${Bars} data=${closed.length ? byCost : []} fmt=${(n) => (Number.isInteger(n) ? String(n) : "")} /></div>

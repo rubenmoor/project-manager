@@ -127,13 +127,15 @@ EOF
 pm task add 2 "Docs for the export endpoint" --priority 690 <<'EOF'
 …
 EOF
-pm task set 6 [--subject …] [--body -] [--priority N|none] [--web|--no-web]   # open, not running
+pm task set 6 [--subject …] [--body -] [--priority N|none] [--web|--no-web] [--model opus|none]   # open, not running
 pm task priority 6 710          # none: back to the plan's
 pm task done 5 "2026-10-10, app/api/export.py, tests/test_export.py"
 pm task drop 6 "covered by task 5"
 ```
 
 A task fits one worker run: one change you can describe, check and commit.
+
+**Model:** pm picks the worker's model by task kind (`[models]` in the config: usually Sonnet for work, Opus for planning and investigations) and switches a task to Opus after a failed run. When splitting a plan, mark a work task that needs deep reasoning (subtle design, hard bugs, wide refactors) `--model opus`; leave the rest to pm.
 
 **Web access:** workers have no WebSearch or WebFetch, except for a task marked web (`--web`). Mark only a task that needs it, e.g. "verify the sourced figures"; its worker gets both tools once the human approves the sign-off (if `"web"` is in `signoff`). Your own task needs the web: `pm task set <your task> --web`, then stop without closing it, even when pm reminds you it is open; the next run has the tools. Don't ask for web access with a decision, and don't edit settings to grant it.
 
@@ -209,7 +211,7 @@ Each pm task's body says what to do; these are the mechanics.
 
 - **Write the masterplan** (plan P): read the milestone (`pm show <task>`) and the code; `pm plan edit P --intro "…" --body -`, divided into parts, stating that the masterplan's own tasks each write the plan for one part. That queues "create tasks for plan P: …".
 - **Revise a plan** (P): if it no longer fits its milestone or parent plan, `pm plan edit P --body -`; that queues its split and the revisions below it. If it still fits, change nothing.
-- **Split a plan into tasks** (P): keep the done and dropped tasks, drop open ones that no longer fit, add one `pm task add P …` per missing task, in the order they should run; the masterplan's tasks write plans (`--kind plan`). Raise a decision for each question only the human can answer, and link the tasks that wait for it. Note: `"<date>, tasks …"`.
+- **Split a plan into tasks** (P): keep the done and dropped tasks, drop open ones that no longer fit, add one `pm task add P …` per missing task, in the order they should run (`--model opus` for one that needs deep reasoning); the masterplan's tasks write plans (`--kind plan`). Raise a decision for each question only the human can answer, and link the tasks that wait for it. Note: `"<date>, tasks …"`.
 - **Write a part's plan** (a task of the masterplan): `pm plan list` first, then `pm plan add <milestone> "<part>" --priority N --intro "…"` with the full body.
 - **Post-milestone cleanup:** work through the body for the whole project. For another milestone that needs a change, or a pending decision that seems obsolete: a new decision for the human.
 - **Executive summary** (`exec`): `pm summary show` is the previous one; store the new one with `pm summary add < summary.md` (only in an exec task).

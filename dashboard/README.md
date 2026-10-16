@@ -28,7 +28,7 @@ In the project's git repository (the one with `project-manager.toml`):
 - **Milestones**: open and on-hold cards grouped by queue index (lowest first), completed ones in their own column on the right (newest first); with progress and the number of pending decisions its open tasks wait for, linked to exactly those (`#/decisions?milestone=N`)
 - **Plan**, **decision** pages: the intro (plain English) on top; the body right below it, hidden behind "Show details" (shown when there is no intro); a plan's intro is editable; decision lists show the intro under the subject
 - **Milestone**, **plans**: plans by priority with their tasks; filters by status and kind; change a milestone's queue index; put a milestone on hold or resume it (its plans and open tasks show "on hold")
-- **Task**: queue position or what blocks it, note, priority, decisions; after a failed run: pm's summary; the body last, at the bottom
+- **Task**: queue position or what blocks it, note, priority, model (open task: pm's pick by kind or after a failure, or a chosen one), decisions; after a failed run: pm's summary; the body last, at the bottom
   - done or dropped: rows its commit touched (Affected: tasks created first; tasks, plans, decisions, milestones: new, edited, done, dropped, answered, waits for …; each styled by kind; says why when empty), files changed, the full diff (syntax highlighted)
   - runs, worker log (live while it runs, following its end)
   - worker log always shown, each event with the time pm got it (local, HH:MM:SS; none in logs before pm 57): a box 20 lines high, opened at its end, following it while scrolled there; scroll up for earlier lines (`?log` scrolls to it)
@@ -41,7 +41,7 @@ In the project's git repository (the one with `project-manager.toml`):
   - custom report: the question quoted, then the one-paragraph answer
   - executive summary: reads the previous one and reports the delta
   - resource use report: per category (criteria below its name) tasks, time, tokens, cost and shares, bars by time
-- **Runs**: average cost of done work runs that resumed a session (warm hand-off) against fresh ones; cost per day, per task kind, per milestone; done and dropped tasks per cost bracket (total over their runs); every run, with its place in a shared Claude session ("↳ 2/3")
+- **Runs**: per task kind and model: runs, failures, cost per run; average cost of done work runs that resumed a session (warm hand-off) against fresh ones; cost per day, per task kind, per milestone; done and dropped tasks per cost bracket (total over their runs); every run, with its place in a shared Claude session ("↳ 2/3")
 - Status line (bottom): Claude account usage of the 5-hour window and the week (%, reset time), tokens and cost of pm's workers in each window; a marker in each bar shows how much of the window has passed: bar green while usage is behind it (budget left at the reset), orange once ahead (runs out before the reset)
 - Milestone implemented: a message with fireworks (no sound), shown once the tab is visible again; stays until "Yay!"; remembered per project in the browser
 - Notifications (`notify` in the top bar): a new pending decision, a failed run, `pm run` stopped or done

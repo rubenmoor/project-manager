@@ -29,7 +29,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 62  # bump by one with every commit (AGENTS.md)
+VERSION = 63  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -84,7 +84,7 @@ SIGNOFF_INTROS = {
 IN_LOG = ("status = 'answered' AND signoff IS NULL AND kind = 'rule' AND id NOT IN (SELECT superseded_id FROM "
           "decision_supersedes s JOIN decision n ON n.id = s.decision_id WHERE s.note = '' AND n.status = 'answered')")
 
-SCHEMA_VERSION = 24
+SCHEMA_VERSION = 25
 # A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
 # run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
 # Columns and tables SCHEMA dropped are left behind, new ones get their defaults; so only renames, moved data and new
@@ -109,7 +109,7 @@ def exec_kind(con):
 
 
 MIGRATIONS = {12: "", 13: "", 14: revise_kind, 15: "", 16: "", 17: "", 18: drop_summary_kind, 19: exec_kind,
-              20: "", 21: "", 22: "", 23: ""}
+              20: "", 21: "", 22: "", 23: "", 24: ""}
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -147,6 +147,7 @@ CREATE TABLE task (
     retired_at      TEXT,                                  -- done or dropped
     created_by_task INTEGER REFERENCES task (id),
     web             INTEGER NOT NULL DEFAULT 0 CHECK (web IN (0, 1)),  -- 1: its worker gets WebSearch and WebFetch
+    model           TEXT CHECK (model IS NULL OR trim(model) <> ''),  -- claude --model; NULL: [models] in the config
     CONSTRAINT "an open task needs a body" CHECK (status <> 'open' OR trim(body) <> ''),
     CONSTRAINT "retired_at is set exactly when done or dropped" CHECK ((status = 'open') = (retired_at IS NULL)),
     CONSTRAINT "an exec task has no plan, every other task has one" CHECK ((kind = 'exec') = (plan_id IS NULL))
@@ -295,10 +296,11 @@ Milestones, plans, tasks and decisions are in {db}; change them only with these 
   pm plan edit <plan id> [--subject …] [--body …] [--intro …] [--priority N]
   pm plans list     plans with open tasks, by milestone queue index, then highest priority first
   pm milestone list     every milestone; pm milestone show <milestone id>
-  pm task add <plan id> "<subject>" [--kind plan] [--priority N] [--web] < body.md     --kind plan: the task writes a plan;
-      --web: its worker gets WebSearch and WebFetch (after the human's sign-off)
-  pm task set <task id> [--subject …] [--body …] [--priority N] [--web|--no-web]     an open task that isn't
-      running
+  pm task add <plan id> "<subject>" [--kind plan] [--priority N] [--web] [--model opus] < body.md     --kind plan: the
+      task writes a plan; --web: its worker gets WebSearch and WebFetch (after the human's sign-off); --model opus:
+      a work task that needs deep reasoning (subtle design, hard bugs, wide refactors), else pm picks by kind
+  pm task set <task id> [--subject …] [--body …] [--priority N] [--web|--no-web] [--model opus|none]     an open
+      task that isn't running
   pm decision add "<subject>" --intro "<intro>" [--body "<text>"] [--option "<recommended>"] [--option …]
       prints its id
   pm task-pending-decision <task id> <decision id>     the task waits until the human answers
@@ -393,6 +395,7 @@ CLAUDE_FATAL = ("invalid api key", "please run /login", "oauth token has expired
 CLAUDE_PASSING = ("overloaded", "connection error", "timed out", "api error: 5", "api error: 429", "rate_limit_error")
 NETWORK_ERRORS = ("econnreset", "econnrefused", "etimedout", "eai_again", "enotfound", "socket hang up", "fetch failed")
 RETRY_MINUTES = (0, 1, 2, 5, 10, 20, 30, 60)
+RESUME_FAILED = "resuming the session failed"   # a warm hand-off's failed resume: no failure of the task
 HANDOFF_MINUTES = 5     # warm hand-off: the previous run ended at most this long ago, so its prompt cache is warm
 # A task that fails again after this many investigations stops `pm run`: else a fix that doesn't fix loops.
 MAX_INVESTIGATIONS = 3
@@ -519,7 +522,14 @@ def load_config(root):
         raise FormatError(f"{CONFIG_FILE}: {e}") from None
     defaults = tomllib.loads(CONFIG_TEMPLATE)
     errors = [f"unknown setting {k!r}" for k in config.keys() - defaults.keys()]
+    models = config.get("models", {})
     config = defaults | config
+    if not isinstance(models, dict):
+        errors.append("models must be a table")
+    else:
+        errors += [f"models: unknown key {k!r}" for k in models.keys() - {"default", "escalate", *TASK_KINDS}]
+        errors += [f"models.{k} must be a string" for k, v in models.items() if not isinstance(v, str)]
+        config["models"] = defaults["models"] | models
     if not isinstance(config["database"], str) or not config["database"].strip():
         errors.append("database must be a file name")
     w = config["worker"]
@@ -1632,7 +1642,7 @@ class Project:
             queued = [self.queue_plan_tasks(db, pid)] + [self.queue_revision(db, c, pid) for c in self.child_plans(db, pid)]
             return [q for q in queued if q]
 
-    def task_add(self, pid, subject, body, prio=None, kind="work", web=False):
+    def task_add(self, pid, subject, body, prio=None, kind="work", web=False, model=None):
         """A new task; a plan-writing one gets planning_priority unless prio is given. kind exec: the human's, pid None."""
         if prio is None and kind in PLANNING_KINDS:
             prio = self.config["planning_priority"]
@@ -1641,9 +1651,9 @@ class Project:
         with self.connect(write=True) as db:
             if kind != "exec":
                 self.check_plan_open(db, pid)
-            return db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task, web) "
-                              "VALUES (?, ?, ?, ?, ?, ?, ?)",
-                              (pid, subject, kind, prio, body.strip(), creator(), int(web))).lastrowid
+            return db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task, web, model) "
+                              "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                              (pid, subject, kind, prio, body.strip(), creator(), int(web), model)).lastrowid
 
     def task_set(self, tid, **fields):
         """Set fields of an open task (status, note, priority, subject, body, web); a value None clears it. A running task:
@@ -1762,6 +1772,11 @@ class Project:
                     + (" ← this task" if x["id"] == tid else "") for x in siblings] + [""]
         retired = f", retired {stamp(t['retired_at'])}" if t["retired_at"] else ""
         web = (", web access" if self.web_granted(tid) else ", web: needs sign-off") if t["web"] else ""
+        if t["status"] == "open" and self.picks_model():
+            model, why = self.model_for(tid)
+            web += f", model {model or 'claude default'}" + ("" if why == "set" else f" ({why})")
+        elif t["model"]:
+            web += f", model {t['model']}"
         out += [f"# Task {tid}: {t['subject']} ({t['status']}, kind {t['kind']}, priority {prio}{web}, "
                 f"created {stamp(t['created_at'])}{retired}{by(t)})", ""]
         if t["note"]:
@@ -1827,7 +1842,30 @@ class Project:
         cmd = [a.replace("{prompt}", prompt).replace("{settings}", settings) for a in w]
         if handoff:
             cmd[1:1] = ["--resume", handoff["session_id"]]
+        if self.picks_model() and (model := self.model_for(tid)[0]):
+            cmd[1:1] = ["--model", model]
         return cmd, None if any("{prompt}" in a for a in w) else prompt
+
+    def picks_model(self):
+        """pm picks the model ([models]): the worker is claude and its command names none."""
+        w = self.config["worker"]
+        return Path(w[0]).name == "claude" and not any(a == "--model" or a.startswith("--model=") for a in w)
+
+    def model_for(self, tid):
+        """(model, why) for task tid's next run: its own ("set"), "escalate" after a failed run or an investigation
+        ("escalated"), its kind's or the default ("kind"); model "": claude's own default."""
+        models = self.config["models"]
+        with self.connect() as db:
+            t = self.get(db, "task", tid)
+            if t["model"]:
+                return t["model"], "set"
+            failed = db.execute(
+                "SELECT 1 FROM run WHERE task_id = ? AND result = 'failed' AND coalesce(reason, '') NOT LIKE ? "
+                "UNION ALL SELECT 1 FROM task WHERE kind = 'investigate' AND subject LIKE ?",
+                (tid, RESUME_FAILED + "%", INVESTIGATE_SUBJECT.format(f"task {tid}: ") + "%")).fetchone()
+        if failed and models.get("escalate"):
+            return models["escalate"], "escalated"
+        return models.get(t["kind"], models["default"]), "kind"
 
     def handoff(self, tid):
         """Warm hand-off: the latest run, if task tid can resume its Claude session (run row with task_id,
@@ -1847,7 +1885,9 @@ class Project:
             chain = db.execute("WITH RECURSIVE c(id, prev) AS (SELECT id, continues_run FROM run WHERE id = ? "
                                "UNION ALL SELECT run.id, run.continues_run FROM run JOIN c ON run.id = c.prev) "
                                "SELECT count(*) FROM c", (r["id"],)).fetchone()[0]
-        return dict(r) if chain < limit else None
+        if chain >= limit or (self.picks_model() and self.model_for(tid)[0] != self.model_for(r["task_id"])[0]):
+            return None
+        return dict(r)
 
     def worker_warnings(self):
         w = self.config["worker"]
@@ -2074,7 +2114,7 @@ class Project:
                     line = info.get("result") or next((l for l in reversed(tail_lines(log, 5))
                                                        if l.strip() and not l.startswith("{")), "no output")
                     line = line.strip()[:300]
-                    self.record_run(rid, code, info, "failed", f"resuming the session failed, the task runs fresh: {line}")
+                    self.record_run(rid, code, info, "failed", f"{RESUME_FAILED}, the task runs fresh: {line}")
                     self.commit_db(f"task {tid}: resuming the session failed", running=None)
                     self.say(f"Resuming the session failed ({line}); the task runs fresh.")
                     continue
@@ -2592,6 +2632,16 @@ def prio_arg(v):
     return None if v == "none" else int(v)
 
 
+MODEL_HELP = "claude --model for its worker, e.g. opus for a task that needs deep reasoning; default: by kind ([models])"
+
+
+def model_arg(v):
+    v = v.strip()
+    if not v:
+        raise argparse.ArgumentTypeError("empty model")
+    return None if v == "none" else v
+
+
 def print_queued(queued):
     for tid, subject in queued:
         print(f"queued task {tid}: {subject}")
@@ -2663,17 +2713,19 @@ def main(argv=None):
     a.add_argument("--priority", type=int, help="default: the plan's; for --kind plan: planning_priority")
     a.add_argument("--kind", choices=("work", "plan"), default="work", help="plan: the task writes a plan")
     a.add_argument("--web", action="store_true", help="its worker gets WebSearch and WebFetch (sign-off: web)")
+    a.add_argument("--model", type=model_arg, help=MODEL_HELP)
     for verb, text in [("done", "note: date, files or commit"), ("drop", "reason")]:
         x = t.add_parser(verb)
         x.add_argument("task", type=int)
         x.add_argument("note", help=text)
-    ts = t.add_parser("set", help="change an open task that isn't running: subject, body, priority, web")
+    ts = t.add_parser("set", help="change an open task that isn't running: subject, body, priority, web, model")
     ts.add_argument("task", type=int)
     ts.add_argument("--subject")
     ts.add_argument("--body", type=text_arg)
     ts.add_argument("--priority", type=prio_arg, default=argparse.SUPPRESS, help="integer, or none for the plan's")
     ts.add_argument("--web", action=argparse.BooleanOptionalAction, default=argparse.SUPPRESS,
                     help="its worker gets WebSearch and WebFetch (sign-off: web)")
+    ts.add_argument("--model", type=model_arg, default=argparse.SUPPRESS, help=MODEL_HELP + "; none: by kind again")
     tp = t.add_parser("priority", help="integer, or none for the plan's")
     tp.add_argument("task", type=int)
     tp.add_argument("priority", type=prio_arg)
@@ -2839,7 +2891,7 @@ def main(argv=None):
                 if not (entry := pm.subject_and_body("task", subject)):
                     print("pm: aborted, no task added")
                     return 1
-                tid = pm.task_add(plan, *entry, args.priority, kind, args.web)
+                tid = pm.task_add(plan, *entry, args.priority, kind, args.web, args.model)
                 print(tid)
                 msg = f"task {tid} added: {entry[0]}"
             elif args.action in ("done", "drop"):
@@ -2851,8 +2903,10 @@ def main(argv=None):
                     fields["priority"] = args.priority
                 if "web" in args:
                     fields["web"] = int(args.web)
+                if "model" in args:
+                    fields["model"] = args.model
                 if not fields:
-                    raise FormatError("nothing to change: --subject, --body, --priority or --web")
+                    raise FormatError("nothing to change: --subject, --body, --priority, --web or --model")
                 if fields.get("subject") == "":
                     raise FormatError("the subject can't be empty")
                 pm.task_set(args.task, **fields)

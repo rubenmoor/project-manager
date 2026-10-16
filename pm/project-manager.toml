@@ -198,3 +198,16 @@ earlier or later than the order you add the tasks in. Then use the plan's priori
 multiple of 10, e.g. `--priority 710` or `--priority 690` in a plan with priority 700, so priorities can be fine-tuned
 later.
 '''
+
+# Claude model per task kind, passed as `claude --model`. A task's own model (`pm task add|set --model`) comes first;
+# then "escalate", for a task with a failed run or an investigation; then its kind; then "default". "": claude's own
+# default. Only when the worker is claude and its command has no --model of its own. A warm hand-off continues a
+# session only when the model stays the same. Keys left out keep pm's defaults below.
+[models]
+default = "sonnet"
+masterplan = "opus"
+plan = "opus"
+split = "opus"
+revise = "opus"
+investigate = "opus"
+escalate = "opus"
