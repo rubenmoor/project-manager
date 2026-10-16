@@ -28,7 +28,7 @@ function useDraft(key) {
   return { value, set, cur };
 }
 
-export function Resolve({ d, x, next }) {
+export function Resolve({ d, x, next, view = "" }) {
   const [mode, setMode] = useState("answer");
   const answer = useDraft(`pm-answer:${x.id}:${x.subject}`);
   const reason = useDraft(`pm-reason:${x.id}:${x.subject}`);
@@ -43,7 +43,7 @@ export function Resolve({ d, x, next }) {
     setBusy(true);
     try {
       await post(op); draft && draft.set(""); setError(null);
-      if (then) location.hash = next != null ? `#/decision/${next}` : "#/decisions";
+      if (then) location.hash = next != null ? `#/decision/${next}${view}` : `#/decisions${view}`;
     }
     catch (e) { setError(e.message); setBusy(false); }
   };

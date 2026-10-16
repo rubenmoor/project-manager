@@ -406,13 +406,33 @@ function pendingGroups(d, xs) {
   return groups;
 }
 
-// The pending decision after x in the Decisions list (sign-offs, then questions), else the first other one; null if none.
-function nextPending(d, x) {
+// The pending decision after x in the Decisions list (sign-offs, then questions; or newest first), else the first other one; null if none.
+const newestFirst = (xs) => [...xs].sort((a, b) => b.created_at.localeCompare(a.created_at) || b.id - a.id);
+function nextPending(d, x, newest) {
   const pending = d.decisions.filter((y) => y.status === "pending");
-  const ids = [pending.filter((y) => y.signoff), pending.filter((y) => !y.signoff)]
+  const ids = newest ? newestFirst(pending).map((y) => y.id) : [pending.filter((y) => y.signoff), pending.filter((y) => !y.signoff)]
     .flatMap((xs) => [...pendingGroups(d, xs).values()].flat().map((it) => it.x.id));
   const i = ids.indexOf(x.id);
   return ids.slice(i + 1).concat(ids.slice(0, Math.max(i, 0))).find((id) => id !== x.id) ?? null;
+}
+
+// Every pending decision, newest first, with what the milestone grouping would show inline.
+function PendingNewest({ d, xs }) {
+  return html`<div class="tablewrap"><table><tbody>${newestFirst(xs).map((x) => {
+    const { waiting, top, stalls } = impact(d, x);
+    const ms = [...new Set(waiting.map((t) => d.milestoneOfTask(t)).filter(Boolean))];
+    const by = x.created_by_task != null ? d.task.get(x.created_by_task) : null;
+    return html`<tr>
+      <td style="width:56px"><${Id} kind="decision" id=${x.id} /></td>
+      <td class="subject"><a href=${`#/decision/${x.id}?view=newest`}>${x.subject}</a> ${x.signoff ? html`<span class="tag signoff">${x.signoff}</span>` : null}
+        ${stalls ? html` <span class="tag signoff" title="its tasks have a higher priority than the head of the queue">would run next</span>` : null}
+        ${x.options.length ? html`<div class="muted" style="font-size:12px">${x.options.join(" / ")}</div>` : null}
+        <div class="ctx">${ms.length ? html`<span>${ms.map((m, i) => html`${i ? ", " : ""}<${NamedLink} kind="milestone" r=${m} />`)}</span>` : null}
+          ${waiting.length ? html`<span>holds up ${waiting.map((t, i) => html`${i ? ", " : ""}<${TaskLink} t=${t} />`)} (prio ${top})</span>`
+            : html`<span class="muted">holds up nothing</span>`}
+          ${by ? html`<span class="muted">asked by <${TaskLink} t=${by} /></span>` : null}</div></td>
+      <td class="muted" style="width:110px"><${Time} ts=${x.created_at} /></td></tr>`;
+  })}</tbody></table></div>`;
 }
 
 function PendingGroups({ d, xs }) {
@@ -437,7 +457,9 @@ function DecisionTags({ d, x }) {
 
 export function Decisions({ d, query }) {
   const [filter, setFilter] = useState("log");
-  const mid = Number(new URLSearchParams(query || "").get("milestone")) || null;
+  const q = new URLSearchParams(query || "");
+  const mid = Number(q.get("milestone")) || null;
+  const newest = q.get("view") === "newest";
   const ms = mid ? d.milestone.get(mid) : null;
   if (ms) {
     const xs = d.milestoneDecisions(ms);
@@ -461,8 +483,11 @@ export function Decisions({ d, query }) {
     <td class="muted" style="width:110px"><${Time} ts=${x.closed_at || x.created_at} /></td></tr>`)}</tbody></table></div>`;
   return html`<h1>Decisions</h1>
     <div class="sub">Answer one on its page, in a Claude session, with <code>pm decide</code> or <code>pm decision answer</code>; <a href="#/reports">an executive summary</a> tells what changed.</div>
-    ${signoffs.length ? html`<h2>Sign-offs (${signoffs.length})</h2><${PendingGroups} d=${d} xs=${signoffs} />` : null}
-    <h2>Questions (${questions.length})</h2>${questions.length ? html`<${PendingGroups} d=${d} xs=${questions} />` : html`<div class="empty">None pending.</div>`}
+    <div class="tabs"><a class=${"tab" + (newest ? "" : " on")} href="#/decisions">By milestone</a>
+      <a class=${"tab" + (newest ? " on" : "")} href="#/decisions?view=newest">Newest first</a></div>
+    ${newest ? html`<h2>Pending (${pending.length})</h2>${pending.length ? html`<${PendingNewest} d=${d} xs=${pending} />` : html`<div class="empty">None pending.</div>`}`
+      : html`${signoffs.length ? html`<h2>Sign-offs (${signoffs.length})</h2><${PendingGroups} d=${d} xs=${signoffs} />` : null}
+    <h2>Questions (${questions.length})</h2>${questions.length ? html`<${PendingGroups} d=${d} xs=${questions} />` : html`<div class="empty">None pending.</div>`}`}
     <h2>Closed (${closed.length})</h2>
     <${Chips} value=${filter} set=${setFilter} options=${[["log", "decision log"], ["all", "all closed"]]} />
     ${filter === "log" ? html`<div class="sub">Answered lasting decisions nothing fully supersedes, newest first: <code>pm decision list --answered</code>.</div>` : null}
@@ -489,13 +514,14 @@ function Consequences({ text }) {
     <${Markdown} text=${e.body} /></div>`)}`;
 }
 
-export function Decision({ d, id }) {
+export function Decision({ d, id, query }) {
+  const newest = new URLSearchParams(query || "").get("view") === "newest";
   const x = d.decision.get(id);
   if (!x) return html`<div class="empty">No decision ${id}.</div>`;
   const waiting = d.tasksWaiting.get(x.id) || [];
   const extra = Object.entries(x).filter(([k, v]) => !KNOWN.has(k) && v != null);
   const pending = x.status === "pending";
-  return html`<div class="crumbs"><a href="#/decisions">Decisions</a></div>
+  return html`<div class="crumbs"><a href=${newest ? "#/decisions?view=newest" : "#/decisions"}>Decisions</a></div>
     <h1>${x.subject}</h1>
     <div class="row sub"><${Pill} status=${x.status} />${x.signoff ? html`<span class="tag signoff">sign-off: ${x.signoff}</span>` : null}
       <span>decision ${x.id} · created ${stamp(x.created_at)}</span>
@@ -510,7 +536,7 @@ export function Decision({ d, id }) {
     ${x.options.length && !pending ? html`<h3>Options</h3><ol class="options">${x.options.map((o, i) => html`<li class=${i === 0 ? "rec" : ""}><${InlineMd} text=${o} /></li>`)}</ol>` : null}
     ${x.body.trim() || !x.signoff_view ? html`<div class="card" style="margin-top:12px"><${Markdown} text=${x.body} empty="No body." /></div>` : null}
     ${x.signoff_view ? html`<h2>What it approves</h2><div class="card"><${Markdown} text=${x.signoff_view} /></div>` : null}
-    ${pending ? html`<${Resolve} key=${x.id} d=${d} x=${x} next=${nextPending(d, x)} />` : null}
+    ${pending ? html`<${Resolve} key=${x.id} d=${d} x=${x} next=${nextPending(d, x, newest)} view=${newest ? "?view=newest" : ""} />` : null}
     <h2>Tasks waiting for it (${waiting.length})</h2>
     ${waiting.length ? html`<div class="tablewrap"><${TaskRows} d=${d} tasks=${waiting} /></div>` : html`<div class="empty">None.</div>`}`;
 }

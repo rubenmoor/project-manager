@@ -32,7 +32,10 @@ In the project's git repository (the one with `project-manager.toml`):
   - runs, worker log (live while it runs, following its end)
   - worker log always shown, each event with the time pm got it (local, HH:MM:SS; none in logs before pm 57): a box 20 lines high, opened at its end, following it while scrolled there; scroll up for earlier lines (`?log` scrolls to it)
   - diff starts hidden; "show" shows it in full
-- **Decisions**: pending sign-offs and questions by milestone, the ones holding up the most important work first; closed ones: the decision log (as `pm decision list --answered`) or all; tags for one-offs, workers' own choices, superseded ones; a decision's page shows consequences and supersede links; a pending one is resolved there (below)
+- **Decisions**: two tabs for the pending ones
+  - "By milestone": sign-offs and questions by milestone, the ones holding up the most important work first
+  - "Newest first" (`?view=newest`): one list, each row with its milestone, waiting tasks (prio), asking task, "would run next"; "& next" then follows this order
+  - below either tab, closed ones: the decision log (as `pm decision list --answered`) or all; tags for one-offs, workers' own choices, superseded ones; a decision's page shows consequences and supersede links; a pending one is resolved there (below)
 - **Reports**: on top a button per kind, `pm summary request` and `pm report request` (exec tasks, priority 10000); while one is open its button is disabled and links to it; then the custom report form, `pm report ask` (open questions listed with their task); below every report of every kind, newest first
   - custom report: the question quoted, then the one-paragraph answer
   - executive summary: reads the previous one and reports the delta
