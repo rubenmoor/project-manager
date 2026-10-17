@@ -158,7 +158,7 @@ A failed run: `pm` stashes what the worker left (`tasks.sql` aside; `git stash a
 
 A failed task doesn't stop `pm run` and isn't retried as it is: its leftovers are in its stash, and pm queues "investigate the failure of task N: …" (kind `investigate`, `investigate_prompt`, the failure's summary below) in its plan, priority one above it. The investigation finds the cause and, by it, adds a fix task between the two (a bug in a script), changes or drops the task, or raises a decision for the human; only then does the task run again, with its stash. A task that fails again after 3 investigations, or a failed investigation, stops `pm run`.
 
-Claude's own errors aren't the task's, so pm handles them itself, from the worker's result ("API Error: …") or, without one, its last log lines:
+Claude's own errors aren't the task's, so pm handles them itself: with stream-json, from the API error Claude Code marks (an assistant event with `error`: `rate_limit`, `server_error`, `authentication_failed`, `billing_error`, …) and its text, never from tool output or the worker's prose; the reset time is read from that text ("resets 3pm (Europe/Berlin)"). Other workers: their last plain log lines.
 - usage limit: wait for its reset (plus `limit_margin_minutes`), then the same task again
 - passing (overloaded, 5xx, 429, connection error, timeout, network errors, a limit without a readable reset): the same task again, at once, then after 1, 2, 5, 10, 20, 30, then every 60 minutes (`RETRY_MINUTES`)
 - needs you (invalid API key, /login, credit balance, unknown model, a worker command that can't start, a failure before any tool call that matches nothing): `pm run` stops, the task stays as it is

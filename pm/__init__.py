@@ -31,7 +31,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 72  # bump by one with every commit (AGENTS.md)
+VERSION = 73  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -342,7 +342,7 @@ on the decision, stage what is done and stop."""
 
 # --- Claude's usage limit: the message and when it resets ---------------------------------------
 
-LIMIT_WORDS = ("usage limit", "session limit", "rate limit", "hit your limit")
+LIMIT_WORDS = ("usage limit", "session limit", "rate limit", "hit your limit")   # only for workers without stream-json
 # "resets 11pm (America/Bogota)", "resets 11:30pm", "resets Oct 9, 3am (Europe/Berlin)"
 RESET_RE = re.compile(r"resets\s+(?:(?P<mon>[a-z]{3})[a-z]*\.?\s+(?P<day>\d{1,2}),?\s+(?:at\s+)?)?"
                       r"(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ap>[ap]\.?m\.?)?(?:\s*\((?P<tz>[^)]+)\))?", re.I)
@@ -407,8 +407,10 @@ def ref(kind, id, subject, md=False):
     return f"`{text}`" if md else text
 
 
-# Claude's errors, in the worker's result ("API Error: …") or, without one, its last log lines. Needs the human: the run
-# stops. Passing: the same task again, now, then after RETRY_MINUTES each.
+# Claude's errors: stream-json marks them (an assistant event with `error`, its text "API Error: …"); without stream-json,
+# the log's last plain lines. Needs the human: the run stops. Passing: the same task again, now, then after RETRY_MINUTES.
+CLAUDE_ERROR_FATAL = ("authentication_failed", "billing_error")
+CLAUDE_ERROR_PASSING = ("rate_limit", "server_error")
 CLAUDE_FATAL = ("invalid api key", "please run /login", "oauth token has expired", "authentication_error",
                 "credit balance is too low", "not_found_error", "permission_error")
 CLAUDE_PASSING = ("overloaded", "connection error", "timed out", "api error: 5", "api error: 429", "rate_limit_error")
@@ -421,10 +423,22 @@ MAX_INVESTIGATIONS = 3
 IDLE_POLL_SECONDS = 3   # `pm run` with an empty queue: how often it looks at tasks.sql
 
 
-def claude_trouble(info, tail):
+def error_lines(info, log):
+    """Where a failed run's Claude error can be: the API error Claude Code reported, else the error result; without
+    stream-json, the log's last plain lines. Never tool output or the worker's prose."""
+    if info.get("stream_json"):
+        text = info.get("api_error_text") or (info.get("result") if info.get("is_error") else None)
+        return [text] if text and text.strip() else []
+    return list(reversed(plain_tail(log, 5)))
+
+
+def claude_trouble(info, log):
     """("fatal" | "transient", line) if Claude, not the task, made the run fail; else None. A failure before any
     tool call that matches nothing counts as fatal: pm can't tell it from a broken setup."""
-    lines = [l.strip() for l in ([info["result"]] if info.get("result") else reversed(tail)) if l and l.strip()]
+    lines = [l.strip() for l in error_lines(info, log)]
+    kind = info.get("api_error")
+    if kind in CLAUDE_ERROR_FATAL or kind in CLAUDE_ERROR_PASSING:
+        return ("fatal" if kind in CLAUDE_ERROR_FATAL else "transient"), (lines[0] if lines else kind)[:300]
     for l in lines:
         low = l.lower()
         if any(w in low for w in CLAUDE_FATAL):
@@ -495,6 +509,11 @@ def tail_lines(path, n, chunk=1 << 16):
         f.seek(0, os.SEEK_END)
         f.seek(max(0, f.tell() - chunk))
         return [unstamp(l)[1] for l in f.read().decode("utf-8", errors="replace").splitlines()[-n:]]
+
+
+def plain_tail(path, n):
+    """The last n lines of a worker log that aren't stream-json events (stderr, a plain worker's output)."""
+    return [l for l in tail_lines(path, 200) if l.strip() and not l.lstrip().startswith("{")][-n:]
 
 
 LOG_STAMP = re.compile(r"(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\t")
@@ -2074,9 +2093,15 @@ class Project:
             return line
         if not isinstance(e, dict):
             return line
+        info["stream_json"] = True
         if e.get("type") == "system" and e.get("subtype") == "init":
             info["model"] = e.get("model")
         elif e.get("type") == "assistant":
+            msg = e.get("message") or {}
+            if not e.get("parent_tool_use_id") and (e.get("error") or msg.get("model") == "<synthetic>"):
+                info["api_error"] = e.get("error") or "unknown"
+                info["api_error_text"] = " ".join(c.get("text", "") for c in msg.get("content") or []
+                                                  if c.get("type") == "text").strip()
             out = []
             for c in (e.get("message") or {}).get("content") or []:
                 if c.get("type") == "text" and c.get("text", "").strip():
@@ -2103,12 +2128,16 @@ class Project:
 
     @staticmethod
     def limit_line(log, code, info):
-        """The usage-limit message of a failed run (exit code or an error result): the worker's result, or one of the
-        log's last 5 lines; None if there is none. A run that succeeded may talk about rate limits; it hit none."""
+        """The usage-limit message of a failed run (exit code or an error result), or None. stream-json: the API error
+        Claude Code marks as rate_limit; else one of the log's last 5 plain lines. A run that succeeded hit no limit."""
         if code == 0 and not info.get("is_error"):
             return None
-        tail = tail_lines(log, 5)
-        for l in [info.get("result") or ""] + list(reversed(tail)):
+        if info.get("stream_json"):
+            if info.get("api_error") == "rate_limit":
+                return info.get("api_error_text") or info.get("result") or "rate limit"
+            if info.get("api_error") != "unknown":
+                return None
+        for l in error_lines(info, log):
             if any(w in l.lower() for w in LIMIT_WORDS) and "resets " in l.lower():
                 return l
         return None
@@ -2369,8 +2398,7 @@ class Project:
                 cmd, prompt = self.worker_command(tid)
                 if (code != 0 or info.get("is_error")) and not info.get("last_tool") and not self.unstaged() \
                         and self.task_status(tid) == "open" and not self.limit_line(log, code, info):
-                    line = info.get("result") or next((l for l in reversed(tail_lines(log, 5))
-                                                       if l.strip() and not l.startswith("{")), "no output")
+                    line = info.get("result") or next(reversed(plain_tail(log, 1)), "no output")
                     line = line.strip()[:300]
                     self.record_run(rid, code, info, "failed", f"{RESUME_FAILED}, the task runs fresh: {line}")
                     self.commit_db(f"task {tid}: resuming the session failed", running=None)
@@ -2389,9 +2417,9 @@ class Project:
                     return "limit", "stopped while waiting for the usage limit's reset"
                 continue
             if limit:
-                trouble = "transient", f"usage limit without a readable reset time: {limit.strip()}"
+                trouble = "transient", f"rate limit without a readable reset time: {limit.strip()}"
             elif (code != 0 or info.get("is_error")) and (self.unstaged() or self.task_status(tid) == "open"):
-                trouble = claude_trouble(info, tail_lines(log, 5))
+                trouble = claude_trouble(info, log)
             else:
                 trouble = None
             if not trouble:
