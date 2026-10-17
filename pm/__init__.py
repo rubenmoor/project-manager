@@ -31,7 +31,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 75  # bump by one with every commit (AGENTS.md)
+VERSION = 76  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -420,6 +420,7 @@ RESUME_FAILED = "resuming the session failed"   # a warm hand-off's failed resum
 HANDOFF_MINUTES = 5     # warm hand-off: the previous run ended at most this long ago, so its prompt cache is warm
 # A task that fails again after this many investigations stops `pm run`: else a fix that doesn't fix loops.
 MAX_INVESTIGATIONS = 3
+RECHECK_SECONDS = 30    # `pm run` with tasks running: how often it looks at git again (uncommitted changes, merges)
 IDLE_POLL_SECONDS = 3   # `pm run` with an empty queue: how often it looks at tasks.sql
 
 
@@ -714,6 +715,7 @@ class Project:
         self.idle = False           # `pm run` waits for tasks
         self.crash = None           # run_crash() as `pm run` started
         self.cache = None           # (file_key(), the loaded database)
+        self.unsaved_migration = None   # (old schema version, pid of the `pm run` that kept it) while only read
         self.mutex = threading.RLock()
         self.locked = False
         self.base = None            # a work tree's task: the trunk's Project (database, `pm run` state)
@@ -774,6 +776,11 @@ class Project:
         nothing written if the block raises. No file yet: written with the schema."""
         with self.mutex, self.lock() if write else contextlib.nullcontext():
             con = self.loaded()
+            if write and self.unsaved_migration:
+                version, pid = self.unsaved_migration
+                raise FormatError(f"{self.db} has schema {version}, this pm {SCHEMA_VERSION}; it migrates it only while no "
+                                  f"other `pm run` works the repository (pid {pid}, maybe an older pm): stop it "
+                                  "(`pm stop`), then start `pm run` with this pm")
             before = con.total_changes
             if not con.in_transaction:          # else: nested in a write, which sees its own changes
                 con.execute(f"PRAGMA query_only = {'OFF' if write else 'ON'}")
@@ -819,7 +826,12 @@ class Project:
                                   "user_version); pm doesn't run it. Undo the hand edit") from None
             raise FormatError(f"{self.db}: {e}") from None
         version = con.execute("PRAGMA user_version").fetchone()[0]
-        if version != SCHEMA_VERSION:
+        self.unsaved_migration = None
+        if version != SCHEMA_VERSION and (pid := self.run_pid()) and pid != os.getpid():
+            # Saved, it would stop that `pm run`, maybe an older pm; this process reads the migrated copy.
+            con = self.migrate(con, version)
+            self.unsaved_migration = (version, pid)
+        elif version != SCHEMA_VERSION:
             con = self.migrate(con, version)
             with contextlib.nullcontext() if self.locked else self.lock():
                 if self.db_path.read_text(encoding="utf-8") != text:
@@ -2740,9 +2752,10 @@ class Project:
             self.idle = False
 
     def wait_event(self):
-        """While tasks run: until one ends, the database changes or `pm run` is to stop."""
-        before, stopping = self.file_key(), self.stopping
-        while True:
+        """While tasks run: until one ends, the database changes, `pm run` is to stop or RECHECK_SECONDS passed (a
+        commit in the trunk changes no database)."""
+        before, stopping, end = self.file_key(), self.stopping, time.monotonic() + RECHECK_SECONDS
+        while time.monotonic() < end:
             try:
                 self.finished.put(self.finished.get(timeout=IDLE_POLL_SECONDS))
                 return
