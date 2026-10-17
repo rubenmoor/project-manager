@@ -104,6 +104,12 @@ def apply(project, op):
             raise EditError("status must be done or dropped")
         project.task_set(int(op["id"]), status=status, note=text(op.get("note"), "the note"))
         return f"task {op['id']} {'done' if status == 'done' else 'drop'}", None
+    if kind == "task_kill":
+        project.kill(int(op["id"]))
+        return f"task {op['id']} killed", None
+    if kind == "task_redo":
+        tid = project.task_redo(int(op["id"]))
+        return f"task {tid}: task {op['id']} again", tid
     if kind == "decision_answer":
         once, sup = op.get("once", False), op.get("supersedes", [])
         if not isinstance(once, bool) or not isinstance(sup, list) or not all(type(s) is int for s in sup):

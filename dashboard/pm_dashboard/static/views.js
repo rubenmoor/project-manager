@@ -406,10 +406,11 @@ export function Task({ d, id, query, embedded = false }) {
       ${t.model_pick || t.model ? html`<dt>model</dt><dd><${ModelPick} d=${d} t=${t} disabled=${running} /></dd>` : null}
       ${runs.length ? html`<dt>runs</dt><dd>${runs.length}, ${duration(runs.reduce((s, r) => s + seconds(r.started_at, r.ended_at), 0))}, ${usd(d.cost(runs))}</dd>` : null}
     </dl>
-    ${running ? html`<div class="banner warn">A worker is on this task: it can't be changed until the run ends.</div>` : null}
+    ${running ? html`<div class="banner warn row"><span class="grow">A worker is on this task: it can't be changed until the run ends.</span><${KillTask} t=${t} /></div>` : null}
     ${fail ? html`<div class="banner error"><b>Run ${fail.id} failed</b> <span class="muted">${stamp(fail.ended_at)}</span><pre>${fail.reason || ""}</pre></div>` : null}
     ${why && typeof why !== "string" ? html`<div class="banner warn">Waits for ${why.map((x, i) => html`${i ? ", " : ""}<a href=${`#/decision/${x.id}`}>decision ${x.id}: ${x.subject}</a>`)}.</div>` : null}
     ${t.status === "open" && !running ? html`<${CloseTask} t=${t} />` : null}
+    ${t.status === "dropped" ? html`<${RedoTask} t=${t} />` : null}
     ${decs.length ? html`<h2>Decisions</h2><ul>${decs.map((x) => html`<li><a href=${`#/decision/${x.id}`}>${x.subject}</a> <${Pill} status=${x.status} />
       ${x.signoff ? html` <span class="tag signoff">sign-off: ${x.signoff}</span>` : null}</li>`)}</ul>` : null}
     ${created.length && t.status === "open" ? html`<h2>Created by this task</h2><ul>${created.map(([k, r]) => html`<li>${k} ${k === "decision" ? html`<a href=${`#/${k}/${r.id}`}>${r.subject}</a>` : html`<${NamedLink} kind=${k} r=${r} />`}</li>`)}</ul>` : null}
@@ -430,6 +431,26 @@ function HoldButton({ m }) {
   };
   return html`<button class="btn" onClick=${go} title=${hold ? "keep its plans and tasks out of the queue; a running task finishes" : ""}>
     ${hold ? "Put on hold" : "Resume"}</button>${error ? html`<span class="err">${error}</span>` : null}`;
+}
+
+function KillTask({ t }) {
+  const [error, setError] = useState(null);
+  const go = async () => {
+    if (!confirm(`Kill task ${t.id}? Its worker stops now and the task is dropped, with no investigation; Re-schedule queues it again.`)) return;
+    try { await post({ op: "task_kill", id: t.id }); setError(null); }
+    catch (e) { setError(e.message); }
+  };
+  return html`<button class="btn" onClick=${go} title="stop the worker now; the task is dropped, what it left is stashed">Kill</button>${error ? html`<span class="err">${error}</span>` : null}`;
+}
+
+function RedoTask({ t }) {
+  const [error, setError] = useState(null);
+  const go = async () => {
+    try { const r = await post({ op: "task_redo", id: t.id }); setError(null); if (r && r.id) location.hash = `#/task/${r.id}`; }
+    catch (e) { setError(e.message); }
+  };
+  return html`<div class="row" style="margin-top:10px"><button class="btn" onClick=${go}
+    title="a new open task like this one, with what its runs left">Re-schedule</button>${error ? html`<span class="err">${error}</span>` : null}</div>`;
 }
 
 function CloseTask({ t }) {
@@ -679,6 +700,6 @@ export function Runs({ d }) {
       <span class="muted"> · ${closed.length} done or dropped tasks with runs, cost over all their runs${closed.length ? `, median ${usd(median)}` : ""}</span>
       <${Bars} data=${closed.length ? byCost : []} fmt=${(n) => (Number.isInteger(n) ? String(n) : "")} /></div>
     <h2>All runs</h2>
-    <${Chips} value=${res} set=${setRes} options=${[["all", "all"], ...["running", "done", "blocked", "failed", "limit"].map((k) => [k, k])]} />
+    <${Chips} value=${res} set=${setRes} options=${[["all", "all"], ...["running", "done", "blocked", "failed", "limit", "killed"].map((k) => [k, k])]} />
     <${RunsTable} d=${d} runs=${shown} showTask />`;
 }

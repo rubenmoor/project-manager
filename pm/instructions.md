@@ -232,6 +232,8 @@ pm init              # once per project: project-manager.toml, committed
 pm run               # work the queue until it is empty, Claude needs the human or the tree is dirty
 pm run --once        # one task;  --dry-run: print the next worker command
 pm stop              # the running `pm run` stops after its current task
+pm kill 7            # kill running task 7 now: run killed, task dropped, no investigation, leftovers stashed
+pm task redo 7       # a dropped task again: a new open task like it, with its stashed leftovers
 pm decide            # answer pending decisions interactively (don't run it as an agent)
 pm decision list                       # pending decisions: context, options, blocked tasks
 pm decision answer 3 1                 # option 1; or own text: pm decision answer 3 "tabs"

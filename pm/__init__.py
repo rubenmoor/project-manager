@@ -31,7 +31,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 73  # bump by one with every commit (AGENTS.md)
+VERSION = 74  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -91,7 +91,7 @@ SIGNOFF_INTROS = {
 IN_LOG = ("status = 'answered' AND signoff IS NULL AND kind = 'rule' AND id NOT IN (SELECT superseded_id FROM "
           "decision_supersedes s JOIN decision n ON n.id = s.decision_id WHERE s.note = '' AND n.status = 'answered')")
 
-SCHEMA_VERSION = 27
+SCHEMA_VERSION = 28
 # A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
 # run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
 # Columns and tables SCHEMA dropped are left behind, new ones get their defaults; so only renames, moved data and new
@@ -121,7 +121,7 @@ def trunk_kinds(con):
 
 
 MIGRATIONS = {12: "", 13: "", 14: revise_kind, 15: "", 16: "", 17: "", 18: drop_summary_kind, 19: exec_kind,
-              20: "", 21: "", 22: "", 23: "", 24: "", 25: "", 26: trunk_kinds}
+              20: "", 21: "", 22: "", 23: "", 24: "", 25: "", 26: trunk_kinds, 27: ""}
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -198,8 +198,8 @@ CREATE TABLE run (                                         -- one worker run of 
     task_id               INTEGER NOT NULL REFERENCES task (id),
     started_at            TEXT NOT NULL,
     ended_at              TEXT,                            -- NULL: running
-    result                TEXT NOT NULL CHECK (result IN ('running', 'done', 'blocked', 'failed', 'limit')),
-    reason                TEXT,                            -- failed: why; limit: the message
+    result                TEXT NOT NULL CHECK (result IN ('running', 'done', 'blocked', 'failed', 'limit', 'killed')),
+    reason                TEXT,                            -- failed: why; limit: the message; killed: by `pm kill`
     exit_code             INTEGER,
     base_commit           TEXT,                            -- HEAD when the run started
     worktree              TEXT,                            -- the task's work tree then; NULL: the trunk
@@ -721,6 +721,8 @@ class Project:
         self.killed = None          # `pm run` stops now: the signal's name; its workers are killed
         self.limit_until = None     # a worker waits for the usage limit's reset: start no other task until then
         self.procs = set()          # the running workers' process ids
+        self.task_procs = {}        # task id -> its worker's process id
+        self.kills = set()          # `pm kill`: task ids whose workers are killed
         self.finished = None        # `pm run`: queue.Queue of (work tree, task id, result, message)
         self.next_push = 0          # `pm run`: time.monotonic() of the next `git push` (push_minutes)
 
@@ -2057,8 +2059,9 @@ class Project:
                 stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", bufsize=1,
                 start_new_session=True) as proc:
             procs.add(proc.pid)
+            self.top.task_procs[tid] = proc.pid
             try:
-                if self.top.killed:
+                if self.top.killed or tid in self.top.kills:
                     os.killpg(proc.pid, signal.SIGTERM)
                 if prompt is not None:
                     with contextlib.suppress(BrokenPipeError):
@@ -2081,6 +2084,7 @@ class Project:
                 raise
             finally:
                 procs.discard(proc.pid)
+                self.top.task_procs.pop(tid, None)
 
     @staticmethod
     def read_event(line, info):
@@ -2376,6 +2380,7 @@ class Project:
         Returns ("done" | "blocked" | "failed" | "error" | "limit", message); "failed": the task's own failure,
         "error": one that stops the run (the database, git, Claude needs the human). Claude's passing errors (network,
         overload, a limit without a reset time): the same task again, now, then after RETRY_MINUTES."""
+        self.top.kills.discard(tid)
         handoff = self.handoff(tid)
         cmd, prompt = self.worker_command(tid, handoff)
         before = self.planning_snapshot()
@@ -2390,6 +2395,8 @@ class Project:
                 code = self.run_worker(cmd, prompt, log, tid, info)
             except OSError as e:
                 return "error", self.failed(tid, rid, f"the worker command can't start: {e}", None, info, started)[1]
+            if tid in self.top.kills:
+                return "killed", self.killed_run(tid, rid, code, info)
             if self.top.killed:
                 return "interrupted", self.failed(tid, rid, f"interrupted ({self.top.killed})", code, info, started, log,
                                                   cause="`pm run` stopped now")[1]
@@ -2585,6 +2592,17 @@ class Project:
                 "  " + l[:300] for l in log.read_text(encoding="utf-8", errors="replace").splitlines()[-15:])
         return "failed", summary
 
+    def killed_run(self, tid, rid, code, info):
+        """A run `pm kill` ended: its leftovers stashed for `pm task redo`, the task dropped, no investigation."""
+        self.top.kills.discard(tid)
+        stash = self.stash_leftovers(f"pm: task {tid} run {rid} killed")
+        self.record_run(rid, code, info, "killed", "killed by `pm kill`" + (f"\n{stash}" if stash else ""))
+        with self.connect(write=True) as db:
+            db.execute("UPDATE task SET status = 'dropped', note = ?, retired_at = ? WHERE id = ?",
+                       (f"killed (run {rid})", now(), tid))
+        self.commit_db(f"task {tid} killed: dropped")
+        return f"killed, dropped; `pm task redo {tid}` queues it again" + (f"\n{stash}" if stash else "")
+
     def task_stashes(self, tid):
         """[(ref, sha)] of the stashes runs of task tid left (stash_leftovers), newest first."""
         try:
@@ -2592,7 +2610,7 @@ class Project:
         except subprocess.CalledProcessError:
             return []
         return [(ref, sha) for ref, sha, subject in (l.split("\0", 2) for l in lines)
-                if re.search(rf"pm: task {tid} run \d+ (failed|left)$", subject)]
+                if re.search(rf"pm: task {tid} run \d+ (failed|left|killed)$", subject)]
 
     def drop_task_stashes(self, tid):
         """Drop task tid's stashes (its work is committed or dropped); returns their short shas."""
@@ -2681,18 +2699,20 @@ class Project:
     def run(self, once=False, dry_run=False):
         """Work the queue, a task per work tree at a time (the trunk is one). The first Ctrl-C (SIGINT) or a
         SIGUSR1 (`pm stop`): start nothing new, stop after the running tasks; a second Ctrl-C, SIGTERM or SIGHUP: stop
-        now, the workers get SIGTERM."""
+        now, the workers get SIGTERM. SIGUSR2 (`pm kill`): the tasks in <git dir>/pm-kill are killed."""
         def stop_later(sig, _):
             if sig in (signal.SIGTERM, signal.SIGHUP) or sig == signal.SIGINT and self.stopping:
                 self.stopping, self.killed = True, signal.Signals(sig).name
                 for pid in list(self.procs):
                     with contextlib.suppress(ProcessLookupError, PermissionError):
                         os.killpg(pid, signal.SIGTERM)
+            elif sig == signal.SIGUSR2:
+                self.take_kills()
             elif not self.stopping:
                 self.stopping = True
                 if not self.idle:
                     os.write(2, b"\n== stopping after the running task(s) (Ctrl-C again: stop now)\n")
-        old = {sig: signal.signal(sig, stop_later) for sig in (signal.SIGINT, signal.SIGUSR1, signal.SIGTERM, signal.SIGHUP)}
+        old = {sig: signal.signal(sig, stop_later) for sig in (signal.SIGINT, signal.SIGUSR1, signal.SIGUSR2, signal.SIGTERM, signal.SIGHUP)}
         try:
             if dry_run:
                 return self.work_queue(once, dry_run)
@@ -2958,6 +2978,8 @@ class Project:
             return 1
         if result == "interrupted":
             self.say(f"\n{at}task {tid}: {message.splitlines()[0]}")
+        elif result == "killed":
+            self.say(f"\n{at}task {tid} {message}")
         elif result == "failed":
             self.say(f"\n{at}task {tid} failed: {message}")
             if self.task_kind(tid) == "exec":
@@ -3014,6 +3036,62 @@ class Project:
             raise FormatError("no `pm run` is working this repository") from None
         rs = [str(r["task_id"]) for r in self.rows("SELECT task_id FROM run WHERE result = 'running' ORDER BY id")]
         self.say(f"`pm run` (pid {pid}) stops " + (f"after task(s) {', '.join(rs)}" if rs else "before its next task"))
+
+    def kill(self, tid):
+        """Have the running `pm run` kill task tid's worker: the run is recorded as killed, the task dropped, what it
+        left stashed for `pm task redo`; no investigation."""
+        human_only("kill a task")
+        if not self.rows("SELECT 1 FROM run WHERE result = 'running' AND task_id = ?", tid):
+            raise FormatError(f"task {tid} isn't running")
+        pid = self.run_pid()
+        with open(self.git_dir / "pm-kill", "a", encoding="utf-8") as f:
+            f.write(f"{tid}\n")
+        try:
+            os.kill(pid, signal.SIGUSR2)
+        except (TypeError, ProcessLookupError):
+            raise FormatError("no `pm run` is working this repository") from None
+        self.say(f"`pm run` (pid {pid}) kills task {tid}")
+
+    def take_kills(self):
+        """SIGUSR2 in `pm run`: the task ids `pm kill` wrote; their workers get SIGTERM."""
+        path = self.git_dir / "pm-kill"
+        try:
+            ids = {int(l) for l in path.read_text(encoding="utf-8").split() if l.isdigit()}
+            path.unlink()
+        except OSError:
+            return
+        self.kills |= ids
+        for tid in ids:
+            if (pid := self.task_procs.get(tid)) is not None:
+                with contextlib.suppress(ProcessLookupError, PermissionError):
+                    os.killpg(pid, signal.SIGTERM)
+
+    def task_redo(self, tid):
+        """A new open task like dropped task tid (plan, subject, body, kind, priority, web, model, work tree), with the
+        stashes its runs left. Returns its id."""
+        human_only("redo a task")
+        with self.connect(write=True) as db:
+            t = self.get(db, "task", tid)
+            if t["status"] != "dropped":
+                raise FormatError(f"task {tid} is {t['status']}; only a dropped task is redone")
+            if t["kind"] != "exec":
+                self.check_plan_open(db, t["plan_id"])
+            if t["worktree"] is not None:
+                self.check_worktree(t["worktree"])
+            new = db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task, web, model, "
+                             "worktree) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                             (t["plan_id"], t["subject"], t["kind"], t["priority"], t["body"], creator(), t["web"],
+                              t["model"], t["worktree"])).lastrowid
+        with STASH_LOCK:
+            for _, sha in reversed(self.task_stashes(tid)):   # a stash's message is its commit's: a copy, renamed
+                with contextlib.suppress(subprocess.CalledProcessError):
+                    msg = re.sub(r"pm: task \d+ ", f"pm: task {new} ", self.git("log", "-1", "--format=%s", sha).strip())
+                    parents = self.git("rev-list", "--parents", "-n1", sha).split()[1:]
+                    copy = self.git("commit-tree", f"{sha}^{{tree}}", *[x for p in parents for x in ("-p", p)],
+                                    "-m", msg).strip()
+                    self.git("stash", "store", "-m", msg, copy)
+                    self.git("stash", "drop", "-q", next(r for r, s in self.task_stashes(tid) if s == sha))
+        return new
 
     def dirty_message(self):
         files = [l for l in self.git("status", "--porcelain").splitlines() if l[3:] != self.db]
@@ -3149,6 +3227,8 @@ def main(argv=None):
     r.add_argument("--once", action="store_true", help="stop after one task")
     r.add_argument("--dry-run", action="store_true", help="print the next worker command; change nothing")
     sub.add_parser("stop", help="have the running `pm run` stop after its running task(s)")
+    sub.add_parser("kill", help="have the running `pm run` kill a running task: dropped, no investigation; its "
+                   "leftovers stashed for `pm task redo`").add_argument("task", type=int)
 
     ms = sub.add_parser("milestone", aliases=["milestones"], help="add, change, list or show milestones").add_subparsers(dest="action", required=True)
     ma = ms.add_parser("add", help="new open milestone; prints its id. Without a subject: write it in your editor "
@@ -3200,6 +3280,8 @@ def main(argv=None):
         x = t.add_parser(verb)
         x.add_argument("task", type=int)
         x.add_argument("note", help=text)
+    t.add_parser("redo", help="a dropped task again: a new open task like it, with its stashed leftovers; prints "
+                 "its id").add_argument("task", type=int)
     ts = t.add_parser("set", help="change an open task that isn't running: subject, body, priority, web, model, "
                       "work tree")
     ts.add_argument("task", type=int)
@@ -3324,6 +3406,8 @@ def main(argv=None):
             return pm.run(once=args.once, dry_run=args.dry_run)
         elif args.cmd == "stop":
             pm.stop()
+        elif args.cmd == "kill":
+            pm.kill(args.task)
         elif args.cmd in ("milestone", "milestones"):
             if args.action == "list":
                 print(pm.milestones(), end="")
@@ -3379,6 +3463,10 @@ def main(argv=None):
                 tid = pm.task_add(plan, *entry, args.priority, kind, args.web, args.model, args.worktree)
                 print(tid)
                 msg = f"task {tid} added: {entry[0]}"
+            elif args.action == "redo":
+                tid = pm.task_redo(args.task)
+                print(tid)
+                msg = f"task {tid}: task {args.task} again"
             elif args.action in ("done", "drop"):
                 pm.task_set(args.task, status="done" if args.action == "done" else "dropped", note=args.note)
                 msg = f"task {args.task} {args.action}"
