@@ -171,6 +171,10 @@ pm task-pending-decision 5 "$did"       # task 5 waits until the human answers
 
 Put the recommended option first. `decision add` links no task: run `pm task-pending-decision` for every task that waits for the answer, your own included. `--once`: a one-off go-ahead or check, not a lasting rule.
 
+### Iterative feedback
+
+When a task or its plan asks for iterative feedback, or the work needs the human's judgement of a result rather than a choice between options: work up to the point where you need the human, ask (`pm decision add --once`: what to look at and judge; options only if there are real alternatives), link your task, stop. The answer brings the task back with the human's input; repeat until it's good, then finish. Splitting a plan that asks for it: say "iterative feedback" in the bodies of the tasks it concerns.
+
 ### The decision log
 
 The answered `rule` decisions that nothing fully supersedes. Every task, planning ones included, starts here: grep it for what the task touches (subjects, files, terms; `--grep` repeats, any word matches), and again before every choice the plan doesn't settle. Answered decisions are binding until a newer one supersedes them: a plan follows them, a task implements them, neither asks again. Cite them as `decision 32: <subject>`, in code, prompts and docs too.
