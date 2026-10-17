@@ -173,7 +173,7 @@ Put the recommended option first. `decision add` links no task: run `pm task-pen
 
 ### Iterative feedback
 
-When a task or its plan asks for iterative feedback, or the work needs the human's judgement of a result rather than a choice between options: work up to the point where you need the human, ask (`pm decision add --once`: what to look at and judge; options only if there are real alternatives), link your task, stop. The answer brings the task back with the human's input; repeat until it's good, then finish. Splitting a plan that asks for it: say "iterative feedback" in the bodies of the tasks it concerns.
+When a task or its plan asks for iterative feedback, or the work needs the human's judgement of a result rather than a choice between options: work up to the point where you need the human, ask (`pm decision add`: what to look at and judge; options only if there are real alternatives), link your task, stop. The answer brings the task back with the human's input; repeat until it's good, then finish. Splitting a plan that asks for it: say "iterative feedback" in the bodies of the tasks it concerns.
 
 ### The decision log
 
