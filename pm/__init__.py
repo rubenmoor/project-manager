@@ -31,7 +31,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 74  # bump by one with every commit (AGENTS.md)
+VERSION = 75  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -2884,6 +2884,7 @@ class Project:
         q = self.queue()
         limit = 1 if once else self.config["max_parallel"]
         seen, holds = set(), self.planning_holds(q)
+        trunk_dirty = "" not in running and self.dirty()   # planning tasks run in the trunk
         for _, tid, _, kind, index, tree in q:
             if index != q[0][4] or len(running) >= limit:
                 break
@@ -2891,7 +2892,8 @@ class Project:
             if tree in seen:
                 continue
             if tid in holds:
-                self.say_once(f"task {tid} waits for task {holds[tid]}, which plans above it and may rewrite it")
+                self.say_once(f"task {tid} waits for task {holds[tid]}, which plans above it and may rewrite it"
+                              + (", and which waits for the trunk's uncommitted changes" if trunk_dirty else ""))
                 continue
             seen.add(tree)
             if tree in running:
@@ -2909,8 +2911,11 @@ class Project:
                 self.commit_db(f"sign-off requested: decision {did}")
                 continue
             if not tree:
-                if self.dirty():
-                    self.say_once(self.dirty_message())
+                if trunk_dirty:
+                    waiting = [t for t, p in holds.items() if p == tid]
+                    self.say_once(self.dirty_message() + f"\nUntil then the trunk's next task, {tid}, can't start"
+                                  + (f", nor the {len(waiting)} task(s) it may rewrite: {', '.join(map(str, waiting[:10]))}"
+                                     + (" …" if len(waiting) > 10 else "") if waiting else "") + ".")
                     continue
                 if not self.commit_db("uncommitted changes"):
                     return 1

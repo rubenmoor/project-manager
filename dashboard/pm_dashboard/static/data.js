@@ -16,6 +16,15 @@ export function index(state) {
     planDone: new Set(state.done_plans || []),
   };
   d.running = d.runningAll[0] || null;
+  // Why a queued task can't start (pm/__init__.py: start_tasks): a planning task above it (planning_holds), or, for the
+  // trunk's next task, uncommitted changes in the trunk.
+  d.holds = new Map(Object.entries(state.holds || {}).map(([k, v]) => [Number(k), v]));
+  d.trunkDirty = (state.dirty || []).filter((f) => f !== state.db);
+  d.trunkBlocked = d.trunkDirty.length > 0 && !d.runningAll.some((r) => !r.worktree);
+  d.trunkHeld = d.trunkBlocked
+    ? state.queue.map((id) => t.task.find((x) => x.id === id)).find((x) => x && !x.worktree && !d.holds.has(x.id)) || null : null;
+  d.waitsFor = (x) => d.holds.has(x.id) ? `waits for t${d.holds.get(x.id)}, which plans above it${d.trunkBlocked ? " and waits for the trunk's uncommitted changes" : ""}`
+    : d.trunkHeld && d.trunkHeld.id === x.id ? `waits: ${d.trunkDirty.length} uncommitted change(s) in the trunk` : null;
   d.runningOf = new Map(d.runningAll.map((r) => [r.task_id, r]));
   d.isRunning = (id) => d.runningOf.has(id);
   // rows grouped by key(row): Map key → [value(row)]

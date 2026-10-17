@@ -144,12 +144,24 @@ function App() {
     <main class=${"main" + (page === "live" ? " full" : "")}>
       ${state && state.error ? html`<div class="banner error"><b>Can't read the database.</b> <pre>${state.error}</pre>
         ${state.last_good ? html`<div class="muted">Showing the last state that could be read.</div>` : null}</div>` : null}
+      ${d ? html`<${TrunkDirty} d=${d} />` : null}
       ${!state ? html`<div class="empty">Loading…</div>` : d && View ? html`<${View} d=${d} id=${r.id} query=${r.query} />`
         : d ? html`<div class="empty">No such page.</div>` : null}
     </main>
     <${UsageLine} d=${d} version=${shown} />
     <${Celebrate} d=${d} />
   </div>`;
+}
+
+// Uncommitted changes in the trunk while no trunk task runs: the trunk's tasks, and the ones they plan for, wait.
+function TrunkDirty({ d }) {
+  if (!d.trunkBlocked) return null;
+  const h = d.trunkHeld, waiting = h ? [...d.holds].filter(([, p]) => p === h.id).map(([id]) => id) : [];
+  const n = d.trunkDirty.length;
+  return html`<div class="banner warn trunk-dirty"><b>${n} uncommitted change${n > 1 ? "s" : ""} in the trunk</b>
+    <span class="muted mono" title=${d.trunkDirty.join("\n")}> ${d.trunkDirty.slice(0, 3).join(", ")}${n > 3 ? ", …" : ""}</span>.
+    ${h ? html` The trunk's next task, <a href=${`#/task/${h.id}`}>task ${h.id}</a>, can't start${waiting.length
+      ? html`, nor the ${waiting.length} task${waiting.length > 1 ? "s" : ""} it may rewrite` : ""}. ` : " Trunk tasks wait for them. "}Commit or stash them.</div>`;
 }
 
 render(html`<${App} />`, document.getElementById("app"));

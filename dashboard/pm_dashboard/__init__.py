@@ -17,7 +17,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-PM_MIN_VERSION = 67     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
+PM_MIN_VERSION = 75     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
                         # summary_request, exec tasks, open_summary, report_request, report_rows, report_ask, WORKTREE_NAME)
 try:
     import pm
@@ -32,6 +32,7 @@ STATIC = Path(__file__).parent / "static"
 TABLES = ("milestone", "plan", "task", "decision", "task_decision", "decision_supersedes", "run", "summary",
           "resource_use_report", "custom_report")
 POLL = 0.5
+DIRTY_POLL = 5
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "
        "base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 
@@ -47,6 +48,7 @@ class Watcher:
         self.state = None
         self.last_good = None
         self.sig = None
+        self.dirty, self.dirty_at = None, 0.0
         self.alive = None                       # the pid of `pm run`, while it lives
 
     def signature(self):
@@ -75,7 +77,9 @@ class Watcher:
     def loop(self):
         while True:
             try:
-                sig = self.signature()
+                if time.monotonic() - self.dirty_at > DIRTY_POLL:    # edits in the trunk change no git file
+                    self.dirty_at, self.dirty = time.monotonic(), self.project.git("status", "--porcelain")
+                sig = self.signature() + [self.dirty]
                 changed = sig != self.sig
                 state = read_state(self.project, self.last_good) if changed else self.state
                 log, alive = self.running_log(state), self.project.run_pid()
@@ -100,7 +104,7 @@ def read_state(project, last_good=None):
     base = {"root": str(project.root), "db": project.db, "head": head, "dirty": dirty, "read_at": pm.now(),
             "schema_version": pm.SCHEMA_VERSION, "planning_priority": project.config.get("planning_priority"),
             "warm_handoff": project.config.get("warm_handoff"), "models": project.config.get("models"),
-            "worktrees": project.config.get("worktrees") or {}}
+            "worktrees": project.config.get("worktrees") or {}, "holds": {}}
     if not project.db_path.exists():               # written by the first pm command, e.g. adding a milestone
         return base | {"tables": {t: [] for t in TABLES}, "queue": [], "head_signoff": None, "done_plans": [], "errors": []}
     try:
@@ -125,11 +129,12 @@ def read_state(project, last_good=None):
         for r in tables["resource_use_report"]:
             r["categories"] = project.report_rows(r["id"])
         errors = project.validate()
+        holds = project.planning_holds(project.queue())
     except pm.FormatError as e:
         return base | {"error": str(e), "last_good": last_good}
     return base | {"tables": tables, "queue": queue, "head_signoff": head_signoff, "done_plans": done_plans,
                    "errors": errors, "open_summary": open_summary,
-                   "open_report": open_report}
+                   "open_report": open_report, "holds": holds}
 
 
 def usage(project):

@@ -408,6 +408,9 @@ export function Task({ d, id, query, embedded = false }) {
     </dl>
     ${running ? html`<div class="banner warn row"><span class="grow">A worker is on this task: it can't be changed until the run ends.</span><${KillTask} t=${t} /></div>` : null}
     ${fail ? html`<div class="banner error"><b>Run ${fail.id} failed</b> <span class="muted">${stamp(fail.ended_at)}</span><pre>${fail.reason || ""}</pre></div>` : null}
+    ${t.status === "open" && !running && d.waitsFor(t) ? html`<div class="banner warn">${d.holds.has(t.id)
+      ? html`Waits for <a href=${`#/task/${d.holds.get(t.id)}`}>task ${d.holds.get(t.id)}</a>, which plans above it and may rewrite it${d.trunkBlocked ? "; that task waits for the trunk's uncommitted changes" : ""}.`
+      : html`Can't start: ${d.trunkDirty.length} uncommitted change(s) in the trunk (${d.trunkDirty.join(", ")}). Commit or stash them.`}</div>` : null}
     ${why && typeof why !== "string" ? html`<div class="banner warn">Waits for ${why.map((x, i) => html`${i ? ", " : ""}<a href=${`#/decision/${x.id}`}>decision ${x.id}: ${x.subject}</a>`)}.</div>` : null}
     ${t.status === "open" && !running ? html`<${CloseTask} t=${t} />` : null}
     ${t.status === "dropped" ? html`<${RedoTask} t=${t} />` : null}
