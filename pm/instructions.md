@@ -19,7 +19,7 @@
 
 - **Milestone:** subject, body, status `open` | `on-hold` | `implemented` (set by pm), queue index (default 0). On hold: its tasks stay out of the queue until resumed; a running task finishes.
 - **Plan:** belongs to a milestone; subject, intro, body, priority. The milestone's first plan is its **masterplan**. A plan's parent is the plan of the task that wrote it, else the masterplan. **Done:** it has tasks, none open, and every child plan is done; the masterplan, when every plan of its milestone is.
-- **Task:** belongs to a plan (an `exec` task: none); subject, body (required while open), kind, work tree (none: the trunk, for planning, cleanup and exec tasks), status `open` | `done` | `dropped`, note (done: date and files; dropped: the reason), priority (default: the plan's, else 0), web (see "Web access").
+- **Task:** belongs to a plan (an `exec` task: none); subject, body (required while open), kind, work tree (none: the trunk, for planning, cleanup and exec tasks), status `open` | `done` | `dropped`, note (done: date and files; dropped: the reason), priority (default: the plan's, else 0), web (see "Web access"), prerequisite tasks (see "Dependencies").
 - **Task kinds:**
   - `work` (default)
   - `plan`: writes a plan (`--kind plan`)
@@ -27,7 +27,7 @@
   - `exec`: the human's direct intervention; no plan, so no milestone; queued as if at milestone queue index 0; no task-queue sign-off; if it fails, dropped, not investigated
 - **Decision:** subject (the question), intro (what is to be decided, plain English), body (context), options (the recommended one first), status `pending` | `answered` | `irrelevant`, kind `rule` (default: lasting, in the log) | `once` (a go-ahead or check). A task linked to a pending decision waits; answered, its worker sees the answer in `pm show`; irrelevant, the open tasks waiting for it are dropped. Also: `decided_by_task` (a worker's own choice, `pm decision record`; empty: the human's), consequences (what changed because of the answer), supersede links (a newer answer replaces an older one, wholly or partly).
 - **Sign-off:** a decision pm makes itself, per `signoff` in project-manager.toml: before a masterplan or plan is split into tasks, before work tasks run, or before a web task gets the web. Its only answer is approve; shown as `Decision 4 (answered, sign-off): …`. Not for agents to create or answer.
-- **Queue:** open tasks of open milestones, and open `exec` tasks, that no pending decision blocks; by milestone queue index (lowest first), then highest priority first, then milestone, plan and task id. `pm run` takes the first of the trunk and of each work tree, in parallel: **priority orders tasks only within one work tree**. A task waits while a masterplan, split or revise task of its plan or a plan above it is queued.
+- **Queue:** open tasks of open milestones, and open `exec` tasks, that no pending decision blocks and whose prerequisite tasks are done; by milestone queue index (lowest first), then highest priority first, then milestone, plan and task id. `pm run` takes the first of the trunk and of each work tree, in parallel: **priority orders tasks only within one work tree, and only as a hint**; a strict order is a prerequisite (`--requires`). A task waits while a masterplan, split or revise task of its plan or a plan above it is queued.
 - **Recorded by pm:** `created_at`, `retired_at`, `implemented_at`, `closed_at`; `created_by_task` (your task, for what you create as a worker); one run per worker run, with result, time, tokens and cost.
 
 ## What pm queues
@@ -130,11 +130,29 @@ pm task done 5 "2026-10-10, app/api/export.py, tests/test_export.py"
 pm task drop 6 "covered by task 5"
 ```
 
+### Dependencies
+
+A task that needs another task's result requires it: pm runs it only once that task is done (and, if it ran in another work tree, merged into the trunk). This is the only strict order; priority is a hint for what goes first and orders nothing across work trees.
+
+```sh
+pm task add 2 "Docs for the export endpoint" --requires 5 --requires 7 --worktree docs <<'EOF'
+…
+EOF
+pm task requires 9 5 7          # an open task; a running one only by its own worker
+pm task requires 9 --remove 7
+pm task drop 6 "split into tasks 11 and 12" --replaced-by 12   # 12 takes over what 6 required and what required 6
+```
+
+- Refused: a cycle, a dropped prerequisite, a closed task
+- Prerequisite fails: it stays open (investigated), its dependents wait
+- Prerequisite dropped: its dependents wait for good; drop it with `--replaced-by`, or `pm task requires <dependent> --remove <it>`; `pm task redo` moves the links to the new task
+- `pm show <task>` lists what it requires and what requires it
+
 A task fits one worker run: one change you can describe, check and commit.
 
 **Model:** pm picks the worker's model by task kind (`[models]` in the config: usually Sonnet for work, Opus for planning and investigations) and switches a task to Opus after a failed run. When splitting a plan, mark a work task that needs deep reasoning (subtle design, hard bugs, wide refactors) `--model opus`; leave the rest to pm.
 
-**Work trees:** `pm task add` needs `--worktree <name>`, one of the work trees your prompt lists with what belongs in each; pick it by what the task is about, not by your own task's. A work tree runs one task at a time, in parallel with the other work trees; pm merges it into the trunk after each task. **Priority orders tasks only within one work tree:** a task that must wait for another belongs in the same work tree. In a work tree, stay in it; pm's commands still use the trunk's database.
+**Work trees:** `pm task add` needs `--worktree <name>`, one of the work trees your prompt lists with what belongs in each; pick it by what the task is about, not by your own task's. A work tree runs one task at a time, in parallel with the other work trees; pm merges it into the trunk after each task. **Priority orders tasks only within one work tree:** a task that must wait for another requires it (`--requires`), in whichever work tree. In a work tree, stay in it; pm's commands still use the trunk's database.
 
 **Web access:** workers have no WebSearch or WebFetch, except for a task marked web (`--web`). Mark only a task that needs it, e.g. "verify the sourced figures"; its worker gets both tools once the human approves the sign-off (if `"web"` is in `signoff`). Your own task needs the web: `pm task set <your task> --web`, then stop without closing it, even when pm reminds you it is open; the next run has the tools. Don't ask for web access with a decision, and don't edit settings to grant it.
 
@@ -146,7 +164,8 @@ Work you find beyond your task is a follow-up task: add it, don't do it, don't l
 - Your task can't be done without it: it's part of your task, do it
 - Into the plan it belongs to, usually your task's; `pm show <your task>` lists the plan's tasks: don't add one twice
 - Body: what, where, done when; for a worker without your context
-- No `--priority` unless it must run earlier or later than its plan's other tasks
+- No `--priority` unless it should rather run earlier or later than its plan's other tasks
+- It needs another task's result first: `--requires <task id>`, not a priority
 - It needs the human's answer first: also `pm decision add` and `pm task-pending-decision <new task> <decision>`
 
 ```sh
@@ -203,7 +222,7 @@ pm decision consequences 32 "RAE number style in all prompts (prompts/*.md); sca
 
 ## Priorities
 
-- Higher runs first, within the same milestone queue index (a lower queue index runs before any priority)
+- A hint, not a guarantee: higher runs first, within the same milestone queue index (a lower queue index runs before any priority) and the same work tree; for a strict order, `--requires`
 - A task without its own priority gets its plan's
 - Planning (`plan`, `masterplan`, `split`): `planning_priority`, 1000, unless given
 - Rules for choosing them: `plan_priority_prompt` and `task_priority_prompt` in project-manager.toml, appended to every worker prompt and printed at the end of `pm instructions`
@@ -214,14 +233,15 @@ Each pm task's body says what to do; these are the mechanics.
 
 - **Write the masterplan** (plan P): read the milestone (`pm show <task>`) and the code; `pm plan edit P --intro "…" --body -`, divided into parts, stating that the masterplan's own tasks each write the plan for one part. That queues "create tasks for plan P: …".
 - **Revise a plan** (P): if it no longer fits its milestone or parent plan, `pm plan edit P --body -`; that queues its split and the revisions below it. If it still fits, change nothing.
-- **Split a plan into tasks** (P): keep the done and dropped tasks, drop open ones that no longer fit, add one `pm task add P … --worktree <name>` per missing task, in the order they should run (priority orders only within a work tree) (`--model opus` for one that needs deep reasoning); the masterplan's tasks write plans (`--kind plan`). Raise a decision for each question only the human can answer, and link the tasks that wait for it. Note: `"<date>, tasks …"`.
+- **Split a plan into tasks** (P): keep the done and dropped tasks, drop open ones that no longer fit, add one `pm task add P … --worktree <name>` per missing task, in the order they should run, `--requires <task id>` where one needs another's result (priority is a hint and orders only within a work tree) (`--model opus` for one that needs deep reasoning); the masterplan's tasks write plans (`--kind plan`). Raise a decision for each question only the human can answer, and link the tasks that wait for it. Note: `"<date>, tasks …"`.
 - **Write a part's plan** (a task of the masterplan): `pm plan list` first, then `pm plan add <milestone> "<part>" --priority N --intro "…"` with the full body.
 - **Post-milestone cleanup:** work through the body for the whole project. For another milestone that needs a change, or a pending decision that seems obsolete: a new decision for the human.
 - **Executive summary** (`exec`): `pm summary show` is the previous one; store the new one with `pm summary add < summary.md` (only in an exec task).
 - **Resource use report** (`exec`): `pm report tasks` lists the done tasks; store with `pm report add < report.json`, `{"categories": [{"name": "…", "criteria": "…", "tasks": [3, 7]}]}`; refused unless every done task is in exactly one category. pm sums each category's time, tokens and cost.
 - **Custom report** (`exec`): the owner's question or request, in the task body; answer in one plain paragraph, store with `pm report answer < answer.md`. `pm show c2`.
 - **Your task needs an answer first:** `pm decision add`, `pm task-pending-decision <your task> <decision>`, stage what's done, stop. `pm run` goes on with the next task.
-- **Finish:** run the project's checks, stage the changes meant to stay, delete temporary files, then `pm task done <task> "<YYYY-MM-DD, files>"` or `pm task drop <task> "<reason>"`. A worker run ends with its task closed or waiting for a decision (web: see "Web access"); otherwise pm keeps it going once.
+- **Your task needs another task's result first:** `pm task requires <your task> <task id>` (add that task first if there is none), stage what's done, stop. It runs again once that task is done.
+- **Finish:** run the project's checks, stage the changes meant to stay, delete temporary files, then `pm task done <task> "<YYYY-MM-DD, files>"` or `pm task drop <task> "<reason>"`. A worker run ends with its task closed or waiting for a decision or a prerequisite task (web: see "Web access"); otherwise pm keeps it going once.
 
 ## For the human
 

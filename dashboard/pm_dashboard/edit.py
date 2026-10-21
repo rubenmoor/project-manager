@@ -104,6 +104,11 @@ def apply(project, op):
             raise EditError("status must be done or dropped")
         project.task_set(int(op["id"]), status=status, note=text(op.get("note"), "the note"))
         return f"task {op['id']} {'done' if status == 'done' else 'drop'}", None
+    if kind == "task_requires":
+        add, remove = [int(x) for x in op.get("add") or []], [int(x) for x in op.get("remove") or []]
+        project.task_requires(int(op["id"]), add, remove)
+        return "; ".join([*([f"task {op['id']} requires {', '.join(map(str, add))}"] if add else []),
+                          *([f"task {op['id']} no longer requires {', '.join(map(str, remove))}"] if remove else [])]), None
     if kind == "task_kill":
         project.kill(int(op["id"]))
         return f"task {op['id']} killed", None

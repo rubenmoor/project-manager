@@ -321,6 +321,7 @@ select.small { width: auto; }
 .tl-item.blocked.sel { box-shadow: inset 0 0 0 2px var(--decision); background: var(--decision-wash); }
 .tl-item.blocked .tl-pos { color: var(--decision); }
 .tag.waits { background: var(--decision); color: #fff; }
+.tag.waits.stuck { background: var(--critical); }
 .tl-toggle { display: flex; gap: 6px; align-items: center; padding: 8px 4px; color: var(--ink-2); font-size: 12px; cursor: pointer; white-space: nowrap; }
 .tl-pos { color: var(--muted); font-size: 12px; width: 32px; flex: none; }
 .tl-subject { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

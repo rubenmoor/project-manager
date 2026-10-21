@@ -140,8 +140,8 @@ function QueueTable({ d, ids }) {
 export function Queue({ d }) {
   const out = d.tasks.filter((t) => t.status === "open" && !d.queuePos.has(t.id));
   return html`<h1>Queue</h1>
-    <div class="sub">What <code>pm run</code> works next: open tasks of open milestones that no pending decision blocks (and exec tasks, as if at queue index 0),
-      by the milestone's queue index (lowest first), then highest priority first, then milestone, plan and task.</div>
+    <div class="sub">What <code>pm run</code> works next: open tasks of open milestones that no pending decision blocks and whose prerequisite tasks are done (and exec tasks, as if at queue index 0),
+      by the milestone's queue index (lowest first), then highest priority first, then milestone, plan and task. Priority is a hint; prerequisites are strict.</div>
     <${Banners} d=${d} />
     <h2>${d.queue.length} workable</h2>
     <${QueueTable} d=${d} ids=${d.queue} />
@@ -187,7 +187,8 @@ export function TaskRows({ d, tasks }) {
       <td style="width:90px"><${TaskPrio} d=${d} t=${t} /></td>
       <td style="width:170px">${run ? html`<${Pill} status="running" />` : html`<${Pill} status=${d.taskState(t)} />`}
         ${pos != null ? html` <span class="muted num" title="position in the queue">#${pos + 1}</span>` : null}
-        ${why && typeof why !== "string" ? html` <span class="tag" title="waits for a pending decision">blocked</span>` : null}</td></tr>`;
+        ${why && typeof why !== "string" ? html` <span class="tag" title="waits for a pending decision">blocked</span>` : null}
+        ${t.status === "open" && d.unmet(t).length ? html` <span class=${`tag waits${d.stuck(t) ? " stuck" : ""}`} title=${d.excluded(t) || ""}>waits for ${d.unmet(t).map((x) => `t${x.id}`).join(", ")}</span>` : null}</td></tr>`;
   })}</tbody></table>`;
 }
 
@@ -397,7 +398,7 @@ export function Task({ d, id, query, embedded = false }) {
       <span>priority <${TaskPrio} d=${d} t=${t} /></span>
       ${running ? html`<span>· <${Elapsed} start=${d.runningOf.get(t.id).started_at} /></span>` : null}
       ${pos != null && !running ? html`<span>· ${pos === 0 ? "next in the queue" : `#${pos + 1} in the queue`}</span>` : null}
-      ${why && typeof why === "string" ? html`<span>· not queued: ${why}</span>` : null}</div>
+      ${why && typeof why === "string" && !d.unmet(t).length ? html`<span>· not queued: ${why}</span>` : null}</div>
     <dl class="meta">
       <dt>created</dt><dd>${stamp(t.created_at)}${t.created_by_task != null ? html` by <a href=${`#/task/${t.created_by_task}`}>task ${t.created_by_task}</a>` : " by the human or pm"}</dd>
       ${t.retired_at ? html`<dt>${t.status}</dt><dd>${stamp(t.retired_at)} · <${Time} ts=${t.retired_at} /></dd>` : null}
@@ -412,10 +413,13 @@ export function Task({ d, id, query, embedded = false }) {
       ? html`Waits for <a href=${`#/task/${d.holds.get(t.id)}`}>task ${d.holds.get(t.id)}</a>, which plans above it and may rewrite it${d.trunkBlocked ? "; that task waits for the trunk's uncommitted changes" : ""}.`
       : html`Can't start: ${d.trunkDirty.length} uncommitted change(s) in the trunk (${d.trunkDirty.join(", ")}). Commit or stash them.`}</div>` : null}
     ${why && typeof why !== "string" ? html`<div class="banner warn">Waits for ${why.map((x, i) => html`${i ? ", " : ""}<a href=${`#/decision/${x.id}`}>decision ${x.id}: ${x.subject}</a>`)}.</div>` : null}
+    ${t.status === "open" && d.unmet(t).length ? html`<div class=${`banner ${d.stuck(t) ? "error" : "warn"}`}>Waits for ${d.unmet(t).map((x, i) => html`${i ? ", " : ""}<a href=${`#/task/${x.id}`}>task ${x.id}: ${x.subject}</a> (${x.status})`)}${d.stuck(t)
+      ? html`. A dropped task never gets done: re-schedule it, or remove it below.` : "."}</div>` : null}
     ${t.status === "open" && !running ? html`<${CloseTask} t=${t} />` : null}
     ${t.status === "dropped" ? html`<${RedoTask} t=${t} />` : null}
     ${decs.length ? html`<h2>Decisions</h2><ul>${decs.map((x) => html`<li><a href=${`#/decision/${x.id}`}>${x.subject}</a> <${Pill} status=${x.status} />
       ${x.signoff ? html` <span class="tag signoff">sign-off: ${x.signoff}</span>` : null}</li>`)}</ul>` : null}
+    <${Prerequisites} d=${d} t=${t} running=${running} />
     ${created.length && t.status === "open" ? html`<h2>Created by this task</h2><ul>${created.map(([k, r]) => html`<li>${k} ${k === "decision" ? html`<a href=${`#/${k}/${r.id}`}>${r.subject}</a>` : html`<${NamedLink} kind=${k} r=${r} />`}</li>`)}</ul>` : null}
     ${t.status !== "open" ? html`<${Commit} d=${d} t=${t} />` : null}
     <h2>Runs (${runs.length}${runs.length ? `, ${usd(d.cost(runs))}` : ""})</h2>
@@ -423,6 +427,29 @@ export function Task({ d, id, query, embedded = false }) {
     ${runs.length ? html`<h2>Worker log${running ? " (live)" : fail ? ` (failed run ${fail.id})` : ""}</h2><${Log} d=${d} t=${t} live=${running} reveal=${query === "log"} />` : null}
     <h2>Body</h2>
     <${EditableBody} text=${t.body} save=${t.status === "open" ? saveTask(t.id, "body") : null} disabled=${running} />`;
+}
+
+// What the task requires (strict: it runs only once they are done) and what requires it; an open task's links edit here.
+function Prerequisites({ d, t, running }) {
+  const req = d.requires.get(t.id) || [], by = d.requiredBy.get(t.id) || [];
+  const [add, setAdd] = useState("");
+  const [error, setError] = useState(null);
+  const open = t.status === "open" && !running;
+  const go = async (op) => {
+    try { await post({ op: "task_requires", id: t.id, ...op }); setAdd(""); setError(null); }
+    catch (e) { setError(e.message); }
+  };
+  if (!req.length && !by.length && !open) return null;
+  const item = (x, remove) => html`<li><${TaskLink} t=${x} /> <${Pill} status=${x.status} />
+    ${remove ? html` <button class="iconbtn" title="no longer require it" onClick=${() => go({ remove: [x.id] })}>×</button>` : null}</li>`;
+  return html`<h2>Prerequisites</h2>
+    <div class="sub">Runs only once these tasks are done, whatever the priorities.</div>
+    ${req.length ? html`<ul>${req.map((x) => item(x, open))}</ul>` : html`<div class="muted">None.</div>`}
+    ${open ? html`<div class="row" style="margin-top:6px"><input class="note-input" style="flex:0 0 120px" value=${add} placeholder="task id"
+      onInput=${(e) => setAdd(e.target.value)} onKeyDown=${(e) => e.key === "Enter" && add.trim() && go({ add: [Number(add.trim())] })} />
+      <button class="btn" disabled=${!/^\d+$/.test(add.trim())} onClick=${() => go({ add: [Number(add.trim())] })}>Require</button>
+      ${error ? html`<span class="err">${error}</span>` : null}</div>` : null}
+    ${by.length ? html`<h3>Required by</h3><ul>${by.map((x) => item(x, false))}</ul>` : null}`;
 }
 
 function HoldButton({ m }) {

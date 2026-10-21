@@ -17,8 +17,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-PM_MIN_VERSION = 75     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
-                        # summary_request, exec tasks, open_summary, report_request, report_rows, report_ask, WORKTREE_NAME)
+PM_MIN_VERSION = 77     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
+                        # summary_request, exec tasks, open_summary, report_request, report_rows, report_ask, WORKTREE_NAME,
+                        # task_requires)
 try:
     import pm
 except ImportError:
@@ -29,7 +30,7 @@ if getattr(pm, "VERSION", 0) < PM_MIN_VERSION:
 from pm_dashboard import edit
 
 STATIC = Path(__file__).parent / "static"
-TABLES = ("milestone", "plan", "task", "decision", "task_decision", "decision_supersedes", "run", "summary",
+TABLES = ("milestone", "plan", "task", "decision", "task_decision", "task_prerequisite_tasks", "decision_supersedes", "run", "summary",
           "resource_use_report", "custom_report")
 POLL = 0.5
 DIRTY_POLL = 5

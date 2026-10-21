@@ -47,6 +47,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 - milestone: subject, body, status (`open`, `on-hold`, `implemented`), `queue_index` (default 0), `created_at`, `implemented_at`
 - plan: belongs to a milestone; subject, body, priority, `created_at`, `created_by_task`
 - task: belongs to a plan, except kind `exec`; subject, body, kind (`work`, `plan`: writes a plan; `exec`: an executive intervention by the human, no plan or milestone, queued as if at queue index 0, by priority; made by pm: `masterplan`, `split` for "create tasks for plan N: …", `cleanup`, `revise` for "revise the masterplan of …" and "revise plan N: …", `investigate` for "investigate the failure of task N: …", `merge` for "merge the trunk and work tree X"), status, priority, note, `created_at`, `retired_at` (done or dropped), `created_by_task`, `web`, `model` (NULL: by kind, `[models]`), `worktree` (`[worktrees]`; NULL: the trunk, for exec, planning and cleanup tasks)
+- task_prerequisite_tasks: `task_id` runs only once `prerequisite_id` is done; many-to-many, no cycles
 - summary: an executive summary (Markdown), the task that wrote it, `head_commit` (where the next one's delta starts), `created_at`
 - resource_use_report: the task that wrote it, `head_commit`, `created_at`; `resource_use_category`: its mutually exclusive categories (name, one sentence of criteria); `resource_use_task`: each task done when it was written, in one category
 - custom_report: the human's question, its task, the one-paragraph answer (empty until answered), `created_at`, `answered_at`
@@ -54,7 +55,15 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 - run: one worker run of `pm run`: task, start, end, result (`running`, `done`, `blocked`, `failed`, `limit`), reason, exit code, `base_commit` (HEAD at the start), `worktree` (the task's then; empty: the trunk), `pid` of `pm run`; from claude's JSON output: model, session, `continues_run` (warm hand-off: the run whose session it resumed), turns, tokens (input, output, cache read, cache creation), cost in USD; while it runs, `running` (at most one per work tree, uncommitted); a `pm run` that died leaves it, the next `pm run` marks it `failed` (`interrupted`), or refuses while that process lives
 - timestamps in UTC; `created_by_task`: the task whose worker created the row (`PM_TASK`), empty for the human or pm
 
-**Queue** (the `queue` view): open tasks of open milestones (not on hold) that no pending decision blocks, by the milestone's queue index (lowest first), then by priority (task's, else plan's, else 0; highest first), then milestone, plan and task id.
+**Queue** (the `queue` view): open tasks of open milestones (not on hold) that no pending decision blocks and whose prerequisite tasks are done, by the milestone's queue index (lowest first), then by priority (task's, else plan's, else 0; highest first), then milestone, plan and task id.
+
+**Dependencies.** Priority is a hint for what goes first; a strict order is a prerequisite task (`task_prerequisite_tasks`), declared by workers or you.
+
+- `pm task add … --requires <task>` (repeat), `pm task requires <task> <prerequisite>… [--remove <task>]`; refused: cycles, dropped prerequisites, closed tasks; a running task only by its own worker, whose run then ends `blocked`
+- Met: the prerequisite is done; from another work tree, also merged into the trunk (its `task N: …` commit in HEAD)
+- Failed prerequisite: stays open, investigated; dependents wait. A failed task requires its investigation; fix tasks are added as prerequisites
+- Dropped prerequisite: dependents wait for good, listed by `pm run` and `pm status`; `pm task drop <task> <reason> --replaced-by <task>` and `pm task redo` move the links to the new task
+- `pm show <task>`: what it requires and what requires it; the dashboard: "waits for t12"
 
 **Sign-offs.** `signoff` in project-manager.toml, `["web"]` by default: then only the decisions workers raise and web access stop the run. Each value makes `pm run` wait for your approval before the next task of a kind runs:
 
@@ -84,12 +93,13 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 | `run [--once] [--dry-run]` | Work the queue; when it is empty, wait for tasks (`--once`: exit). Stops when Claude needs you or the tree has uncommitted changes |
 | `stop` | Have the running `pm run` stop after its running task(s) (SIGUSR1; same as one Ctrl-C) |
 | `milestone add`, `plan add <milestone>`, `task add <plan>` | In your editor (as `git commit`): first line subject, rest body (Markdown); quit unsaved or save empty to abort |
-| `milestone add <subject>`, `plan add <milestone> <subject>`, `task add <plan> <subject>` | Non-interactive: the body from stdin. `plan add` requires `--intro` (plain English for an outsider, no pm terms); `plan add` and `task add` also take `--priority`; `task add` `--kind plan`, `--web`, `--worktree <name>` (required); `task add --exec <subject>`: an exec task, no plan |
+| `milestone add <subject>`, `plan add <milestone> <subject>`, `task add <plan> <subject>` | Non-interactive: the body from stdin. `plan add` requires `--intro` (plain English for an outsider, no pm terms); `plan add` and `task add` also take `--priority`; `task add` `--kind plan`, `--web`, `--worktree <name>` (required), `--requires <task>` (repeat); `task add --exec <subject>`: an exec task, no plan |
 | `milestone add … --queue <N>`, `milestone set <milestone>` | `--queue <N>`: queue index, lowest first (default 0); `set` also `--subject`, `--status`, `--body`. `milestone add\|set\|hold\|resume` is refused in a worker |
 | `milestone hold <milestone>`, `milestone resume <milestone>` | Keep its plans and tasks out of the queue (a running task finishes), and back |
 | `plan edit <plan>` | `--subject`, `--body`, `--intro` (queues nothing), `--priority <N\|none>`; a worker's `--body` on a plan without an intro needs `--intro` too |
 | `task set <task>` | `--subject`, `--body`, `--priority <N\|none>`, `--web`/`--no-web`, `--model`, `--worktree <name>`; open tasks that aren't running |
-| `task done\|drop <task> <note>`, `task priority <task> <N\|none>` | Close a task, set its priority |
+| `task done\|drop <task> <note>`, `task priority <task> <N\|none>` | Close a task, set its priority; `drop --replaced-by <task>`: that task takes over its prerequisite links |
+| `task requires <task> <prerequisite>… [--remove <task>]` | It runs only once these are done (see Dependencies) |
 | `decision add <subject>` | `--intro` (required: what has to be decided, plain English for an outsider), `--body`, `--option` (recommended first) |
 | `decide` | Answer pending decisions one by one in the terminal (number, text, `s` skip, `x <reason>` irrelevant; sign-offs: `a` approve, `s` skip) |
 | `decision list` | Pending decisions: context, options, blocked tasks; sign-offs with what they approve. `--answered`: the decision log (answered `rule` decisions nothing fully supersedes, newest first); `--all`: every decision; `--grep <text>` |
@@ -139,7 +149,7 @@ One `pm run` per repository: it holds a lock (`.git/pm-run.lock`, with its pid) 
 **Work trees.** The project's own checkout, the trunk, is the executive one: your milestones, your direct edits (e.g. AGENTS.md), exec tasks (reports included) and pm's planning and cleanup tasks run there. Every other task runs in one of the git work trees named in `[worktrees]` in the config (`name = "what belongs there"`, e.g. `app` and `questions` for a trivia project); tasks of different work trees run in parallel. pm errors out while `[worktrees]` is empty.
 
 - Assignment: `pm task add` needs `--worktree <name>` unless `--exec`; workers pick it by the `[worktrees]` descriptions (their prompt lists them); `pm task set --worktree`, the dashboard's task page and add form: a dropdown; investigations get the failed task's; pm never guesses
-- Priority orders tasks only within one work tree: tasks of different work trees run side by side, whatever their priorities
+- Priority orders tasks only within one work tree: tasks of different work trees run side by side, whatever their priorities; across work trees, `--requires`
 - Planning first: a task doesn't start while a masterplan, split or revise task of its plan or a plan above it is queued (it may rewrite the task); other tasks of its work tree go on
 - Old tasks without a work tree: with one `[worktrees]` entry, `pm run` puts them there; with several, it lists them and stops until you `pm task set` them
 - Scheduling: `pm run` starts the first queued task of the trunk and of every work tree that runs nothing, within the lowest milestone queue index in the queue, up to `max_parallel` (default 4; 1: one at a time); within one work tree, the queue order holds
@@ -156,7 +166,7 @@ One `pm run` per repository: it holds a lock (`.git/pm-run.lock`, with its pid) 
 
 A failed run: `pm` stashes what the worker left (`tasks.sql` aside; `git stash apply <sha>` gets it back), so the next `pm run` starts clean, and records a summary as the run's reason, shown in the terminal and on the dashboard: exit code or signal, duration, turns, the last tool call, a likely cause, the stash, the log. The next run of the same task gets that summary and the task's stashes in its prompt, with the instruction to inspect them, apply what is still good and recheck what they mark as done; `pm` drops them once the task is done or dropped. A run that exits non-zero after `pm task done`: with everything staged it counts as done; otherwise its work is stashed and the task reopened. Usage limits are looked for only in failed runs.
 
-A failed task doesn't stop `pm run` and isn't retried as it is: its leftovers are in its stash, and pm queues "investigate the failure of task N: …" (kind `investigate`, `investigate_prompt`, the failure's summary below) in its plan, priority one above it. The investigation finds the cause and, by it, adds a fix task between the two (a bug in a script), changes or drops the task, or raises a decision for the human; only then does the task run again, with its stash. A task that fails again after 3 investigations, or a failed investigation, stops `pm run`.
+A failed task doesn't stop `pm run` and isn't retried as it is: its leftovers are in its stash, and pm queues "investigate the failure of task N: …" (kind `investigate`, `investigate_prompt`, the failure's summary below) in its plan, priority two above it and a prerequisite of it. The investigation finds the cause and, by it, adds a fix task the failed task requires (a bug in a script), changes or drops the task, or raises a decision for the human; only then does the task run again, with its stash. A task that fails again after 3 investigations, or a failed investigation, stops `pm run`.
 
 Claude's own errors aren't the task's, so pm handles them itself: with stream-json, from the API error Claude Code marks (an assistant event with `error`: `rate_limit`, `server_error`, `authentication_failed`, `billing_error`, …) and its text, never from tool output or the worker's prose; the reset time is read from that text ("resets 3pm (Europe/Berlin)"). Other workers: their last plain log lines.
 - usage limit: wait for its reset (plus `limit_margin_minutes`), then the same task again

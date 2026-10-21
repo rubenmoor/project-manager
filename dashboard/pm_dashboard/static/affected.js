@@ -35,6 +35,8 @@ export function effects(rows, self) {
   const link = (t, id, how, other) => out.push({ k: t, r: find(t, id) || { id }, how, other });
   for (const l of (rows.task_decision || {}).added || []) link("task", l.task_id, "waits", { k: "decision", id: l.decision_id });
   for (const l of (rows.task_decision || {}).removed || []) link("task", l.task_id, "unblocked", { k: "decision", id: l.decision_id });
+  for (const l of (rows.task_prerequisite_tasks || {}).added || []) link("task", l.task_id, "requires", { k: "task", id: l.prerequisite_id });
+  for (const l of (rows.task_prerequisite_tasks || {}).removed || []) link("task", l.task_id, "no longer requires", { k: "task", id: l.prerequisite_id });
   for (const l of (rows.decision_supersedes || {}).added || []) link("decision", l.decision_id, "supersedes", { k: "decision", id: l.superseded_id });
   return out.sort((a, b) => ORDER.indexOf(a.k) - ORDER.indexOf(b.k) || (RANK[a.how] ?? 2) - (RANK[b.how] ?? 2));
 }

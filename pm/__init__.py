@@ -10,14 +10,15 @@ queued as if at milestone queue index 0; one is the executive summary (`pm summa
 worker reads the previous summary and stores the new one in the summary table; another is the resource use report
 (`pm report request`): its worker sorts every done task into categories of its own making, pm sums their runs' time,
 tokens and cost; a custom report (`pm report ask`) answers the human's question in one paragraph. The queue (the `queue` view): open
-tasks of open milestones, and open exec tasks, that no pending decision blocks, by the milestone's queue index (lowest
-first; exec: 0), then highest priority first, then by milestone, plan and task.
+tasks of open milestones, and open exec tasks, that no pending decision blocks and whose prerequisite tasks
+(task_prerequisite_tasks) are done, by the milestone's queue index (lowest first; exec: 0), then highest priority
+first, then by milestone, plan and task. Priority is a hint for what goes first; a strict order is a prerequisite.
 Worked one task at a time by `claude -p` per work tree ([worktrees] in the config, task.worktree), in parallel: a task
 runs in its git work tree, which is merged into the trunk (the project's own checkout) after it; the trunk runs the
 human's exec tasks and pm's planning and cleanup tasks. Standard library only (Python 3.11+).
 
     pm init | status | queue | show <task|d32|p3|m1> | validate | decide | run [--once] [--dry-run] | instructions
-    pm milestone add|set|hold|resume|list|show …   pm plan add|edit|list …   pm task add|set|done|drop|priority …
+    pm milestone add|set|hold|resume|list|show …   pm plan add|edit|list …   pm task add|set|done|drop|redo|requires|priority …
     pm decision add|list|show|answer|approve|irrelevant|record|supersede|consequences|kind …
     pm summary request|add|show|list   pm report request|tasks|add|ask|answer|show|list
     pm task-pending-decision <task> <decision>
@@ -31,7 +32,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 76  # bump by one with every commit (AGENTS.md)
+VERSION = 77  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -91,7 +92,7 @@ SIGNOFF_INTROS = {
 IN_LOG = ("status = 'answered' AND signoff IS NULL AND kind = 'rule' AND id NOT IN (SELECT superseded_id FROM "
           "decision_supersedes s JOIN decision n ON n.id = s.decision_id WHERE s.note = '' AND n.status = 'answered')")
 
-SCHEMA_VERSION = 28
+SCHEMA_VERSION = 29
 # A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
 # run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
 # Columns and tables SCHEMA dropped are left behind, new ones get their defaults; so only renames, moved data and new
@@ -121,7 +122,7 @@ def trunk_kinds(con):
 
 
 MIGRATIONS = {12: "", 13: "", 14: revise_kind, 15: "", 16: "", 17: "", 18: drop_summary_kind, 19: exec_kind,
-              20: "", 21: "", 22: "", 23: "", 24: "", 25: "", 26: trunk_kinds, 27: ""}
+              20: "", 21: "", 22: "", 23: "", 24: "", 25: "", 26: trunk_kinds, 27: "", 28: ""}
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -222,6 +223,13 @@ CREATE TABLE task_decision (                               -- the task waits whi
     PRIMARY KEY (task_id, decision_id)
 ) STRICT;
 
+CREATE TABLE task_prerequisite_tasks (                     -- the task waits until the prerequisite task is done
+    task_id         INTEGER NOT NULL REFERENCES task (id),
+    prerequisite_id INTEGER NOT NULL REFERENCES task (id),
+    PRIMARY KEY (task_id, prerequisite_id),
+    CHECK (task_id <> prerequisite_id)
+) STRICT;
+
 CREATE TABLE decision_supersedes (                         -- decision_id's answer replaces superseded_id's
     decision_id   INTEGER NOT NULL REFERENCES decision (id),
     superseded_id INTEGER NOT NULL REFERENCES decision (id),
@@ -273,6 +281,7 @@ CREATE TABLE custom_report (                               -- the human's questi
 CREATE INDEX plan_milestone ON plan (milestone_id);
 CREATE INDEX task_plan ON task (plan_id);
 CREATE INDEX task_decision_decision ON task_decision (decision_id);
+CREATE INDEX task_prerequisite ON task_prerequisite_tasks (prerequisite_id);
 CREATE INDEX decision_superseded ON decision_supersedes (superseded_id);
 CREATE INDEX run_task ON run (task_id);
 CREATE UNIQUE INDEX run_running ON run (coalesce(worktree, '')) WHERE result = 'running';  -- at most one per work tree
@@ -286,6 +295,8 @@ LEFT JOIN milestone m ON m.id = p.milestone_id
 WHERE (m.status = 'open' OR t.kind = 'exec') AND t.status = 'open'
   AND NOT EXISTS (SELECT 1 FROM task_decision td JOIN decision d ON d.id = td.decision_id
                   WHERE td.task_id = t.id AND d.status = 'pending')
+  AND NOT EXISTS (SELECT 1 FROM task_prerequisite_tasks r JOIN task q ON q.id = r.prerequisite_id
+                  WHERE r.task_id = t.id AND q.status <> 'done')
 ORDER BY coalesce(m.queue_index, 0), priority DESC, m.id, p.id, t.id;  -- exec: queue index 0
 """
 
@@ -312,12 +323,17 @@ Milestones, plans, tasks and decisions are in {db}; change them only with these 
   pm plan edit <plan id> [--subject …] [--body …] [--intro …] [--priority N]
   pm plans list     plans with open tasks, by milestone queue index, then highest priority first
   pm milestone list     every milestone; pm milestone show <milestone id>
-  pm task add <plan id> "<subject>" --worktree <name> [--kind plan] [--priority N] [--web] [--model opus] < body.md
-      --worktree: where it runs, below; --kind plan: the task writes a plan; --web: its worker gets WebSearch and
+  pm task add <plan id> "<subject>" --worktree <name> [--requires <task id> …] [--kind plan] [--priority N] [--web]
+      [--model opus] < body.md
+      --requires: it runs only once that task is done (repeat), the only strict order: priority is a hint, and
+      doesn't order tasks of different work trees; --worktree: where it runs, below; --kind plan: the task writes a
+      plan; --web: its worker gets WebSearch and
       WebFetch (after the human's sign-off); --model opus: a work task that needs deep reasoning (subtle design, hard
       bugs, wide refactors), else pm picks by kind
   pm task set <task id> [--subject …] [--body …] [--priority N] [--web|--no-web] [--model opus|none]
       [--worktree <name>]     an open task that isn't running
+  pm task requires <task id> <prerequisite id> … [--remove <id>]     an open task waits until they are done
+  pm task drop <task id> "<reason>" --replaced-by <task id>     the new task takes over its prerequisite links
   pm decision add "<subject>" --intro "<intro>" [--body "<text>"] [--option "<recommended>"] [--option …]
       prints its id
   pm task-pending-decision <task id> <decision id>     the task waits until the human answers
@@ -337,7 +353,9 @@ and nothing wakes you later.
 Finish with `pm task done {id} "<YYYY-MM-DD, files>"` or `pm task drop {id} "<reason>"`. Stage (`git add`) the \
 changes meant to stay in the project and delete temporary files you created. Don't commit or push: pm commits what \
 is staged, together with {db}, as "task {id}: <subject>". If task {id} itself needs an answer first, make it pending \
-on the decision, stage what is done and stop."""
+on the decision, stage what is done and stop. If it needs another task's result first, \
+`pm task requires {id} <task id>` (add that task if it doesn't exist), stage what is done and stop: it runs again \
+once that task is done."""
 
 
 # --- Claude's usage limit: the message and when it resets ---------------------------------------
@@ -727,6 +745,7 @@ class Project:
         self.kills = set()          # `pm kill`: task ids whose workers are killed
         self.finished = None        # `pm run`: queue.Queue of (work tree, task id, result, message)
         self.next_push = 0          # `pm run`: time.monotonic() of the next `git push` (push_minutes)
+        self.merged = set()         # `pm run`: done prerequisite tasks whose work is in the trunk
 
     @property
     def top(self):
@@ -924,6 +943,75 @@ class Project:
         cls.get(db, "task", task_id)
         cls.get(db, "decision", decision_id)
         db.execute("INSERT OR IGNORE INTO task_decision VALUES (?, ?)", (task_id, decision_id))
+
+    @staticmethod
+    def requires_path(db, start, goal):
+        """[start, …, goal] along prerequisite links (start requires … goal), or None."""
+        prev, todo = {start: None}, [start]
+        while todo:
+            x = todo.pop()
+            if x == goal:
+                path = []
+                while x is not None:
+                    path, x = [x, *path], prev[x]
+                return path
+            for (y,) in db.execute("SELECT prerequisite_id FROM task_prerequisite_tasks WHERE task_id = ?", (x,)):
+                if y not in prev:
+                    prev[y] = x
+                    todo.append(y)
+        return None
+
+    @classmethod
+    def link_prerequisite(cls, db, tid, pid, moving=False):
+        """Task tid waits until task pid is done. Refused: a cycle; a dropped pid, unless moving links."""
+        if tid == pid:
+            raise FormatError(f"task {tid} can't require itself")
+        if cls.get(db, "task", pid)["status"] == "dropped" and not moving:
+            raise FormatError(f"task {pid} is dropped; require the task that replaces it")
+        if path := cls.requires_path(db, pid, tid):
+            raise FormatError("a cycle: task " + " requires ".join(map(str, [tid, *path])))
+        db.execute("INSERT OR IGNORE INTO task_prerequisite_tasks VALUES (?, ?)", (tid, pid))
+
+    @classmethod
+    def move_prerequisites(cls, db, old, new):
+        """Task new replaces dropped task old: it requires what old required, and old's open dependents require it."""
+        for (pid,) in db.execute("SELECT prerequisite_id FROM task_prerequisite_tasks WHERE task_id = ?", (old,)).fetchall():
+            if pid != new:
+                cls.link_prerequisite(db, new, pid, moving=True)
+        for (did,) in db.execute("SELECT r.task_id FROM task_prerequisite_tasks r JOIN task t ON t.id = r.task_id "
+                                 "WHERE r.prerequisite_id = ? AND t.status = 'open'", (old,)).fetchall():
+            db.execute("DELETE FROM task_prerequisite_tasks WHERE task_id = ? AND prerequisite_id = ?", (did, old))
+            if did != new:
+                cls.link_prerequisite(db, did, new, moving=True)
+
+    @staticmethod
+    def unmet(db, tid):
+        """Ids of task tid's prerequisite tasks that aren't done."""
+        return [r[0] for r in db.execute("SELECT q.id FROM task_prerequisite_tasks r JOIN task q ON q.id = r.prerequisite_id "
+                                         "WHERE r.task_id = ? AND q.status <> 'done' ORDER BY q.id", (tid,))]
+
+    def stuck(self):
+        """{open task id: [its dropped prerequisite tasks]}: they wait for good unless the links change."""
+        out = {}
+        for r in self.rows("SELECT r.task_id, r.prerequisite_id FROM task_prerequisite_tasks r "
+                           "JOIN task t ON t.id = r.task_id JOIN task q ON q.id = r.prerequisite_id "
+                           "WHERE t.status = 'open' AND q.status = 'dropped' ORDER BY 1, 2"):
+            out.setdefault(r["task_id"], []).append(r["prerequisite_id"])
+        return out
+
+    def task_requires(self, tid, add=(), remove=()):
+        """Open task tid waits until the tasks add are done; remove: no longer. A running task: only by its own
+        worker, whose run then ends blocked."""
+        with self.connect(write=True) as db:
+            if (t := self.get(db, "task", tid))["status"] != "open":
+                raise FormatError(f"task {tid} is {t['status']}; a closed task can't be changed")
+            if creator() != tid and db.execute("SELECT 1 FROM run WHERE result = 'running' AND task_id = ?",
+                                               (tid,)).fetchone():
+                raise FormatError(f"task {tid} is running; only its own worker changes what it requires")
+            for pid in remove:
+                db.execute("DELETE FROM task_prerequisite_tasks WHERE task_id = ? AND prerequisite_id = ?", (tid, pid))
+            for pid in add:
+                self.link_prerequisite(db, tid, pid)
 
     def pending(self):
         ds = self.rows("SELECT * FROM decision WHERE status = 'pending' ORDER BY id")
@@ -1756,9 +1844,9 @@ class Project:
             queued = [self.queue_plan_tasks(db, pid)] + [self.queue_revision(db, c, pid) for c in self.child_plans(db, pid)]
             return [q for q in queued if q]
 
-    def task_add(self, pid, subject, body, prio=None, kind="work", web=False, model=None, worktree=None):
+    def task_add(self, pid, subject, body, prio=None, kind="work", web=False, model=None, worktree=None, requires=()):
         """A new task; a plan-writing one gets planning_priority unless prio is given. kind exec: the human's, pid None,
-        no work tree; any other: a work tree of [worktrees]."""
+        no work tree; any other: a work tree of [worktrees]. requires: it waits until these tasks are done."""
         if prio is None and kind in PLANNING_KINDS:
             prio = self.config["planning_priority"]
         if kind == "exec":
@@ -1770,9 +1858,12 @@ class Project:
         with self.connect(write=True) as db:
             if kind != "exec":
                 self.check_plan_open(db, pid)
-            return db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task, web, model, "
-                              "worktree) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                              (pid, subject, kind, prio, body.strip(), creator(), int(web), model, worktree)).lastrowid
+            tid = db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task, web, model, "
+                             "worktree) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                             (pid, subject, kind, prio, body.strip(), creator(), int(web), model, worktree)).lastrowid
+            for r in requires:
+                self.link_prerequisite(db, tid, r)
+            return tid
 
     def check_worktree(self, name):
         names = self.config["worktrees"]
@@ -1783,7 +1874,9 @@ class Project:
 
     def task_set(self, tid, **fields):
         """Set fields of an open task (status, note, priority, subject, body, web, model, worktree); a value None clears
-        it. A running task: only its own worker changes it, and not its subject, body or work tree."""
+        it. A running task: only its own worker changes it, and not its subject, body or work tree. replaced_by (with
+        status dropped): that open task takes over its prerequisite links."""
+        new = fields.pop("replaced_by", None)
         with self.connect(write=True) as db:
             if (t := self.get(db, "task", tid))["status"] != "open":
                 raise FormatError(f"task {tid} is {t['status']}; a closed task can't be changed")
@@ -1806,6 +1899,10 @@ class Project:
                     db.execute(f"UPDATE task SET {k} = ? WHERE id = ?", (v, tid))
             if fields.get("subject") is not None:
                 self.rename_refs(db, "task", tid, t["subject"], fields["subject"])
+            if new is not None:
+                if fields.get("status") != "dropped" or new == tid or self.get(db, "task", new)["status"] != "open":
+                    raise FormatError(f"--replaced-by: an open task other than {tid}, when dropping it")
+                self.move_prerequisites(db, tid, new)
 
     def task_pending_decision(self, tid, did):
         with self.connect(write=True) as db:
@@ -1885,6 +1982,10 @@ class Project:
             ds = db.execute("SELECT d.* FROM task_decision td JOIN decision d ON d.id = td.decision_id "
                             "WHERE td.task_id = ? ORDER BY d.id", (tid,)).fetchall()
             runs = db.execute("SELECT * FROM run WHERE task_id = ? ORDER BY id", (tid,)).fetchall()
+            requires = db.execute("SELECT t.id, t.status, t.subject FROM task_prerequisite_tasks r JOIN task t "
+                                  "ON t.id = r.prerequisite_id WHERE r.task_id = ? ORDER BY t.id", (tid,)).fetchall()
+            required_by = db.execute("SELECT t.id, t.status, t.subject FROM task_prerequisite_tasks r JOIN task t "
+                                     "ON t.id = r.task_id WHERE r.prerequisite_id = ? ORDER BY t.id", (tid,)).fetchall()
             last_waiting = {r[0] for r in db.execute(
                 "SELECT d.id FROM task_decision td JOIN decision d ON d.id = td.decision_id WHERE td.task_id = ? "
                 "AND d.status = 'answered' AND d.signoff IS NULL AND d.kind = 'rule' AND NOT EXISTS (SELECT 1 FROM "
@@ -1915,6 +2016,9 @@ class Project:
         if t["note"]:
             out.append(f"note: {t['note']}")
         out += [t["body"], ""]
+        for title, xs in (("Requires (runs once they are done)", requires), ("Required by", required_by)):
+            if xs:
+                out += [f"{title}:"] + [f"  task {x['id']} [{x['status']}] {x['subject']}" for x in xs] + [""]
         for d in ds:
             said = d["answer"] or d["reason"] or ""
             out.append(f"Decision {d['id']} ({d['status']}{', sign-off' if d['signoff'] else ''}): {d['subject']}"
@@ -1990,7 +2094,8 @@ class Project:
     def worktree_lines(self):
         """For workers: the work trees and what belongs in each."""
         return ("Work trees: every task but planning and cleanup runs in one; `pm task add` needs `--worktree <name>`, "
-                "by what the task is about. A task's priority orders it only among the tasks of its work tree.\n"
+                "by what the task is about. A task's priority orders it only among the tasks of its work tree, and only "
+                "as a hint; a task that needs another's result requires it (`--requires`), in any work tree.\n"
                 + "\n".join(f"  {k}: {v.strip()}" for k, v in self.config["worktrees"].items()))
 
     def picks_model(self):
@@ -2471,14 +2576,16 @@ class Project:
             blocked = [str(r[0]) for r in db.execute(
                 "SELECT d.id FROM task_decision td JOIN decision d ON d.id = td.decision_id "
                 "WHERE td.task_id = ? AND d.status = 'pending' ORDER BY d.id", (tid,))]
+            unmet = self.unmet(db, tid)
         if t["status"] != "open":
             result = "done", t["status"] + (f": {t['note']}" if t["note"] else "") + (
                 f" ({exit_text(code)} after closing it, everything staged)" if code else "")
-        elif blocked:
-            result = "blocked", "waits for decision(s) " + ", ".join(blocked)
+        elif blocked or unmet:
+            result = "blocked", "waits for " + "; ".join(
+                ([f"decision(s) {', '.join(blocked)}"] if blocked else []) + ([f"task(s) {', '.join(map(str, unmet))}"] if unmet else []))
         else:
             return self.failed(tid, rid, "exit 0, but the task is still open and not blocked", code, info, started, log,
-                               cause=f"the worker ended without `pm task done|drop {tid}` or a pending decision"
+                               cause=f"the worker ended without `pm task done|drop {tid}`, a pending decision or a prerequisite task"
                                + (f"; its last message: {info['last_text'].splitlines()[-1][:200]}"
                                   if info.get("last_text") else ""))
         if t["status"] == "done" and (missing := self.planning_missing(t, before)):
@@ -2898,6 +3005,9 @@ class Project:
         limit = 1 if once else self.config["max_parallel"]
         seen, holds = set(), self.planning_holds(q)
         trunk_dirty = "" not in running and self.dirty()   # planning tasks run in the trunk
+        for tid, dropped in self.stuck().items():
+            self.say_once(f"task {tid} waits for dropped task(s) {', '.join(map(str, dropped))}: `pm task redo <id>`, "
+                          f"`pm task requires {tid} --remove <id>` or `pm task drop {tid}`")
         for _, tid, _, kind, index, tree in q:
             if index != q[0][4] or len(running) >= limit:
                 break
@@ -2907,6 +3017,10 @@ class Project:
             if tid in holds:
                 self.say_once(f"task {tid} waits for task {holds[tid]}, which plans above it and may rewrite it"
                               + (", and which waits for the trunk's uncommitted changes" if trunk_dirty else ""))
+                continue
+            if unmerged := self.unmerged_prerequisites(tid, tree):
+                self.say_once(f"task {tid} waits until the work of task(s) {', '.join(map(str, unmerged))} is merged "
+                              "into the trunk")
                 continue
             seen.add(tree)
             if tree in running:
@@ -2946,6 +3060,23 @@ class Project:
             running[tree] = thread, tid
             thread.start()
         return 0
+
+    def unmerged_prerequisites(self, tid, tree):
+        """Task tid's done prerequisite tasks of other work trees whose commit isn't in the trunk yet."""
+        out = []
+        for r in self.rows("SELECT q.id, q.worktree FROM task_prerequisite_tasks r JOIN task q ON q.id = r.prerequisite_id "
+                           "WHERE r.task_id = ? AND q.status = 'done' AND q.worktree IS NOT NULL AND q.worktree <> ? "
+                           "ORDER BY q.id", tid, tree):
+            if r["id"] in self.merged:
+                continue
+            log = subprocess.run(["git", "log", "-1", "--format=%H", f"--grep=^task {r['id']}: ",
+                                  f"refs/heads/{WORKTREE_BRANCH}{r['worktree']}", "--not", "HEAD"],
+                                 cwd=self.root, capture_output=True, text=True)
+            if log.returncode or not log.stdout.strip():
+                self.merged.add(r["id"])
+            else:
+                out.append(r["id"])
+        return out
 
     def planning_holds(self, q):
         """{task id: planning task id} for the queued tasks (q) that a queued masterplan, split or revise task of their
@@ -3022,8 +3153,8 @@ class Project:
             return self.get(db, "task", tid)["kind"]
 
     def investigate(self, tid, summary):
-        """Queue the investigation of failed task tid: in its plan, above it, so it and the fixes it adds (one below
-        it) run before task tid again. Returns its id; None after MAX_INVESTIGATIONS of the task, so it can't loop."""
+        """Queue the investigation of failed task tid: in its plan, a prerequisite of it, so it and the fixes it adds
+        (prerequisites too) run before task tid again. Returns its id; None after MAX_INVESTIGATIONS of the task, so it can't loop."""
         with self.connect(write=True) as db:
             t = self.get(db, "task", tid)
             p = self.get(db, "plan", t["plan_id"])
@@ -3042,6 +3173,7 @@ class Project:
                              "VALUES (?, ?, 'investigate', ?, ?, ?, ?)",
                              (t["plan_id"], INVESTIGATE_SUBJECT.format(ref("task", tid, t["subject"])), prio + 2, body,
                               creator(), t["worktree"])).lastrowid
+            self.link_prerequisite(db, tid, iid)
         self.commit_db(f"task {tid} failed: task {iid} investigates")
         return iid
 
@@ -3086,7 +3218,7 @@ class Project:
 
     def task_redo(self, tid):
         """A new open task like dropped task tid (plan, subject, body, kind, priority, web, model, work tree), with the
-        stashes its runs left. Returns its id."""
+        stashes its runs left and its prerequisite links, both ways. Returns its id."""
         human_only("redo a task")
         with self.connect(write=True) as db:
             t = self.get(db, "task", tid)
@@ -3100,6 +3232,7 @@ class Project:
                              "worktree) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                              (t["plan_id"], t["subject"], t["kind"], t["priority"], t["body"], creator(), t["web"],
                               t["model"], t["worktree"])).lastrowid
+            self.move_prerequisites(db, tid, new)
         with STASH_LOCK:
             for _, sha in reversed(self.task_stashes(tid)):   # a stash's message is its commit's: a copy, renamed
                 with contextlib.suppress(subprocess.CalledProcessError):
@@ -3149,6 +3282,13 @@ class Project:
                      f"{m['closed']}/{m['tasks']} tasks closed, {m['runs']} run(s) ({m['failed']} failed), "
                      f"${m['cost']:.2f}")
         self.print_queue(limit=10)
+        waiting = self.rows("SELECT DISTINCT r.task_id FROM task_prerequisite_tasks r JOIN task t ON t.id = r.task_id "
+                            "JOIN task q ON q.id = r.prerequisite_id WHERE t.status = 'open' AND q.status <> 'done'")
+        if waiting:
+            stuck = self.stuck()
+            self.say(f"\nWaiting for prerequisite tasks: {len(waiting)}" + (
+                f"; for dropped ones, for good: " + ", ".join(f"task {t} ({', '.join(map(str, ps))})" for t, ps in stuck.items())
+                if stuck else ""))
         pending = self.pending()
         self.say(f"\nPending decisions ({len(pending)}):")
         for d in pending:
@@ -3294,10 +3434,19 @@ def main(argv=None):
     a.add_argument("--web", action="store_true", help="its worker gets WebSearch and WebFetch (sign-off: web)")
     a.add_argument("--model", type=model_arg, help=MODEL_HELP)
     a.add_argument("--worktree", type=worktree_arg, help="required, but not with --exec: " + WORKTREE_HELP)
+    a.add_argument("--requires", type=int, action="append", default=[], metavar="TASK",
+                   help="repeat; it runs only once these tasks are done, whatever the priorities")
     for verb, text in [("done", "note: date, files or commit"), ("drop", "reason")]:
         x = t.add_parser(verb)
         x.add_argument("task", type=int)
         x.add_argument("note", help=text)
+    x.add_argument("--replaced-by", type=int, metavar="TASK", help="this open task takes over what it requires and "
+                   "the tasks that require it")
+    tr = t.add_parser("requires", help="the task runs only once these tasks are done, whatever the priorities; "
+                      "open tasks; a running one only by its own worker, whose run then ends blocked")
+    tr.add_argument("task", type=int)
+    tr.add_argument("prerequisites", type=int, nargs="*", metavar="TASK")
+    tr.add_argument("--remove", type=int, action="append", default=[], metavar="TASK", help="repeat; no longer")
     t.add_parser("redo", help="a dropped task again: a new open task like it, with its stashed leftovers; prints "
                  "its id").add_argument("task", type=int)
     ts = t.add_parser("set", help="change an open task that isn't running: subject, body, priority, web, model, "
@@ -3478,7 +3627,7 @@ def main(argv=None):
                 if not (entry := pm.subject_and_body("task", subject)):
                     print("pm: aborted, no task added")
                     return 1
-                tid = pm.task_add(plan, *entry, args.priority, kind, args.web, args.model, args.worktree)
+                tid = pm.task_add(plan, *entry, args.priority, kind, args.web, args.model, args.worktree, args.requires)
                 print(tid)
                 msg = f"task {tid} added: {entry[0]}"
             elif args.action == "redo":
@@ -3486,8 +3635,16 @@ def main(argv=None):
                 print(tid)
                 msg = f"task {tid}: task {args.task} again"
             elif args.action in ("done", "drop"):
-                pm.task_set(args.task, status="done" if args.action == "done" else "dropped", note=args.note)
-                msg = f"task {args.task} {args.action}"
+                new = getattr(args, "replaced_by", None)
+                pm.task_set(args.task, status="done" if args.action == "done" else "dropped", note=args.note,
+                            **({"replaced_by": new} if new is not None else {}))
+                msg = f"task {args.task} {args.action}" + (f", replaced by task {new}" if new is not None else "")
+            elif args.action == "requires":
+                if not args.prerequisites and not args.remove:
+                    raise FormatError("name the tasks it requires, or --remove <task>")
+                pm.task_requires(args.task, args.prerequisites, args.remove)
+                msg = "; ".join([*([f"task {args.task} requires {', '.join(map(str, args.prerequisites))}"] if args.prerequisites else []),
+                                 *([f"task {args.task} no longer requires {', '.join(map(str, args.remove))}"] if args.remove else [])])
             elif args.action == "set":
                 fields = {k: v.strip() for k in ("subject", "body") if (v := getattr(args, k)) is not None}
                 if "priority" in args:

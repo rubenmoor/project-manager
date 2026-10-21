@@ -57,7 +57,11 @@ plan for one part.
 plan_tasks_prompt = '''
 Split {plan} into tasks and identify all decisions that need to be made. If the plan already has tasks, its
 done and dropped ones stay as they are (pm refuses to change them): drop the open ones that no longer fit and add
-tasks for what the plan asks beyond them. A task that writes a plan gets `--kind plan`.
+tasks for what the plan asks beyond them. A task that writes a plan gets `--kind plan`. A task that needs another
+task's result (in this plan or another, in any work tree) requires it: `pm task add … --requires <task id>`, or
+`pm task requires <task id> <prerequisite id>` for an existing one; priority is only a hint and orders nothing across
+work trees. When you drop an open task that others require and add one in its place, drop it with
+`--replaced-by <new task id>`.
 '''
 
 # The task a changed milestone queues in its masterplan (pm refuses the change once every plan of the milestone is
@@ -90,12 +94,13 @@ After {milestone}, for the whole project:
 
 # Body of the task pm queues when a task fails (kind investigate), above the failed task; the failure's summary
 # follows. {task}: the failed task; {task_id}, {plan_id}; {fix_priority}: between the investigation and the failed task.
+# The failed task requires the investigation: it runs only once that is done.
 investigate_prompt = '''
 {task} failed in `pm run`; its summary is below. Find out why, don't redo its work:
 * read its log, `pm show {task_id}`, and the stashes it left (`git stash show -p --include-untracked <sha>`); don't apply or drop them, task {task_id}'s next run gets them
 * rerun the failing command or script to see the error yourself; find the cause in the code, not only the symptom
 Then, by what you find:
-* a bug in a script, test, tool or config of the project: add a task that fixes it, `pm task add {plan_id} "<subject>" --priority {fix_priority}`, with the cause, where it is and how to check the fix; it runs before task {task_id} does again
+* a bug in a script, test, tool or config of the project: add a task that fixes it, `pm task add {plan_id} "<subject>" --priority {fix_priority}`, with the cause, where it is and how to check the fix, then `pm task requires {task_id} <fix task id>`, so it runs before task {task_id} does again
 * task {task_id} itself is wrong or out of date: change it (`pm task set {task_id} --body …`) or drop it (`pm task drop {task_id} "<reason>"`)
 * it needs the human: `pm decision add` with what you found and the options, then `pm task-pending-decision {task_id} <decision>`
 * nothing to fix (a passing outage): say so; task {task_id} runs again as it is
@@ -213,9 +218,10 @@ Plan priority (higher runs first). Give every new plan (not the masterplan) the 
    300  visual design
    200  media and assets
 
-If the new plan must clearly run before or after one of the listed plans, pick a priority that puts it there
+If the new plan should rather run before or after one of the listed plans, pick a priority that puts it there
 instead, e.g. 100 above or below that plan's; stay below 1000, the priority of planning work. Set it with
-`pm plan add … --priority N` or `pm plan edit <plan> --priority N`.
+`pm plan add … --priority N` or `pm plan edit <plan> --priority N`. Priority is a hint: where a task can't start
+before another is done, its tasks require that one (`pm task add … --requires <task id>`).
 '''
 
 # Appended to every worker's prompt and to `pm instructions`. Empty: nothing.
@@ -223,7 +229,9 @@ task_priority_prompt = '''
 Task priority: leave it out, so the task gets its plan's priority, unless there is a good reason for it to run
 earlier or later than the order you add the tasks in. Then use the plan's priority (`pm show`) plus or minus a
 multiple of 10, e.g. `--priority 710` or `--priority 690` in a plan with priority 700, so priorities can be fine-tuned
-later.
+later. Priority is only a hint for what goes first, and orders nothing across work trees: a task that needs
+another's result must require it (`pm task add … --requires <task id>`, `pm task requires <task id> <prerequisite
+id>`); pm runs it only once that one is done, and its work is merged into the trunk.
 '''
 
 # Claude model per task kind, passed as `claude --model`. A task's own model (`pm task add|set --model`) comes first;

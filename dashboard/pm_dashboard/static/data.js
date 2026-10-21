@@ -41,6 +41,12 @@ export function index(state) {
   d.runsOf = group(t.run, (r) => r.task_id);
   d.decisionsOf = group(t.task_decision, (l) => l.task_id, (l) => d.decision.get(l.decision_id));
   d.tasksWaiting = group(t.task_decision, (l) => l.decision_id, (l) => d.task.get(l.task_id));
+  // Prerequisite tasks (task_prerequisite_tasks): what a task requires, and the tasks that require it.
+  const pre = t.task_prerequisite_tasks || [];
+  d.requires = group(pre, (l) => l.task_id, (l) => d.task.get(l.prerequisite_id));
+  d.requiredBy = group(pre, (l) => l.prerequisite_id, (l) => d.task.get(l.task_id));
+  d.unmet = (task) => (d.requires.get(task.id) || []).filter((x) => x.status !== "done");
+  d.stuck = (task) => task.status === "open" && d.unmet(task).some((x) => x.status === "dropped");
   // Supersede links: decision id → [{ id, note }] of the decisions it replaces, and of those replacing it.
   const sup = t.decision_supersedes || [];
   d.supersedes = group(sup, (l) => l.decision_id, (l) => ({ id: l.superseded_id, note: l.note }));
@@ -63,7 +69,9 @@ export function index(state) {
     const m = d.milestoneOfTask(task);
     if (m && m.status !== "open") return `milestone ${m.id} is ${m.status.replace("-", " ")}`;
     const b = d.blockers(task);
-    return b.length ? b : null;
+    if (b.length) return b;
+    const u = d.unmet(task);
+    return u.length ? `waits for ${u.map((x) => `task ${x.id}${x.status === "dropped" ? " (dropped)" : ""}`).join(", ")}` : null;
   };
   // Pending decisions by what answering them frees: alone = open tasks it is the only pending blocker of; waiting = all
   // open tasks it blocks. Most freed first.
