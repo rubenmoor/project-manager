@@ -32,7 +32,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 85  # bump by one with every commit (AGENTS.md)
+VERSION = 86  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions"
@@ -1650,15 +1650,16 @@ class Project:
             self.get(db, table, rid)
 
     def subject_and_body(self, what, subject):
-        """For `pm <what> add`: piped, the body from stdin (a subject required); on a terminal, both from the
-        editor (first line: subject, prefilled if given; the rest: body). None if the editor was quit without
-        saving or saved empty."""
-        if not sys.stdin.isatty():
-            if subject is None:
-                raise FormatError(f"`pm {what} add` without a subject needs a terminal; give the subject and pipe "
-                                  "the body")
+        """For `pm <what> add`: with a subject, the body from stdin; without, both from the editor (first
+        line: subject, the rest: body). None if the editor was quit without saving or saved empty."""
+        if subject is not None:
+            if sys.stdin.isatty():
+                print(f"pm: the body of the {what}, then Ctrl-D (or pipe it: … < body.md):", file=sys.stderr)
             return subject, sys.stdin.read()
-        text = self.edit(f"PM_{what.upper()}", f"{subject}\n\n" if subject is not None else "")
+        if not sys.stdin.isatty():
+            raise FormatError(f"`pm {what} add` without a subject needs a terminal; give the subject and pipe the "
+                              "body")
+        text = self.edit(f"PM_{what.upper()}")
         if text is None or not text.strip():
             return None
         subject, _, body = text.strip().partition("\n")
