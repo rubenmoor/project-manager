@@ -14,7 +14,21 @@ In the project's git repository (the one with `project-manager.toml`):
   - open tabs reload on a new pm version, once no editor has focus
 - `pipx install .` (pm) then `pipx inject pm ./dashboard --include-apps`
 - from a checkout: `PYTHONPATH=<repo>:<repo>/dashboard python3 -m pm_dashboard`
-- options: `--root <repo>`, `--port 8642`; serves `http://127.0.0.1:8642/` only; port taken: tries the next, up to 20, prints the URL used
+- options: `pm-dashboard [repo …] [--port 8642]`; serves `http://127.0.0.1:8642/` only; port taken: tries the next, up to 20, prints the URL used
+
+## Projects
+One dashboard shows several independent pm projects, each in its own git repository.
+
+- the repositories given on the command line (none: the one around the current directory), then the saved ones
+- a project's pages at `/p/<name>/` (name: folder name; on a clash `<parent>-<name>`); `/` opens the first; old `/#/…` links land there
+- switcher: click the project name in the top bar; per project a running dot, pending decisions, errors; on the button the other projects' running dot and pending decisions
+  - "Add project": a path in or below a git repository with `project-manager.toml`; watched at once, saved in `~/.config/pm-dashboard/projects` (`$XDG_CONFIG_HOME`)
+  - ×: off the dashboard (and the saved list); the folder stays as it is
+  - no project: the start page asks for one
+- a project that can't load (e.g. a config error) shows its error and is tried again every 5 s; the others keep working
+- one event stream for all projects; full state only for the project shown
+- usage line and burn clock: account-wide, from every project's worker logs; tokens and cost in it: the shown project's workers
+- notifications from every project, the project's name in the title; a click opens it
 
 ## Views
 - Every page: a yellow banner while the trunk has uncommitted changes and no trunk task runs: the trunk's next task can't start, nor the tasks it may rewrite; tasks held by a planning task show "waits for tN" (queue tag, task page)
@@ -54,7 +68,7 @@ In the project's git repository (the one with `project-manager.toml`):
 - Status line (bottom): Claude account usage of the 5-hour window and the week (%, reset time), tokens and cost of pm's workers in each window; a marker in each bar shows how much of the window has passed: bar green while usage is behind it (budget left at the reset), orange once ahead (runs out before the reset)
   - Burn-rate clock next to the week's %: weekly utilization gained over the last hour (rate_limit_events in the worker logs), per hour; green and still up to 1/168 per hour (what lasts the week), ticking yellow up to twice that, orange above
 - Milestone implemented: a message with fireworks (no sound), shown once the tab is visible again; stays until "Yay!"; remembered per project in the browser
-- Notifications (`notify` in the top bar): a new pending decision, a failed run, `pm run` stopped or done
+- Notifications (`notify` in the top bar), from every project: a new pending decision, a failed run, `pm run` stopped or done
 - Ids: every task, plan and milestone shown with its id first (`t12`, `p3`, `m1`), as workers and Claude refer to them
 - Search: a number finds that id
 

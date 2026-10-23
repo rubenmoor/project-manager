@@ -14,7 +14,7 @@ export const autofocus = (el) => {
 };
 
 export async function post(op) {
-  const r = await fetch("/api/edit", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(op) });
+  const r = await fetch("api/edit", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(op) });
   const j = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
   if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
   return j;

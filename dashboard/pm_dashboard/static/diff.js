@@ -28,7 +28,7 @@ export function useCommit(task, version) {
   useEffect(() => {
     let gone = false;
     setC(null);
-    fetch(`/api/task/${task.id}/commit`).then((r) => r.json()).then((j) => !gone && setC(j));
+    fetch(`api/task/${task.id}/commit`).then((r) => r.json()).then((j) => !gone && setC(j));
     return () => { gone = true; };
   }, [task.id, version]);
   return c;

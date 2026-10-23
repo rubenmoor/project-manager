@@ -9,6 +9,7 @@ import { Tasks } from "/tasks.js";
 import { useNotifications, NotifyButton } from "/notify.js";
 import { UsageLine } from "/usage.js";
 import { Celebrate } from "/celebrate.js";
+import { PROJECT, Switcher, NoProject } from "/projects.js";
 
 function route() {
   const [path, query] = location.hash.replace(/^#/, "").split("?");
@@ -23,23 +24,33 @@ function reloadWhenIdle() {
   setTimeout(reloadWhenIdle, 1000);
 }
 
-// /api/state, refetched whenever the server's event stream says something changed.
+// The project's api/state, refetched whenever the server's event stream says something changed; every project's summary.
 function useState2() {
   const [state, setState] = useState(null);
   const [log, setLog] = useState(null);
+  const [projects, setProjects] = useState(null);
   const [online, setOnline] = useState(true);
   useEffect(() => {
     let version = null, pmVersion = null, inflight = false, again = false;
     const load = () => {
+      if (!PROJECT) return;
       if (inflight) { again = true; return; }
       inflight = true;
-      fetch("/api/state").then((r) => r.json()).then(setState).catch(() => setOnline(false)).finally(() => {
+      fetch("api/state").then((r) => r.json()).then(setState).catch(() => setOnline(false)).finally(() => {
         inflight = false;
         if (again) { again = false; load(); }
       });
     };
     load();
-    const es = new EventSource("/api/events");
+    const es = new EventSource(`/api/events?project=${encodeURIComponent(PROJECT || "")}`);
+    es.addEventListener("projects", (e) => {
+      const m = JSON.parse(e.data);
+      setOnline(true);
+      if (pmVersion !== null && m.pm !== pmVersion) return reloadWhenIdle();
+      pmVersion = m.pm;
+      setProjects(m.projects);
+      if (PROJECT && !m.projects.some((p) => p.name === PROJECT)) location.href = "/";   // removed
+    });
     es.addEventListener("state", (e) => {
       const m = JSON.parse(e.data);
       setOnline(true);
@@ -52,7 +63,7 @@ function useState2() {
     es.onopen = () => setOnline(true);
     return () => es.close();
   }, []);
-  return { state, log, online };
+  return { state, log, projects, online };
 }
 
 const NAV = [["live", "Live"], ["overview", "Overview"], ["queue", "Queue"], ["tasks", "Tasks"], ["milestones", "Milestones"],
@@ -99,7 +110,7 @@ function Theme() {
 }
 
 function App() {
-  const { state, log, online } = useState2();
+  const { state, log, projects, online } = useState2();
   const [r0, setR] = useState(route());
   let r = r0;
   useEffect(() => {
@@ -109,7 +120,7 @@ function App() {
   }, []);
   const shown = state && (state.tables ? state : state.last_good);
   const d = useMemo(() => (shown ? index({ ...shown, __log: log }) : null), [shown, log]);
-  useNotifications(d);
+  useNotifications(projects);
   // The home page: the run view while pm runs (or ran in the last 5 minutes), else the overview; chosen on arrival.
   const [home, setHome] = useState(null);
   useEffect(() => {
@@ -123,17 +134,20 @@ function App() {
   const pending = d ? d.decisions.filter((x) => x.status === "pending").length : 0;
   const View = { added: MilestoneAdded, live: Live, reports: Reports, summary: Reports, tasks: Tasks, overview: Overview, queue: Queue, milestones: Milestones, milestone: Milestone, plan: Plan, task: Task,
     decisions: Decisions, decision: Decision, runs: Runs }[r.page];
-  const root = state ? state.root.split("/").pop() : "";
+  const root = PROJECT || "";
   useEffect(() => { document.title = root ? `${root} - PM Dashboard` : "PM Dashboard"; }, [root]);
+  if (!PROJECT) return html`<div class="app"><header class="top">
+      <span class="conn ${online ? "" : "off"}"></span><span class="brand">pm</span><span class="grow"></span><${Theme} /></header>
+    <main class="main"><${NoProject} /></main></div>`;
   return html`<div class="app">
     <header class="top">
       <span class="conn ${online ? "" : "off"}" title=${online ? "live" : "disconnected from pm-dashboard"}></span>
-      <span class="brand">pm<small>${root}</small></span>
+      <${Switcher} projects=${projects} current=${root} />
       ${d ? d.runningAll.map((r) => html`<a class="running" href=${`#/task/${r.task_id}?log`}><${Pill} status="running" label=${`task ${r.task_id}`} />
         ${r.worktree ? html`<${Worktree} name=${r.worktree} /> ` : null}<${Elapsed} start=${r.started_at} /></a>`) : null}
       <span class="grow head">${state && state.head ? html`<span class="mono">${state.head.commit.slice(0, 7)}</span> ${state.head.subject}
         <span class="muted"> · <${Time} ts=${state.head.date} /></span>` : null}
-        ${state && state.dirty.length ? html` <span class="tag" title=${state.dirty.join("\n")}>${state.dirty.length} uncommitted</span>` : null}</span>
+        ${state && state.dirty && state.dirty.length ? html` <span class="tag" title=${state.dirty.join("\n")}>${state.dirty.length} uncommitted</span>` : null}</span>
       <${Search} d=${d} />
       <${NotifyButton} />
       <${Theme} />

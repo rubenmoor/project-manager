@@ -304,7 +304,7 @@ export function Log({ d, t, live, run = null, reveal = false }) {
     const load = () => {
       const gen = s.gen;
       s.busy = true;
-      fetch(`/api/log/${t.id}?from=${s.next}${run != null ? `&run=${run}` : ""}`).then((r) => r.json()).then((j) => {
+      fetch(`api/log/${t.id}?from=${s.next}${run != null ? `&run=${run}` : ""}`).then((r) => r.json()).then((j) => {
         if (f.current.gen !== gen) return;
         const b = box.current;
         stick.current = !b || b.scrollHeight - b.scrollTop - b.clientHeight < 40;
