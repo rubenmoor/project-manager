@@ -42,9 +42,11 @@ function useMoves(root, reset) {
     };
     const now = new Map([...root.current.querySelectorAll("[data-task][data-zone]")].map((el) => {
       const rect = el.getBoundingClientRect(), [p, pi] = pane(el);
+      // A slide still running: its offset isn't part of the place, else every render restarts it.
+      const ty = el.getAnimations().length ? new DOMMatrix(getComputedStyle(el).transform).m42 : 0;
       // Its place in the pane's content, so scrolling isn't a move; the queue is bottom-aligned: from the end.
-      const y = rect.top - pi.box.top + pi.scroll;
-      return [el.dataset.task, { el, zone: el.dataset.zone, rect, pane: p, y: el.dataset.zone === "queue" ? y - pi.sh : y }];
+      const y = rect.top - ty - pi.box.top + pi.scroll;
+      return [el.dataset.task, { el, zone: el.dataset.zone, rect, ty, pane: p, y: el.dataset.zone === "queue" ? y - pi.sh : y }];
     }));
     const old = prev.current;
     prev.current = { now, reset };
@@ -58,7 +60,7 @@ function useMoves(root, reset) {
       if (!o) { if (seen) flash(n.el, n.zone === "retired" && n.el.classList.contains("st-done") ? "just-done" : "just-added"); continue; }
       if (o.zone === n.zone) {
         const dy = o.y - n.y;
-        if (dy && seen) n.el.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], { duration: 400, easing: "ease-out" });
+        if (dy && seen) n.el.animate([{ transform: `translateY(${dy + n.ty}px)` }, { transform: "none" }], { duration: 400, easing: "ease-out" });
         continue;
       }
       if (!seen) continue;
