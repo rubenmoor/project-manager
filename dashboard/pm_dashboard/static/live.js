@@ -27,8 +27,42 @@ function useHeight(ref) {
   return h;
 }
 
-function Item({ id, sel, select, cls = "", children }) {
-  return html`<div class=${`tl-item ${cls}${sel === id ? " sel" : ""}`} role="button" tabindex="0" data-task=${id}
+// A task that changed place (running → done, next → running): a ghost box morphs from its old place to its new one;
+// done rows already shown slide down to make room. Nothing on the first render or with reduced motion.
+function useMoves(root) {
+  const prev = useRef(null);
+  useLayoutEffect(() => {
+    const els = [...root.current.querySelectorAll("[data-task][data-zone]")];
+    const now = new Map(els.map((el) => [el.dataset.task, { el, zone: el.dataset.zone, rect: el.getBoundingClientRect() }]));
+    const old = prev.current;
+    prev.current = now;
+    if (!old || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    let pushed = false;
+    for (const [id, n] of now) {
+      const o = old.get(id);
+      if (!o || o.zone === n.zone) continue;
+      const pane = n.el.closest(".tl-pane, .tl-current").getBoundingClientRect();
+      if (n.rect.bottom < pane.top || n.rect.top > pane.bottom) continue;
+      if (n.zone === "retired") pushed = true;
+      const ghost = document.createElement("div");
+      ghost.className = "tl-ghost";
+      document.body.append(ghost);
+      const box = (r) => ({ left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
+      ghost.animate([{ ...box(o.rect), opacity: 1 }, { ...box(n.rect), opacity: 0.9, offset: 0.8 }, { ...box(n.rect), opacity: 0 }],
+        { duration: 500, easing: "cubic-bezier(.3,.7,.3,1)" }).finished.then(() => ghost.remove(), () => ghost.remove());
+      n.el.animate([{ opacity: 0 }, { opacity: 0, offset: 0.6 }, { opacity: 1 }], { duration: 500 });
+      if (n.zone === "retired") { n.el.classList.add("just-done"); n.el.addEventListener("animationend", () => n.el.classList.remove("just-done"), { once: true }); }
+    }
+    if (pushed) for (const [id, n] of now) {
+      const o = old.get(id);
+      if (o && o.zone === "retired" && n.zone === "retired" && o.rect.top !== n.rect.top)
+        n.el.animate([{ transform: `translateY(${o.rect.top - n.rect.top}px)` }, { transform: "none" }], { duration: 400, easing: "ease-out" });
+    }
+  });
+}
+
+function Item({ id, sel, select, cls = "", zone, children }) {
+  return html`<div class=${`tl-item ${cls}${sel === id ? " sel" : ""}`} role="button" tabindex="0" data-task=${id} data-zone=${zone}
     onClick=${() => select(id)} onKeyDown=${(e) => e.key === "Enter" && select(id)}>${children}</div>`;
 }
 
@@ -75,27 +109,29 @@ export function Live({ d }) {
     atEnd.current = key;
     qbox.current.scrollTop = qbox.current.scrollHeight;
   }, [H, currents.map((x) => x.t.id).join(","), showBlocked]);
+  const tl = useRef(null);
+  useMoves(tl);
   const selTask = sel != null ? d.task.get(sel) : null;
   return html`<div class="live">
-    <div class="tl">
+    <div class="tl" ref=${tl}>
       <div class="tl-head"><span class="tl-label">queue, next nearest${showBlocked && blocked.length ? "; blocked where they would queue" : ""}</span>
         <label class="tl-toggle"><input type="checkbox" checked=${showBlocked} onChange=${(e) => toggleBlocked(e.target.checked)} />
           blocked${blocked.length ? html` <span class="muted num">(${blocked.length})</span>` : null}</label></div>
       <div class="tl-pane" ref=${qbox}><div class="tl-end">${queue.length ? null : html`<div class="tl-label">The queue is empty.</div>`}
         ${queue.map((t) => {
           const q = qpos.get(t.id);
-          if (q == null) return html`<${Item} id=${t.id} sel=${sel} select=${setPicked} cls="blocked">
+          if (q == null) return html`<${Item} key=${t.id} id=${t.id} sel=${sel} select=${setPicked} cls="blocked" zone="queue">
             <span class="tl-pos num" title="waits for a pending decision or a prerequisite task">—</span>
             <span class="tl-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} /> <${Worktree} name=${t.worktree} />
               <span class=${`tag waits${d.stuck(t) ? " stuck" : ""}`}>waits for ${[...d.blockers(t).map((x) => `d${x.id}`), ...d.unmet(t).map((x) => `t${x.id}${x.status === "dropped" ? " (dropped)" : ""}`)].join(", ")}</span></span><${Prio} p=${d.prio(t)} /></${Item}>`;
-          return html`<${Item} id=${t.id} sel=${sel} select=${setPicked}>
+          return html`<${Item} key=${t.id} id=${t.id} sel=${sel} select=${setPicked} zone="queue">
             <span class="tl-pos num">${q === 1 ? "next" : `#${q}`}</span>
             <span class="tl-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} /> <${Worktree} name=${t.worktree} />${failedLast(t) ? html` <${Pill} status="failed" />` : null}${d.waitsFor(t) ? html` <span class="tag waits" title=${d.waitsFor(t)}>${d.holds.has(t.id) ? `waits for t${d.holds.get(t.id)}` : "waits: uncommitted"}</span>` : null}</span><${Prio} p=${d.prio(t)} /></${Item}>`;
         })}</div></div>
       <div class="tl-current">
         ${now.length ? now.map(({ r, t, wrapping }) => wrapping ? html`<div class="tl-idle tl-busy"><span class="spinner"></span><div>
             <div class="sub">${wrapText(t).text} <${Worktree} name=${r.worktree} /></div><div class="muted">${wrapText(t).sub}</div></div></div>`
-          : html`<${Item} id=${t.id} sel=${sel} select=${setPicked} cls="now">
+          : html`<${Item} key=${t.id} id=${t.id} sel=${sel} select=${setPicked} cls="now" zone="now">
             <div class="grow"><div class="row"><${Pill} status="running" /><span class="sub">task ${t.id} · <${Elapsed} start=${r.started_at} /></span><${Worktree} name=${r.worktree} /></div>
             <div class="tl-current-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} /></div>
             <div class="muted">${t.plan_id != null ? html`<${Named} kind="plan" r=${d.plan.get(t.plan_id)} /> · <${Named} kind="milestone" r=${d.milestoneOfTask(t)} />` : "executive intervention"}</div>
@@ -113,7 +149,7 @@ export function Live({ d }) {
       <div class="tl-pane">${retired.length ? html`<div class="tl-label">done and dropped, newest first</div>` : null}
         ${retired.map((t) => {
           const runs = d.taskRuns(t);
-          return html`<${Item} id=${t.id} sel=${sel} select=${setPicked} cls="retired"><${Pill} status=${t.status} />
+          return html`<${Item} key=${t.id} id=${t.id} sel=${sel} select=${setPicked} cls="retired" zone="retired"><${Pill} status=${t.status} />
             <span class="tl-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} /> <${Worktree} name=${t.worktree} /></span>
             <span class="muted num" style="white-space:nowrap">${runs.length ? usd(d.cost(runs)) + " · " : ""}<${Time} ts=${t.retired_at} /></span></${Item}>`;
         })}</div>
