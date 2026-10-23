@@ -3,7 +3,7 @@
 Agents run these only for the human, in the human's own session.
 
 ```sh
-pm init              # once per project: project-manager.toml, committed
+pm init              # once per project: project-manager.toml (+ AGENTS.md, CLAUDE.md if neither exists), committed
 pm run               # work the queue until it is empty, Claude needs the human or the tree is dirty
 pm run --once        # one task;  --dry-run: print the next worker command
 pm stop              # the running `pm run` stops after its current task

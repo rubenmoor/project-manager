@@ -32,7 +32,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 87  # bump by one with every commit (AGENTS.md)
+VERSION = 88  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions"
@@ -505,24 +505,45 @@ def clock(stamp):
     return datetime.datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.timezone.utc).astimezone().strftime("%H:%M:%S")
 
 
+AGENTS_TEMPLATE = """# AGENTS.md
+
+- Milestones, plans, tasks, decisions: in `{db}`, only through `pm`; never read or edit the file.
+- Not a pm worker (`PM_TASK` unset): run `pm instructions` first.
+"""
+
+
 def init(root, out=sys.stdout):
-    """`pm init`: write project-manager.toml (the defaults) if missing and commit it. The database is created by
-    the first command that changes it."""
+    """`pm init`: write project-manager.toml (the defaults) if missing, and AGENTS.md with a CLAUDE.md that points to
+    it if neither exists; commit them. The database is created by the first command that changes it."""
     path = Path(root) / CONFIG_FILE
+    new = []
     if path.exists():
         print(f"pm: already initialized ({CONFIG_FILE})", file=out)
-        return
-    path.write_text(CONFIG_TEMPLATE, encoding="utf-8")
+    else:
+        path.write_text(CONFIG_TEMPLATE, encoding="utf-8")
+        new.append(CONFIG_FILE)
     pm = Project(root, out=out)
-    pm.ignore_db()
+    if new:
+        pm.ignore_db()
+    present = [f for f in ("AGENTS.md", "CLAUDE.md") if (Path(root) / f).exists()]
+    if present:
+        print(f"pm: {' and '.join(present)} exist{'s' if len(present) == 1 else ''}, not touched: make sure agents "
+              "outside pm run `pm instructions` and never edit the database (see pm's README)", file=out)
+    else:
+        (Path(root) / "AGENTS.md").write_text(AGENTS_TEMPLATE.format(db=pm.db), encoding="utf-8")
+        (Path(root) / "CLAUDE.md").write_text("@AGENTS.md\n", encoding="utf-8")
+        new += ["AGENTS.md", "CLAUDE.md"]
+    if not new:
+        return
     try:
-        pm.git("add", "--", CONFIG_FILE)
-        pm.git("commit", "-q", "-m", "pm: init", "--", CONFIG_FILE)
-        print(f"pm: wrote and committed {CONFIG_FILE}", file=out)
+        pm.git("add", "--", *new)
+        pm.git("commit", "-q", "-m", "pm: init", "--", *new)
+        print(f"pm: wrote and committed {', '.join(new)}", file=out)
     except subprocess.CalledProcessError as e:
-        print(f"pm: wrote {CONFIG_FILE}; committing failed: {e.stderr.strip()}", file=out)
-    print(f"pm: name the work trees in {CONFIG_FILE} ([worktrees], at least one), then check and adjust its defaults "
-          "(e.g. the database file name, the worker command)", file=out)
+        print(f"pm: wrote {', '.join(new)}; committing failed: {e.stderr.strip()}", file=out)
+    if CONFIG_FILE in new:
+        print(f"pm: name the work trees in {CONFIG_FILE} ([worktrees], at least one), then check and adjust its "
+              "defaults (e.g. the database file name, the worker command)", file=out)
 
 
 def load_config(root):
@@ -3395,7 +3416,7 @@ def main(argv=None):
     ap.add_argument("--version", action="version", version=f"pm {VERSION}, database schema {SCHEMA_VERSION}")
     ap.add_argument("--root", help="the project's git repository (default: the one around the current directory)")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name, text in [("init", f"write {CONFIG_FILE} (if missing) and commit it; the first command that changes the database writes it"),
+    for name, text in [("init", f"write {CONFIG_FILE} (if missing), AGENTS.md and CLAUDE.md (if neither exists) and commit them; the first command that changes the database writes it"),
                        ("status", "open and on-hold milestones, the queue, pending decisions"), ("queue", "the whole queue"),
                        ("validate", "check the database"),
                        ("decide", "answer pending decisions in the terminal, one by one")]:
