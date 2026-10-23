@@ -32,7 +32,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 78  # bump by one with every commit (AGENTS.md)
+VERSION = 79  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -3432,7 +3432,7 @@ def main(argv=None):
                    "leftovers stashed for `pm task redo`").add_argument("task", type=int)
 
     ms = sub.add_parser("milestone", aliases=["milestones"], help="add, change, list or show milestones").add_subparsers(dest="action", required=True)
-    ma = ms.add_parser("add", help="new open milestone; prints its id. Without a subject: write it in your editor "
+    ma = ms.add_parser("add", help="new open milestone: a goal and a list of constraints; prints its id. Without a subject: write it in your editor "
                        "(first line: subject, the rest: body); with a subject: the body is read from stdin")
     ma.add_argument("subject", nargs="?")
     ma.add_argument("--queue", type=int, default=0, help="queue index: tasks of lower ones are worked first (default 0)")

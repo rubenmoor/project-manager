@@ -17,7 +17,7 @@
 
 ## Model
 
-- **Milestone:** subject, body, status `open` | `on-hold` | `implemented` (set by pm), queue index (default 0). On hold: its tasks stay out of the queue until resumed; a running task finishes.
+- **Milestone:** a goal and a list of constraints; subject, body (free-form Markdown), status `open` | `on-hold` | `implemented` (set by pm), queue index (default 0). On hold: its tasks stay out of the queue until resumed; a running task finishes.
 - **Plan:** belongs to a milestone; subject, intro, body, priority. The milestone's first plan is its **masterplan**. A plan's parent is the plan of the task that wrote it, else the masterplan. **Done:** it has tasks, none open, and every child plan is done; the masterplan, when every plan of its milestone is.
 - **Task:** belongs to a plan (an `exec` task: none); subject, body (required while open), kind, work tree (none: the trunk, for planning, cleanup and exec tasks), status `open` | `done` | `dropped`, note (done: date and files; dropped: the reason), priority (default: the plan's, else 0), web (see "Web access"), prerequisite tasks (see "Dependencies").
 - **Task kinds:**
@@ -85,7 +85,7 @@ pm milestone set 1 [--subject …] [--body -] [--queue N]
 pm milestone hold 1 ; pm milestone resume 1
 ```
 
-A worker that finds a milestone contradictory, incomplete or out of date raises a decision; the human answers it and edits the milestone.
+A milestone defines a goal and a list of constraints: the goal in the subject and the first lines of the body, the constraints as bullet points. A worker that finds a milestone contradictory, incomplete or out of date raises a decision; the human answers it and edits the milestone.
 
 ## Plans
 

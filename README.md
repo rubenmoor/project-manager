@@ -16,7 +16,7 @@ pm run             # work the queue, then wait for new tasks; Ctrl-C: stop after
 
 ### Writing a milestone
 
-The milestone is the only text a worker gets from you; the masterplan, the plans and the tasks are derived from it. A description of what you want, and a few constraints as bullet points; no fixed structure. Leave the how to the masterplan. In the editor (`pm milestone add`):
+A milestone defines a goal and a list of constraints. It is the only text a worker gets from you; the masterplan, the plans and the tasks are derived from it. Free-form Markdown, no fixed structure: the goal in a few sentences, the constraints as bullet points. Leave the how to the masterplan. In the editor (`pm milestone add`):
 
 ```markdown
 Users can export their data as CSV
