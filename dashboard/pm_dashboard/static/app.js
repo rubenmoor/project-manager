@@ -24,7 +24,7 @@ function reloadWhenIdle() {
   setTimeout(reloadWhenIdle, 1000);
 }
 
-// The project's api/state, refetched whenever the server's event stream says something changed; every project's summary.
+// The project's api/state, refetched whenever polling says it changed; every project's summary.
 function useState2() {
   const [state, setState] = useState(null);
   const [log, setLog] = useState(null);
@@ -42,26 +42,30 @@ function useState2() {
       });
     };
     load();
-    const es = new EventSource(`/api/events?project=${encodeURIComponent(PROJECT || "")}`);
-    es.addEventListener("projects", (e) => {
-      const m = JSON.parse(e.data);
-      setOnline(true);
-      if (pmVersion !== null && m.pm !== pmVersion) return reloadWhenIdle();
-      pmVersion = m.pm;
-      setProjects(m.projects);
-      if (PROJECT && !m.projects.some((p) => p.name === PROJECT)) location.href = "/";   // removed
-    });
-    es.addEventListener("state", (e) => {
-      const m = JSON.parse(e.data);
-      setOnline(true);
-      if (pmVersion !== null && m.pm !== pmVersion) return reloadWhenIdle();
-      pmVersion = m.pm;
-      setLog(m.log);
-      if (m.version !== version) { version = m.version; load(); }
-    });
-    es.onerror = () => setOnline(false);
-    es.onopen = () => setOnline(true);
-    return () => es.close();
+    // Polled, not a held connection: browsers allow ~6 per host, and every open tab would hold one.
+    let gone = false, timer = null, polling = false, seenProjects = null, seenLog = null;
+    const poll = () => {
+      polling = true;
+      fetch(`/api/poll?project=${encodeURIComponent(PROJECT || "")}`).then((r) => r.json()).then((m) => {
+        if (gone) return;
+        setOnline(true);
+        if (pmVersion !== null && m.pm !== pmVersion) return reloadWhenIdle();
+        pmVersion = m.pm;
+        const ps = JSON.stringify(m.projects);
+        if (ps !== seenProjects) { seenProjects = ps; setProjects(m.projects); }
+        if (PROJECT && !m.projects.some((p) => p.name === PROJECT)) location.href = "/";   // removed
+        const lg = JSON.stringify(m.log);
+        if (lg !== seenLog) { seenLog = lg; setLog(m.log); }
+        if (m.version !== undefined && m.version !== version) { version = m.version; load(); }
+      }).catch(() => !gone && setOnline(false)).finally(() => {
+        polling = false;
+        if (!gone) timer = setTimeout(poll, document.hidden ? 5000 : 1000);
+      });
+    };
+    poll();
+    const wake = () => { if (!document.hidden && !polling) { clearTimeout(timer); poll(); } };
+    document.addEventListener("visibilitychange", wake);
+    return () => { gone = true; clearTimeout(timer); document.removeEventListener("visibilitychange", wake); };
   }, []);
   return { state, log, projects, online };
 }

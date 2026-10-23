@@ -9,8 +9,8 @@ at /p/<name>/, and a JSON API:
     /api/projects        every project: name, root, error, and what notifications and the switcher need
     POST /api/projects   {"op": "add", "path": …} or {"op": "remove", "name": …}
     /api/usage           the account's usage limits, from the newest rate_limit_event in every project's worker logs
-    /api/events?project=<name>  server-sent events: "state" when that project's tasks.sql, git or running log changes,
-                         "projects" when any project changes
+    /api/poll?project=<name>  polled by the client: every project's summary, and that project's state version (it
+                         changes with its tasks.sql, git or running log) and running logs' sizes
   per project, under /p/<name>/:
     api/state            every table, the queue, git HEAD and changed files; or {"error": …}
     api/log/<task>       the task's latest worker log (?run=R: run R's) as readable lines, from byte ?from=N on
@@ -432,8 +432,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send(200, self.projects.list())
         if url.path == "/api/usage":
             return self.send(200, usage([x.project for x in list(self.projects.watchers.values()) if x.project]))
-        if url.path == "/api/events":
-            return self.events(self.projects.watchers.get(query.get("project", [""])[0]))
+        if url.path == "/api/poll":
+            return self.poll(self.projects.watchers.get(query.get("project", [""])[0]))
         if url.path == "/":
             first = next(iter(self.projects.watchers), None)
             if first:
@@ -473,33 +473,14 @@ class Handler(BaseHTTPRequestHandler):
             ctype += "; charset=utf-8"
         self.send(200, f.read_bytes(), ctype, cache="/vendor/" in path)
 
-    def events(self, w):
-        """"state" for project w (if any), "projects" when any project or the list changes."""
+    def poll(self, w):
+        """Polled by every tab about once a second (a held connection per tab, like server-sent events, runs into the
+        browser's ~6 connections per host): the projects' summaries, project w's state version and running logs."""
         ps = self.projects
-        self.send_response(200)
-        self.send_header("Content-Type", "text/event-stream")
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        seen, seen_all = -1, None
-        everything = lambda: (ps.version, *(x.version for x in list(ps.watchers.values())))
-        try:
-            while True:
-                with ps.cond:
-                    ps.cond.wait_for(lambda: everything() != seen_all, timeout=15)
-                    version, log, now_all = w.version if w else 0, w.log if w else None, everything()
-                if now_all == seen_all:
-                    self.wfile.write(b": keepalive\n\n")
-                else:
-                    seen_all = now_all
-                    msg = {"pm": pm.VERSION, "projects": ps.list()}
-                    self.wfile.write(f"event: projects\ndata: {json.dumps(msg)}\n\n".encode())
-                    if w and version != seen:
-                        seen = version
-                        msg = {"version": version, "pm": pm.VERSION, "log": [{"task": t, "size": n} for t, n in log or ()]}
-                        self.wfile.write(f"event: state\ndata: {json.dumps(msg)}\n\n".encode())
-                self.wfile.flush()
-        except (BrokenPipeError, ConnectionResetError):
-            pass
+        msg = {"pm": pm.VERSION, "projects": ps.list()}
+        if w:
+            msg |= {"version": w.version, "log": [{"task": t, "size": n} for t, n in w.log or ()]}
+        self.send(200, msg)
 
 
 def config_dir():

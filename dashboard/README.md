@@ -27,7 +27,7 @@ One dashboard shows several independent pm projects, each in its own git reposit
   - ×: off the dashboard (and the saved list); the folder stays as it is
   - no project: the start page asks for one
 - a project that can't load (e.g. a config error) shows its error and is tried again every 5 s; the others keep working
-- one event stream for all projects; full state only for the project shown
+- each tab polls `/api/poll` once a second (no held connection: browsers allow ~6 per host, so many tabs would stall); full state only for the project shown, refetched when its version changes
 - usage line and burn clock: account-wide, from every project's worker logs; tokens and cost in it: the shown project's workers
 - notifications from every project, the project's name in the title; a click opens it
 
@@ -102,7 +102,7 @@ Text is edited in place, through pm's own methods; each change is a commit (`pm:
 
 ## Code
 
-- `pm_dashboard/__init__.py`: server, watcher, JSON API (`/api/state`, `/api/log/<task>?from=N`, `/api/events`, `/api/task/<id>/commit`, `/api/usage`, `POST /api/edit`)
+- `pm_dashboard/__init__.py`: server, watcher, JSON API (`/api/state`, `/api/log/<task>?from=N`, `/api/poll`, `/api/task/<id>/commit`, `/api/usage`, `POST /api/edit`)
 - `pm_dashboard/edit.py`: writes and the run rules; history from git
 - `pm_dashboard/static/`: `app.js` (shell, routing, live state), `views.js` (pages), `live.js` (run view), `editor.js` (in-place editing), `add.js` (forms, welcome), `affected.js` (rows a task's commit touched), `tasks.js`, `reports.js`, `diff.js`, `notify.js`, `usage.js`, `ui.js` (components, charts), `data.js` (indexes, what pm derives)
 - `pm_dashboard/static/vendor/`: Preact + htm 3.1.1, marked 12.0.2, diff2html 3.4.48 (slim, with highlight.js), CodeMirror 6 bundled from `vendor-src/codemirror.js`:
