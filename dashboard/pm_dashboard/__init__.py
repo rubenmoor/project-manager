@@ -164,8 +164,46 @@ def usage(project):
             if not windows and info.get("rateLimitType"):
                 windows = {info["rateLimitType"]: {"utilization": info.get("utilization"), "resetsAt": info.get("resetsAt")}}
             return {"event": {"status": info.get("status"), "windows": windows, "overage": info.get("isUsingOverage"),
-                              "at": datetime.datetime.fromtimestamp(st.st_mtime, datetime.UTC).isoformat()}}
+                              "at": datetime.datetime.fromtimestamp(st.st_mtime, datetime.UTC).isoformat()},
+                    "burn": burn(logs)}
     return {"event": None}
+
+
+def burn(logs, window=3600):
+    """How fast the weekly limit filled over the last hour, from the rate_limit_events in the worker logs: the rise of
+    its utilization since the last event at or before an hour ago (else the first one since), per hour up to now.
+    None while fewer than 15 minutes are covered. Sustainable is 1 / 168 per hour."""
+    now = time.time()
+    points = []
+    for f in logs:
+        try:
+            st = f.stat()
+            if st.st_mtime < now - 3 * window:
+                continue
+            with open(f, "rb") as fh:
+                fh.seek(max(0, st.st_size - (8 << 20)))
+                tail = fh.read().decode("utf-8", "replace").splitlines()
+        except OSError:
+            continue
+        for line in tail:
+            if '"rate_limit_event"' not in line:
+                continue
+            at, rest = pm.unstamp(line)
+            try:
+                w = (json.loads(rest)["rate_limit_info"].get("unifiedWindows") or {})["seven_day"]
+                t = datetime.datetime.strptime(at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=datetime.UTC).timestamp()
+                points.append((t, float(w["utilization"]), w.get("resetsAt")))
+            except (ValueError, KeyError, TypeError):
+                continue
+    points.sort()
+    if not points or points[-1][0] < now - window:
+        return {"rate": 0.0, "since": None}
+    points = [p for p in points if p[2] == points[-1][2]]       # not across a weekly reset
+    before = [p for p in points if p[0] <= now - window]
+    base = before[-1] if before else points[0]
+    if now - base[0] < window / 4:
+        return {"rate": None, "since": base[0]}
+    return {"rate": (points[-1][1] - base[1]) * 3600 / (now - base[0]), "since": base[0]}
 
 
 def git_head(project):

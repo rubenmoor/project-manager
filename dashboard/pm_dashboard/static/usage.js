@@ -24,7 +24,7 @@ const resets = (ms) => {
     : `${d.toLocaleDateString(undefined, { weekday: "short" })} ${hm}`;
 };
 
-function Window({ d, label, w, span }) {
+function Window({ d, label, w, span, children }) {
   const now = Date.now();
   const end = w && w.resetsAt ? w.resetsAt * 1000 : null;
   const live = end && end > now;
@@ -37,9 +37,24 @@ function Window({ d, label, w, span }) {
   return html`<span class="usage-win" title=${live ? `${elapsed} % of the window passed · resets ${new Date(end).toLocaleString()}\n${ahead ? "used faster than time passes: runs out before the reset" : "used slower than time passes: budget left at the reset"}` : "reset since the last worker run; usage unknown"}>
     <b>${label}</b>
     ${pct != null ? html`<span class=${"meter" + (ahead ? " ahead" : "")}><span style=${`width:${Math.min(100, pct)}%`}></span><i style=${`left:${elapsed}%`}></i></span>
-      <span class="num">${pct} %</span><span class="muted">· resets ${resets(end)}</span>`
+      <span class="num">${pct} %</span>${children}<span class="muted">· resets ${resets(end)}</span>`
       : html`<span class="muted">${end ? "reset since" : "limit unknown"}</span>`}
     <span class="muted">· pm workers ${tokens(n) || "0"} tokens${runs.length ? `, ${usd(d.cost(runs))}` : ""}</span></span>`;
+}
+
+// Weekly limit used per hour over the last hour against what lasts the week: green and still while within it,
+// a ticking yellow (up to twice) or orange clock above it.
+const WEEK_RATE = 1 / 168;
+
+function BurnClock({ b }) {
+  if (!b) return null;
+  const x = b.rate == null ? null : b.rate / WEEK_RATE;
+  const level = x == null || x <= 1 ? "" : x <= 2 ? " fast" : " faster";
+  const title = x == null ? "burn rate: measuring, less than 15 minutes of worker data in the last hour"
+    : !b.since ? "burn rate: no worker activity in the last hour"
+    : `burn rate over the last hour: ${(b.rate * 100).toFixed(2)} % of the week per hour, ${x.toFixed(1)}× what lasts the week (${(WEEK_RATE * 100).toFixed(2)} %/h)`;
+  return html`<svg class=${"burn" + level} viewBox="0 0 16 16" width="14" height="14" role="img" aria-label=${title}><title>${title}</title>
+    <circle cx="8" cy="8" r="6.5" /><line class="h" x1="8" y1="8" x2="8" y2="4.5" /><line class="m" x1="8" y1="8" x2="11" y2="8" /></svg>`;
 }
 
 export function UsageLine({ d, version }) {
@@ -48,7 +63,8 @@ export function UsageLine({ d, version }) {
   const e = u && u.event;
   return html`<footer class="usage">
     <span class="muted">Claude usage</span>
-    ${WINDOWS.map(([k, label, span]) => html`<${Window} d=${d} label=${label} w=${e && e.windows[k]} span=${span} />`)}
+    ${WINDOWS.map(([k, label, span]) => html`<${Window} d=${d} label=${label} w=${e && e.windows[k]} span=${span}>
+      ${k === "seven_day" && html`<${BurnClock} b=${u && u.burn} />`}</${Window}>`)}
     <span class="grow"></span>
     ${e ? html`<span class="muted" title="from the last rate_limit_event a pm worker logged">${e.status && e.status !== "allowed" ? html`<b class="err">${e.status}</b> · ` : ""}${e.overage ? "using extra usage · " : ""}limits as of ${ago(e.at)}</span>`
       : u ? html`<span class="muted">limits show after the first <code>pm run</code> worker</span>` : null}
