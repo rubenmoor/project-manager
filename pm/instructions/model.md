@@ -1,0 +1,14 @@
+## Model
+
+- **Milestone:** a goal and a list of constraints; subject, body (free-form Markdown), status `open` | `on-hold` | `implemented` (set by pm), queue index (default 0). On hold: its tasks stay out of the queue until resumed; a running task finishes.
+- **Plan:** belongs to a milestone; subject, intro, body, priority. The milestone's first plan is its **masterplan**. A plan's parent is the plan of the task that wrote it, else the masterplan. **Done:** it has tasks, none open, and every child plan is done; the masterplan, when every plan of its milestone is.
+- **Task:** belongs to a plan (an `exec` task: none); subject, body (required while open), kind, work tree (none: the trunk, for planning, cleanup and exec tasks), status `open` | `done` | `dropped`, note (done: date and files; dropped: the reason), priority (default: the plan's, else 0), web (`pm instructions tasks`), prerequisite tasks (`pm instructions tasks`).
+- **Task kinds:**
+  - `work` (default)
+  - `plan`: writes a plan (`--kind plan`)
+  - pm's own (`pm instructions queue`): `masterplan`, `split`, `revise`, `cleanup`, `investigate`
+  - `exec`: the human's direct intervention; no plan, so no milestone; queued as if at milestone queue index 0; no task-queue sign-off; if it fails, dropped, not investigated
+- **Decision:** subject (the question), intro (what is to be decided, plain English), body (context), options (the recommended one first), status `pending` | `answered` | `irrelevant`, kind `rule` (default: lasting, in the log) | `once` (a go-ahead or check). A task linked to a pending decision waits; answered, its worker sees the answer in `pm show`; irrelevant, the open tasks waiting for it are dropped. Also: `decided_by_task` (a worker's own choice, `pm decision record`; empty: the human's), consequences (what changed because of the answer), supersede links (a newer answer replaces an older one, wholly or partly).
+- **Sign-off:** a decision pm makes itself, per `signoff` in project-manager.toml: before a masterplan or plan is split into tasks, before work tasks run, or before a web task gets the web. Its only answer is approve; shown as `Decision 4 (answered, sign-off): …`. Not for agents to create or answer.
+- **Queue:** open tasks of open milestones, and open `exec` tasks, that no pending decision blocks and whose prerequisite tasks are done; by milestone queue index (lowest first), then highest priority first, then milestone, plan and task id. `pm run` takes the first of the trunk and of each work tree, in parallel: **priority orders tasks only within one work tree, and only as a hint**; a strict order is a prerequisite (`--requires`). A task waits while a masterplan, split or revise task of its plan or a plan above it is queued.
+- **Recorded by pm:** `created_at`, `retired_at`, `implemented_at`, `closed_at`; `created_by_task` (your task, for what you create as a worker); one run per worker run, with result, time, tokens and cost.

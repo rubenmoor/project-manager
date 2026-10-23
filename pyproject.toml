@@ -20,4 +20,4 @@ packages = ["pm"]
 version = { attr = "pm.VERSION" }
 
 [tool.setuptools.package-data]
-pm = ["project-manager.toml", "instructions.md"]
+pm = ["project-manager.toml", "instructions/*.md"]

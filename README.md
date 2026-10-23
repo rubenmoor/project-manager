@@ -2,7 +2,7 @@
 
 Task queue for [Claude Code](https://claude.com/claude-code) workers. A project's work is **milestones → plans → tasks** in SQLite, kept in git as SQL text; `pm run` works the queue one task at a time with `claude -p` (one per work tree: the work trees named in the config run their tasks in parallel, the trunk runs yours and pm's planning), waits out usage limits; the questions workers raise wait for your answer while it goes on with other tasks.
 
-Python package `pm/` (code in `__init__.py`, the config template `project-manager.toml`, the agent reference `instructions.md`), standard library only (Python 3.11+), plus `git` and `claude`. Install: `nix run github:<you>/pm`, `pipx install .`, or `python3 -m pm` with this repository on `PYTHONPATH`.
+Python package `pm/` (code in `__init__.py`, the config template `project-manager.toml`, the agent reference and worker prompts in `instructions/`), standard library only (Python 3.11+), plus `git` and `claude`. Install: `nix run github:<you>/pm`, `pipx install .`, or `python3 -m pm` with this repository on `PYTHONPATH`.
 
 ## Use
 
@@ -78,16 +78,16 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 **Priorities.** Set by workers, following rules in project-manager.toml:
 
 - `planning_priority` (1000): planning tasks (kinds `masterplan`, `split`, `plan`) run first within a milestone queue index, so all plans and tasks exist before implementation starts; milestones with a higher queue index wait, planning included. After a planning task, `pm run` checks it changed a plan (`plan`, `masterplan`; a "revise …" task may leave it as it is) or left its plan with tasks (`split`); otherwise the task fails (reopened).
-- `plan_priority_prompt`: a new plan's priority by what it affects (database schema 900 … media and assets 200), adjusted after `pm plans list` when it must run before or after another plan. Appended to every worker's prompt.
-- `task_priority_prompt`: a task gets its own priority only for a good reason, the plan's ± a multiple of 10. Appended to every worker's prompt.
-- Both are also printed at the end of `pm instructions`; empty turns one off.
+- `plan_priority_prompt`: a new plan's priority by what it affects (database schema 900 … media and assets 200), adjusted after `pm plans list` when it must run before or after another plan. Appended to planning workers' prompts.
+- `task_priority_prompt`: a task gets its own priority only for a good reason, the plan's ± a multiple of 10. Appended to planning workers' prompts.
+- Both are also printed by `pm instructions queue`; empty turns one off.
 
 ## Commands
 
 | | |
 |---|---|
 | `init` | Write and commit the config (if missing) |
-| `instructions` | The full reference for agents (`pm/instructions.md`): every command with examples, recipes, errors |
+| `instructions [topic\|--all]` | The reference for agents (`pm/instructions/`): rules, every command, the topics (~1k tokens); a topic in detail with examples (`model`, `queue`, `plans`, `tasks`, `decisions`, `recipes`, `human`, `errors`); `--all`: everything (~7k tokens) |
 | `status`, `queue`, `milestone list`, `milestone show <id>`, `plans list`, `show <task\|d32\|p3\|m1>`, `validate` | Inspect; `show` also takes `decision 32` |
 | `runs [task]` | Worker runs: start, duration, result, turns, tokens, cost; totals per task kind |
 | `run [--once] [--dry-run]` | Work the queue; when it is empty, wait for tasks (`--once`: exit). Stops when Claude needs you or the tree has uncommitted changes |
@@ -120,7 +120,7 @@ Global: `--root <repo>`. A text value `-` reads stdin.
 
 ## Workers
 
-Each task runs the configured `worker` command (default: `claude -p` with `Bash Read Edit Write Glob Grep` allowed). Web access only per task: a task marked web (`--web`) gets `WebSearch` and `WebFetch` in `{settings}`, after its sign-off (`"web"` in `signoff`). The prompt (`WORKER_PROMPT` in `pm/__init__.py`) holds the task with its plan and milestone, and the `pm` commands the worker may use: `plan add`, `plan edit`, `task add`, `task set`, `decision add`, `task-pending-decision`, `task done|drop`. It points the worker to `pm instructions` for examples of every command. Agents outside `pm run`, e.g. a Claude session asked to plan work, should run `pm instructions` too: say so in the project's `AGENTS.md` or `CLAUDE.md`. The prompt also has every worker look up the answered decisions on what its task touches first (`pm decision list --answered --grep …`). A project's `AGENTS.md`, for example:
+Each task runs the configured `worker` command (default: `claude -p` with `Bash Read Edit Write Glob Grep` allowed). Web access only per task: a task marked web (`--web`) gets `WebSearch` and `WebFetch` in `{settings}`, after its sign-off (`"web"` in `signoff`). The prompt (`pm/instructions/worker.md`) holds the task with its plan and milestone, and the `pm` commands the worker needs: `task add`, `task requires`, `decision add|record|consequences`, `task-pending-decision`, `task done|drop`; planning tasks (`plan`, `masterplan`, `split`, `revise`) also get `worker-planning.md` (`plan add|edit`, task flags, splitting) and the priority rules. A warm hand-off sends only the next task. For more, the worker runs `pm instructions <topic>`. Agents outside `pm run`, e.g. a Claude session asked to plan work, should run `pm instructions` too: say so in the project's `AGENTS.md` or `CLAUDE.md`. The prompt also has every worker look up the answered decisions on what its task touches first (`pm decision list --answered --grep …`). A project's `AGENTS.md`, for example:
 
 ```markdown
 - Work is planned with pm: run `pm instructions` first.

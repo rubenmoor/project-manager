@@ -17,7 +17,7 @@ Worked one task at a time by `claude -p` per work tree ([worktrees] in the confi
 runs in its git work tree, which is merged into the trunk (the project's own checkout) after it; the trunk runs the
 human's exec tasks and pm's planning and cleanup tasks. Standard library only (Python 3.11+).
 
-    pm init | status | queue | show <task|d32|p3|m1> | validate | decide | run [--once] [--dry-run] | instructions
+    pm init | status | queue | show <task|d32|p3|m1> | validate | decide | run [--once] [--dry-run] | instructions [topic|--all]
     pm milestone add|set|hold|resume|list|show …   pm plan add|edit|list …   pm task add|set|done|drop|redo|requires|priority …
     pm decision add|list|show|answer|approve|irrelevant|record|supersede|consequences|kind …
     pm summary request|add|show|list   pm report request|tasks|add|ask|answer|show|list
@@ -32,10 +32,11 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 83  # bump by one with every commit (AGENTS.md)
+VERSION = 84  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
-INSTRUCTIONS = Path(__file__).parent / "instructions.md"
+INSTRUCTIONS = Path(__file__).parent / "instructions"
+INSTRUCTION_TOPICS = ("model", "queue", "plans", "tasks", "decisions", "recipes", "human", "errors")
 GUARD = Path(__file__).parent / "guard.py"
 # In {settings}: `claude -p` ends with the turn, so a background job dies unwatched; long checks run in the foreground.
 # Loose objects (MB) that make pm pack them: each commit adds a full copy of the database; git's own `gc --auto` waits
@@ -44,7 +45,7 @@ REPACK_LOOSE_MB = 50
 REPACK = ("import fcntl, subprocess, sys\nf = open(sys.argv[1], 'w')\ntry:\n    fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
           "except OSError:\n    sys.exit()\nsubprocess.run(['git', 'repack', '-d', '-q'])")
 WORKER_ENV = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1", "BASH_MAX_TIMEOUT_MS": "3600000"}
-EPILOG = "Agents (LLMs): read `pm instructions` first, the full reference with examples for every command."
+EPILOG = "Agents (LLMs): read `pm instructions` first: rules, every command, topics for details."
 PROMPT_KEYS = ("masterplan_prompt", "plan_tasks_prompt", "revise_masterplan_prompt", "revise_plan_prompt",
                "cleanup_prompt", "investigate_prompt", "summary_prompt",
                "report_prompt", "custom_report_prompt", "merge_prompt")
@@ -300,62 +301,17 @@ WHERE (m.status = 'open' OR t.kind = 'exec') AND t.status = 'open'
 ORDER BY coalesce(m.queue_index, 0), priority DESC, m.id, p.id, t.id;  -- exec: queue index 0
 """
 
-WORKER_PROMPT = """You are the worker for task {id}. Follow the project's own instructions for agents (AGENTS.md, \
-CLAUDE.md or similar), then do task {id} and nothing else.
+WORKER_PROMPT = (INSTRUCTIONS / "worker.md").read_text(encoding="utf-8")
+WORKER_PLANNING = (INSTRUCTIONS / "worker-planning.md").read_text(encoding="utf-8")
+WORKER_PLANNING_KINDS = (*PLANNING_KINDS, "revise")    # their prompt gets WORKER_PLANNING and the priority rules
+HANDOFF_PROMPT = """Task {prev} is done and committed. This session goes on with task {id}, the next task of its plan: \
+what you learned of the code still holds, what you were told about task {prev} no longer does. The instructions you got \
+for task {prev} apply to task {id} now: do task {id} and nothing else.
 
 {show}
-Before you start, look up what the project decided about what task {id} touches (its subjects, files, terms): \
-`pm decision list --answered --grep <word> [--grep <word> …]`. Those answers are binding, unless a newer one \
-supersedes them; follow them, and cite one where you rely on it, as `decision <id>: <subject>`.
-
-Every plan and decision you add gets an intro (`--intro`), for a human who reads nothing else: {intro_rule}.
-
-Refer to a milestone, plan, task or decision by id and full subject, `plan 12: <subject>`: plain in a subject, \
-in backticks in a body, a note or a decision's text.
-
-Work you find beyond task {id} (a bug, a missing test, a part the plan forgot, cleanup your change makes necessary) \
-is a follow-up task, not part of yours: `pm task add <plan id> "<subject>" --worktree <name> < body.md`, in the plan it belongs to \
-(usually task {id}'s, above), with a body that lets another worker do it without your context; don't add one the \
-plan already lists.
-
-Milestones, plans, tasks and decisions are in {db}; change them only with these commands (a text value - reads stdin):
-  pm plan add <milestone id> "<subject>" --intro "<intro>" < body.md     a task to split it into tasks is queued
-  pm plan edit <plan id> [--subject …] [--body …] [--intro …] [--priority N]
-  pm plans list     plans with open tasks, by milestone queue index, then highest priority first
-  pm milestone list     every milestone; pm milestone show <milestone id>
-  pm task add <plan id> "<subject>" --worktree <name> [--requires <task id> …] [--kind plan] [--priority N] [--web]
-      [--model opus] < body.md
-      --requires: it runs only once that task is done (repeat), the only strict order: priority is a hint, and
-      doesn't order tasks of different work trees; --worktree: where it runs, below; --kind plan: the task writes a
-      plan; --web: its worker gets WebSearch and
-      WebFetch (after the human's sign-off); --model opus: a work task that needs deep reasoning (subtle design, hard
-      bugs, wide refactors), else pm picks by kind
-  pm task set <task id> [--subject …] [--body …] [--priority N] [--web|--no-web] [--model opus|none]
-      [--worktree <name>]     an open task that isn't running
-  pm task requires <task id> <prerequisite id> … [--remove <id>]     an open task waits until they are done
-  pm task drop <task id> "<reason>" --replaced-by <task id>     the new task takes over its prerequisite links
-  pm decision add "<subject>" --intro "<intro>" [--body "<text>"] [--option "<recommended>"] [--option …]
-      prints its id
-  pm task-pending-decision <task id> <decision id>     the task waits until the human answers
-  pm decision list --answered [--grep <word> …]     the decision log: what was decided about X
-  pm decision record "<subject>" --intro "<intro>" --answer "<choice>" --body "<why>"   a lasting choice of yours
-      (design, a rule)
-  pm decision consequences <decision id> "<text>"     what changed because of an answer
-  pm show <task id>     also d<decision id>, p<plan id>, m<milestone id>
-Every command with examples, and recipes for the usual tasks: `pm instructions`.
-
-{worktrees}
-
-Stop processes you started by PID (`kill $!`), never with `pkill -f` or `killall`: the pattern can match your own \
-process. Run long checks in the foreground (a Bash call with a timeout): your session ends with your turn, \
-and nothing wakes you later.
-
-Finish with `pm task done {id} "<YYYY-MM-DD, files>"` or `pm task drop {id} "<reason>"`. Stage (`git add`) the \
-changes meant to stay in the project and delete temporary files you created. Don't commit or push: pm commits what \
-is staged, together with {db}, as "task {id}: <subject>". If task {id} itself needs an answer first, make it pending \
-on the decision, stage what is done and stop. If it needs another task's result first, \
-`pm task requires {id} <task id>` (add that task if it doesn't exist), stage what is done and stop: it runs again \
-once that task is done."""
+Look up the decision log first for what task {id} touches (`pm decision list --answered --grep <word>`). Finish with \
+`pm task done {id} "<YYYY-MM-DD, files>"` or `pm task drop {id} "<reason>"`, or make it wait for a decision or a \
+prerequisite task; stage, don't commit."""
 
 
 # --- Claude's usage limit: the message and when it resets ---------------------------------------
@@ -2133,13 +2089,17 @@ class Project:
     def worker_command(self, tid, handoff=None):
         """(command, prompt): the prompt goes to the worker's stdin; None if the command holds it ("{prompt}").
         handoff (self.handoff): resume that run's Claude session."""
-        show = "\n".join([self.show(tid), self.earlier_failure(tid), *self.priority_prompts()]).rstrip() + "\n"
-        prompt = WORKER_PROMPT.format(id=tid, db=self.db, show=show, intro_rule=INTRO_RULE, worktrees=self.worktree_lines())
+        show = "\n".join([self.show(tid), self.earlier_failure(tid)]).rstrip() + "\n"
         if handoff:
-            prompt = (f"Task {handoff['task_id']} is done and committed. This session goes on with the next task of its "
-                      f"plan: what you learned of the code still holds, what you were told about task "
-                      f"{handoff['task_id']} no longer does.\n\n" + prompt)
-        if self.base:
+            prompt = HANDOFF_PROMPT.format(prev=handoff["task_id"], id=tid, show=show)
+        else:
+            with self.connect() as db:
+                kind = self.get(db, "task", tid)["kind"]
+            planning = (WORKER_PLANNING.format(priorities="\n\n".join(self.priority_prompts())).rstrip() + "\n\n"
+                        if kind in WORKER_PLANNING_KINDS else "")
+            prompt = WORKER_PROMPT.format(id=tid, db=self.db, show=show, intro_rule=INTRO_RULE, planning=planning,
+                                          worktrees=self.worktree_lines()).rstrip()
+        if self.base and not handoff:
             prompt += (f"\n\nYou work in work tree {self.worktree}: {self.root}, on the branch "
                        f"{WORKTREE_BRANCH}{self.worktree}; other tasks run at the same time in the trunk, "
                        f"{self.base.root}, and the other work trees. Stay in yours: pm commits what you stage here and "
@@ -3438,9 +3398,11 @@ def main(argv=None):
     for name, text in [("init", f"write {CONFIG_FILE} (if missing) and commit it; the first command that changes the database writes it"),
                        ("status", "open and on-hold milestones, the queue, pending decisions"), ("queue", "the whole queue"),
                        ("validate", "check the database"),
-                       ("decide", "answer pending decisions in the terminal, one by one"),
-                       ("instructions", "the full reference for agents: every command with examples, recipes")]:
+                       ("decide", "answer pending decisions in the terminal, one by one")]:
         sub.add_parser(name, help=text)
+    ins = sub.add_parser("instructions", help="the reference for agents: rules, every command, topics for details")
+    ins.add_argument("topic", nargs="?", choices=INSTRUCTION_TOPICS, help="one topic in detail, with examples")
+    ins.add_argument("--all", action="store_true", help="the whole reference: rules, commands and every topic")
     s = sub.add_parser("show", help="a task with its plan, milestone, decisions and runs; or a decision (d32, "
                        "decision 32), plan (p3) or milestone (m1)")
     s.add_argument("ref", nargs="+", help="7 or t7: task 7; d32, decision 32; p3, plan 3; m1, milestone 1")
@@ -3598,14 +3560,16 @@ def main(argv=None):
 
     args = ap.parse_args(argv)
     if args.cmd == "instructions":
-        print(INSTRUCTIONS.read_text(encoding="utf-8"), end="")
-        root = args.root or git_root()
-        try:
-            pm = Project(root, load_config(root)) if root else Project(".")
-        except FormatError:
-            pm = Project(".")
-        if texts := pm.priority_prompts():
-            print("\n## Priorities (project-manager.toml)\n\n" + "\n\n".join(texts))
+        names = (["index", *INSTRUCTION_TOPICS] if args.all else [args.topic or "index"])
+        print("\n".join((INSTRUCTIONS / f"{n}.md").read_text(encoding="utf-8") for n in names), end="")
+        if "queue" in names:
+            root = args.root or git_root()
+            try:
+                pm = Project(root, load_config(root)) if root else Project(".")
+            except FormatError:
+                pm = Project(".")
+            if texts := pm.priority_prompts():
+                print("\n## Priorities (project-manager.toml)\n\n" + "\n\n".join(texts))
         return 0
     root = args.root or git_root()
     if root is None:

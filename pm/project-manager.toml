@@ -202,7 +202,7 @@ planning_priority = 1000
 #                  WebFetch; without "web", marked tasks get them unasked
 signoff = ["web"]
 
-# Appended to every worker's prompt and to `pm instructions`. Empty: nothing.
+# Appended to the prompts of planning workers (plan, masterplan, split, revise) and to `pm instructions queue`. Empty: nothing.
 plan_priority_prompt = '''
 Before writing a plan, run `pm plan list`: the existing plans with open tasks, their ids and priorities. Don't
 duplicate one of them; refer to it where the new plan depends on it.
@@ -224,7 +224,7 @@ instead, e.g. 100 above or below that plan's; stay below 1000, the priority of p
 before another is done, its tasks require that one (`pm task add … --requires <task id>`).
 '''
 
-# Appended to every worker's prompt and to `pm instructions`. Empty: nothing.
+# Appended to the prompts of planning workers (plan, masterplan, split, revise) and to `pm instructions queue`. Empty: nothing.
 task_priority_prompt = '''
 Task priority: leave it out, so the task gets its plan's priority, unless there is a good reason for it to run
 earlier or later than the order you add the tasks in. Then use the plan's priority (`pm show`) plus or minus a
