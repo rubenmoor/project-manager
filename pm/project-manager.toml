@@ -17,12 +17,6 @@ worker = ["claude", "-p", "--settings", "{settings}", "--permission-mode", "acce
 # Minutes to wait after a usage limit resets before retrying the task.
 limit_margin_minutes = 5
 
-# Warm hand-off: a work task that follows a done work task of the same plan resumes that run's Claude session
-# (`--resume`), so the worker keeps what it learned of the code; only with claude's stream-json output, and only if
-# the previous run ended less than 5 minutes ago (its prompt cache is still warm). At most this many tasks in one
-# session, then a fresh one; 0 or 1: every task fresh. Still one run, one commit and one cost record per task.
-warm_handoff = 3
-
 # `pm run` pushes the trunk's branch to its upstream (`git push`, never forced) at most every this many minutes, only
 # while no task runs in the trunk; a failed push is retried next time. 0: never. Work tree branches aren't pushed.
 push_minutes = 60

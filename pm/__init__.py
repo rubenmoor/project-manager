@@ -32,7 +32,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 88  # bump by one with every commit (AGENTS.md)
+VERSION = 89  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions"
@@ -93,7 +93,7 @@ SIGNOFF_INTROS = {
 IN_LOG = ("status = 'answered' AND signoff IS NULL AND kind = 'rule' AND id NOT IN (SELECT superseded_id FROM "
           "decision_supersedes s JOIN decision n ON n.id = s.decision_id WHERE s.note = '' AND n.status = 'answered')")
 
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 # A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
 # run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
 # Columns and tables SCHEMA dropped are left behind, new ones get their defaults; so only renames, moved data and new
@@ -123,7 +123,7 @@ def trunk_kinds(con):
 
 
 MIGRATIONS = {12: "", 13: "", 14: revise_kind, 15: "", 16: "", 17: "", 18: drop_summary_kind, 19: exec_kind,
-              20: "", 21: "", 22: "", 23: "", 24: "", 25: "", 26: trunk_kinds, 27: "", 28: ""}
+              20: "", 21: "", 22: "", 23: "", 24: "", 25: "", 26: trunk_kinds, 27: "", 28: "", 29: ""}
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -214,6 +214,8 @@ CREATE TABLE run (                                         -- one worker run of 
     cache_read_tokens     INTEGER,
     cache_creation_tokens INTEGER,
     cost_usd              REAL,
+    context_tokens        INTEGER,                         -- the session's context at the run's last turn
+    cache_minutes         INTEGER,                         -- its prompt cache's lifetime: 60 (1 h writes) or 5
     pid                   INTEGER,                         -- the `pm run` process
     CONSTRAINT "ended_at is set exactly when not running" CHECK ((result = 'running') = (ended_at IS NULL))
 ) STRICT;
@@ -391,7 +393,10 @@ CLAUDE_PASSING = ("overloaded", "connection error", "timed out", "api error: 5",
 NETWORK_ERRORS = ("econnreset", "econnrefused", "etimedout", "eai_again", "enotfound", "socket hang up", "fetch failed")
 RETRY_MINUTES = (0, 1, 2, 5, 10, 20, 30, 60)
 RESUME_FAILED = "resuming the session failed"   # a warm hand-off's failed resume: no failure of the task
-HANDOFF_MINUTES = 5     # warm hand-off: the previous run ended at most this long ago, so its prompt cache is warm
+HANDOFF_CONTEXT = 80_000   # warm hand-off: resume a session only while its context is smaller than this (tokens)
+HANDOFF_MINUTES = 5         # … and its previous run ended at most this long ago (its cache_minutes, if known)
+OBSOLETE_SETTINGS = {"warm_handoff": f"warm_handoff is gone: a session is resumed while its context is under "
+                                     f"{HANDOFF_CONTEXT // 1000}k tokens; remove it"}
 # A task that fails again after this many investigations stops `pm run`: else a fix that doesn't fix loops.
 MAX_INVESTIGATIONS = 3
 RECHECK_SECONDS = 30    # `pm run` with tasks running: how often it looks at git again (uncommitted changes, merges)
@@ -555,6 +560,7 @@ def load_config(root):
     except tomllib.TOMLDecodeError as e:
         raise FormatError(f"{CONFIG_FILE}: {e}") from None
     defaults = tomllib.loads(CONFIG_TEMPLATE)
+    obsolete = [OBSOLETE_SETTINGS[k] for k in OBSOLETE_SETTINGS if config.pop(k, None) is not None]
     errors = [f"unknown setting {k!r}" for k in config.keys() - defaults.keys()]
     models = config.get("models", {})
     config = defaults | config
@@ -569,7 +575,7 @@ def load_config(root):
     w = config["worker"]
     if not isinstance(w, list) or not w or not all(isinstance(a, str) for a in w):
         errors.append("worker must be a non-empty list of strings")
-    errors += [f"{k} must be an integer >= 0" for k in ("limit_margin_minutes", "warm_handoff", "push_minutes")
+    errors += [f"{k} must be an integer >= 0" for k in ("limit_margin_minutes", "push_minutes")
                if not isinstance(config[k], int) or isinstance(config[k], bool) or config[k] < 0]
     errors += [f"{k} must be a string" for k in ("log_dir", "editor") if not isinstance(config[k], str)]
     if not isinstance(config["max_parallel"], int) or isinstance(config["max_parallel"], bool) or config["max_parallel"] < 1:
@@ -595,6 +601,7 @@ def load_config(root):
         errors.append("signoff must be a list of " + ", ".join(f'"{x}"' for x in SIGNOFF_LEVELS))
     if errors:
         raise FormatError(f"{CONFIG_FILE}: " + "; ".join(errors))
+    config["obsolete"] = obsolete
     return config
 
 
@@ -2171,10 +2178,10 @@ class Project:
     def handoff(self, tid):
         """Warm hand-off: the latest run, if task tid can resume its Claude session (run row with task_id,
         session_id), else None. The latest run of the same work tree; both tasks are work tasks of one plan, the
-        previous one done by that run less than
-        HANDOFF_MINUTES ago, the chain of resumed runs shorter than warm_handoff, the worker claude's stream-json."""
-        w, limit = self.config["worker"], self.config["warm_handoff"]
-        if not limit or Path(w[0]).name != "claude" or "stream-json" not in w:
+        previous one done by that run less than its cache_minutes (else HANDOFF_MINUTES) ago, the session's context
+        then under HANDOFF_CONTEXT, the same model, the worker claude's stream-json."""
+        w = self.config["worker"]
+        if Path(w[0]).name != "claude" or "stream-json" not in w:
             return None
         with self.connect() as db:
             t = self.get(db, "task", tid)
@@ -2183,12 +2190,10 @@ class Project:
                            (t["worktree"],)).fetchone()
             if not (r and t["kind"] == r["kind"] == "work" and t["plan_id"] == r["plan_id"] and r["result"] == "done"
                     and r["status"] == "done" and r["session_id"] and r["task_id"] != tid
-                    and seconds(r["ended_at"], None) < HANDOFF_MINUTES * 60):
+                    and r["context_tokens"] is not None and r["context_tokens"] < HANDOFF_CONTEXT
+                    and seconds(r["ended_at"], None) < (r["cache_minutes"] or HANDOFF_MINUTES) * 60):
                 return None
-            chain = db.execute("WITH RECURSIVE c(id, prev) AS (SELECT id, continues_run FROM run WHERE id = ? "
-                               "UNION ALL SELECT run.id, run.continues_run FROM run JOIN c ON run.id = c.prev) "
-                               "SELECT count(*) FROM c", (r["id"],)).fetchone()[0]
-        if chain >= limit or (self.picks_model() and self.model_for(tid)[0] != self.model_for(r["task_id"])[0]):
+        if self.picks_model() and self.model_for(tid)[0] != self.model_for(r["task_id"])[0]:
             return None
         return dict(r)
 
@@ -2201,7 +2206,8 @@ class Project:
         if Path(w[0]).name == "claude" and not any("{settings}" in a for a in w):
             out.append('add "--settings", "{settings}" to the worker command: a hook that blocks `pkill -f` and '
                        '`killall`')
-        return [f"pm: {CONFIG_FILE}: {x} (see `worker` in pm's template, pm/{CONFIG_FILE})" for x in out]
+        return ([f"pm: {CONFIG_FILE}: {x} (see `worker` in pm's template, pm/{CONFIG_FILE})" for x in out]
+                + [f"pm: {CONFIG_FILE}: {x}" for x in self.config.get("obsolete", [])])
 
     @property
     def logs(self):
@@ -2272,6 +2278,13 @@ class Project:
                 info["api_error"] = e.get("error") or "unknown"
                 info["api_error_text"] = " ".join(c.get("text", "") for c in msg.get("content") or []
                                                   if c.get("type") == "text").strip()
+            elif not e.get("parent_tool_use_id") and (u := msg.get("usage")):
+                info["context_tokens"] = sum(u.get(k) or 0 for k in ("input_tokens", "cache_read_input_tokens",
+                                                                    "cache_creation_input_tokens", "output_tokens"))
+                if (u.get("cache_creation") or {}).get("ephemeral_1h_input_tokens"):
+                    info["cache_minutes"] = 60
+                elif u.get("cache_creation_input_tokens") or u.get("cache_read_input_tokens"):
+                    info.setdefault("cache_minutes", 5)
             out = []
             for c in (e.get("message") or {}).get("content") or []:
                 if c.get("type") == "text" and c.get("text", "").strip():
@@ -2332,7 +2345,7 @@ class Project:
 
     def record_run(self, rid, code, info, result, reason=None):
         cols = ("model", "session_id", "turns", "input_tokens", "output_tokens", "cache_read_tokens",
-                "cache_creation_tokens", "cost_usd")
+                "cache_creation_tokens", "cost_usd", "context_tokens", "cache_minutes")
         with self.connect(write=True) as db:
             db.execute(f"UPDATE run SET ended_at = ?, result = ?, reason = ?, exit_code = ?, "
                        f"{', '.join(c + ' = ?' for c in cols)} WHERE id = ?",

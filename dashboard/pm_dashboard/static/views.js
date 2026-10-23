@@ -40,13 +40,13 @@ function Banners({ d }) {
       needs a sign-off (${s.head_signoff}); <code>pm run</code> asks for it next.</div>` : null}`;
 }
 
-// The running run resumed an earlier one's Claude session: which, and how far along the chain (warm_handoff).
+// The running run resumed an earlier one's Claude session: which, its place in the session, the context it started with.
 export function Handoff({ d, r }) {
   const prev = r.continues_run != null && d.run.get(r.continues_run);
   if (!prev) return null;
-  const c = d.chain(r), max = d.state.warm_handoff;
+  const c = d.chain(r), max = d.state.handoff_context;
   return html`<div class="muted handoff">↳ same Claude session as <${TaskLink} t=${d.task.get(prev.task_id)} /> (run ${prev.id}),
-    task ${c.indexOf(r) + 1}${max ? ` of at most ${max}` : ""}</div>`;
+    task ${c.indexOf(r) + 1}${prev.context_tokens != null ? `, context ${tokens(prev.context_tokens)}${max ? ` of ${tokens(max)}` : ""}` : ""}</div>`;
 }
 
 function RunningCard({ d }) {

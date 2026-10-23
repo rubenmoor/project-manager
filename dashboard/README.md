@@ -20,7 +20,7 @@ In the project's git repository (the one with `project-manager.toml`):
 - Every page: a yellow banner while the trunk has uncommitted changes and no trunk task runs: the trunk's next task can't start, nor the tasks it may rewrite; tasks held by a planning task show "waits for tN" (queue tag, task page)
 - Task page: Prerequisites: what it requires (× removes one, "Require" adds a task id) and what requires it; a banner while it waits for one (red: dropped)
 
-- **Live** (home while pm runs): left, one timeline: queue above (next nearest), the running tasks between two rules, one per work tree, stacked (a warm hand-off: "same Claude session as task M (run N), task k of at most `warm_handoff`"), done and dropped tasks below (newest first); a click selects a task (outline); right, the selected task's task page (below), with a link to it
+- **Live** (home while pm runs): left, one timeline: queue above (next nearest), the running tasks between two rules, one per work tree, stacked (a warm hand-off: "same Claude session as task M (run N), task k, context 34k of 80k" (the session's context when it resumed, `HANDOFF_CONTEXT`)), done and dropped tasks below (newest first); a click selects a task (outline); right, the selected task's task page (below), with a link to it
   - running tasks (or what pm run is doing) pinned in the middle; queue and done/dropped scroll on their own; queue opens at "next"
   - animated moves (not on load, not with reduced motion)
     - a finished task's card morphs into its done row (green flash, older rows slide down); the next task's queue row into the running slot

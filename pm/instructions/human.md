@@ -21,6 +21,6 @@ pm summary request ; pm report request # queue an executive summary / resource u
 pm report ask "<question>"             # queue a custom one-paragraph report
 ```
 
-Settings in `project-manager.toml`: `[models]` (the worker's model per task kind, `escalate` after a failure), `warm_handoff` (tasks per resumed Claude session, 0: off), `push_minutes` (`pm run` pushes the trunk's branch at most this often, default 60, 0: off).
+Settings in `project-manager.toml`: `[models]` (the worker's model per task kind, `escalate` after a failure), `push_minutes` (`pm run` pushes the trunk's branch at most this often, default 60, 0: off).
 
 Record only answers the human gave.
