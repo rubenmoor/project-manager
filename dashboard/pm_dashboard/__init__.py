@@ -385,7 +385,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         host = self.headers.get("Host")
-        if host not in self.allowed_hosts or self.headers.get("Origin") != f"http://{host}":
+        if host not in self.allowed_hosts or self.headers.get("Origin") not in (f"http://{host}", f"https://{host}"):
             return self.send(403, {"error": "unknown host or origin"})
         w, path = self.split(self.path)
         if path not in ("/api/edit", "/api/projects") or (path == "/api/edit") != bool(w) \
@@ -513,6 +513,8 @@ def main(argv=None):
                     help="projects' git repositories (default: the one around the current directory), shown with the saved ones")
     ap.add_argument("--root", action="append", default=[], help=argparse.SUPPRESS)     # older form of `repo`
     ap.add_argument("--port", type=int, default=8642)
+    ap.add_argument("--allowed-host", action="append", default=[], metavar="HOST",
+                    help="also accept this Host header, e.g. project-manager-dashboard.localhost (repeatable)")
     args = ap.parse_args(argv)
     projects = Projects(config_dir() / "projects")
     roots = args.roots + args.root
@@ -542,7 +544,8 @@ def main(argv=None):
     if not server:
         print(f"pm-dashboard: ports {args.port}-{port} are all in use")
         return 1
-    Handler.allowed_hosts = {f"{h}:{port}" for h in ("127.0.0.1", "localhost")}
+    Handler.allowed_hosts = {f"{h}:{port}" for h in ("127.0.0.1", "localhost")} \
+        | set(args.allowed_host) | {f"{h}:{port}" for h in args.allowed_host if ":" not in h}
     server.daemon_threads = True
     for w in list(projects.watchers.values()):
         print(f"pm-dashboard: {w.root} on http://127.0.0.1:{port}/p/{quote(w.name)}/", flush=True)
