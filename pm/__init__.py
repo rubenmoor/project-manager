@@ -32,7 +32,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 81  # bump by one with every commit (AGENTS.md)
+VERSION = 82  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -1065,6 +1065,31 @@ class Project:
     def queue(self):
         """[(priority, task id, subject, kind, queue index, work tree)]: the `queue` view."""
         return [tuple(r.values()) for r in self.rows("SELECT * FROM queue")]
+
+    def shown_queue(self):
+        """The queue as shown (`pm queue`, the dashboard): [(priority, task id, subject, kind, queue index, work tree,
+        unmet prerequisite ids)], with the tasks that wait only for prerequisite tasks (not blocked: they queue), each
+        after its prerequisites shown and never first. `pm run` takes only the `queue` view's."""
+        rows = self.rows(
+            "SELECT coalesce(t.priority, p.priority, 0) AS priority, t.id AS task_id, t.subject, t.kind, "
+            "coalesce(m.queue_index, 0) AS queue_index, t.worktree FROM task t "
+            "LEFT JOIN plan p ON p.id = t.plan_id LEFT JOIN milestone m ON m.id = p.milestone_id "
+            "WHERE (m.status = 'open' OR t.kind = 'exec') AND t.status = 'open' "
+            "AND NOT EXISTS (SELECT 1 FROM task_decision td JOIN decision d ON d.id = td.decision_id "
+            "WHERE td.task_id = t.id AND d.status = 'pending') "
+            "ORDER BY coalesce(m.queue_index, 0), priority DESC, m.id, p.id, t.id")
+        unmet = {}
+        for r in self.rows("SELECT r.task_id, r.prerequisite_id FROM task_prerequisite_tasks r JOIN task q "
+                           "ON q.id = r.prerequisite_id WHERE q.status <> 'done' ORDER BY 1, 2"):
+            unmet.setdefault(r["task_id"], []).append(r["prerequisite_id"])
+        ids, out, placed = {r["task_id"] for r in rows}, [], set()
+        while rows:
+            ok = lambda tid: (out or tid not in unmet) and all(x in placed or x not in ids for x in unmet.get(tid, ()))
+            i = next((i for i, r in enumerate(rows) if ok(r["task_id"])), 0)
+            r = rows.pop(i)
+            placed.add(r["task_id"])
+            out.append((*r.values(), unmet.get(r["task_id"], [])))
+        return out
 
     # --- git ---------------------------------------------------------------------------------
 
@@ -3325,13 +3350,9 @@ class Project:
                      f"{m['closed']}/{m['tasks']} tasks closed, {m['runs']} run(s) ({m['failed']} failed), "
                      f"${m['cost']:.2f}")
         self.print_queue(limit=10)
-        waiting = self.rows("SELECT DISTINCT r.task_id FROM task_prerequisite_tasks r JOIN task t ON t.id = r.task_id "
-                            "JOIN task q ON q.id = r.prerequisite_id WHERE t.status = 'open' AND q.status <> 'done'")
-        if waiting:
-            stuck = self.stuck()
-            self.say(f"\nWaiting for prerequisite tasks: {len(waiting)}" + (
-                f"; for dropped ones, for good: " + ", ".join(f"task {t} ({', '.join(map(str, ps))})" for t, ps in stuck.items())
-                if stuck else ""))
+        if stuck := self.stuck():
+            self.say("\nWaiting for dropped prerequisite tasks, for good: "
+                     + ", ".join(f"task {t} ({', '.join(map(str, ps))})" for t, ps in stuck.items()))
         pending = self.pending()
         self.say(f"\nPending decisions ({len(pending)}):")
         for d in pending:
@@ -3361,10 +3382,11 @@ class Project:
         print("\n".join(lines), file=file or self.out, flush=True)
 
     def print_queue(self, limit=None):
-        q = self.queue()
+        q = self.shown_queue()
         self.say(f"\nQueue ({len(q)}):")
-        for prio, tid, subject, kind, _, tree in q[:limit]:
-            subject += ("" if kind == "work" else f" ({kind})") + (f" [{tree}]" if tree else "")
+        for prio, tid, subject, kind, _, tree, unmet in q[:limit]:
+            subject += ("" if kind == "work" else f" ({kind})") + (f" [{tree}]" if tree else "") + (
+                f", waits for task {', '.join(map(str, unmet))}" if unmet else "")
             self.say(f"  {prio:+6d}  task {tid}: {subject}" if prio else f"          task {tid}: {subject}")
         if limit and len(q) > limit:
             self.say(f"  … {len(q) - limit} more (`pm queue`)")

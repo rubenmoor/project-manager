@@ -6,7 +6,7 @@ export function index(state) {
     state, milestones: t.milestone, plans: t.plan, tasks: t.task, decisions: t.decision, runs: t.run, summaries: t.summary || [],
     reports: t.resource_use_report || [], customs: t.custom_report || [],
     milestone: by(t.milestone), plan: by(t.plan), run: by(t.run), task: by(t.task), decision: by(t.decision),
-    queue: state.queue, queuePos: new Map(state.queue.map((id, i) => [id, i])),
+    queue: state.queue, shown: state.shown_queue || state.queue, queuePos: new Map((state.shown_queue || state.queue).map((id, i) => [id, i])),
     // A 'running' row whose pm run is gone (it crashed) is stale, not running. One per work tree: the trunk's
     // first, then by work tree.
     runningAll: state.pm_run == null ? [] : t.run.filter((r) => r.result === "running")

@@ -85,7 +85,7 @@ export function Overview({ d }) {
           : html`<div class="sub" style="margin-top:6px">No pending decisions.</div>`}</div>
     </div>
     <div class="tiles">
-      <${Tile} label="Queue" value=${d.queue.length} sub="workable tasks" />
+      <${Tile} label="Queue" value=${d.shown.length} sub="queued tasks" />
       <${Tile} label="Open tasks" value=${d.tasks.filter((t) => t.status === "open").length} sub=${`of ${d.tasks.length}`} />
       <${Tile} label="Cost today" value=${usd(costToday)} sub=${`${usd(d.cost(finished))} in total`} />
       <${Tile} label="Runs" value=${finished.length} sub=${`${finished.filter((r) => r.result === "failed").length} failed`} />
@@ -94,8 +94,8 @@ export function Overview({ d }) {
     ${open.length ? html`<div class="cards">${open.map((m) => html`<${MilestoneCard} d=${d} m=${m} />`)}</div>`
       : html`<div class="empty">No open milestone. <code>pm milestone add</code> starts one.</div>`}
     <h2>Queue</h2>
-    <${QueueTable} d=${d} ids=${d.queue.slice(0, 8)} />
-    ${d.queue.length > 8 ? html`<div style="margin-top:6px"><a href="#/queue">All ${d.queue.length} tasks</a></div>` : null}`;
+    <${QueueTable} d=${d} ids=${d.shown.slice(0, 8)} />
+    ${d.shown.length > 8 ? html`<div style="margin-top:6px"><a href="#/queue">All ${d.shown.length} tasks</a></div>` : null}`;
 }
 
 export function counts(tasks) {
@@ -132,7 +132,7 @@ function QueueTable({ d, ids }) {
       const run = d.isRunning(id);
       return html`<tr class=${d.queuePos.get(id) === 0 ? "head-row" : ""}>
         <td class="r num muted">${d.queuePos.get(id) + 1}</td><td><${Prio} p=${d.prio(t)} /></td>
-        <td class="subject"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /> <${Worktree} name=${t.worktree} /> ${run ? html`<${Pill} status="running" />` : null}</td>
+        <td class="subject"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /> <${Worktree} name=${t.worktree} /> ${run ? html`<${Pill} status="running" />` : null}${d.unmet(t).length ? html` <span class=${`tag waits${d.stuck(t) ? " stuck" : ""}`} title="waits for prerequisite tasks">waits for ${d.unmet(t).map((x) => `t${x.id}${x.status === "dropped" ? " (dropped)" : ""}`).join(", ")}</span>` : null}</td>
         <td class="ink2">${p ? html`<a class="ink2" href=${`#/plan/${p.id}`}><${Named} kind="plan" r=${p} /></a>` : html`<a class="ink2" href="#/tasks">executive intervention</a>`}</td><td class="muted">${m ? html`<${Named} kind="milestone" r=${m} />` : null}</td></tr>`;
     })}</tbody></table></div>`;
 }
@@ -140,11 +140,11 @@ function QueueTable({ d, ids }) {
 export function Queue({ d }) {
   const out = d.tasks.filter((t) => t.status === "open" && !d.queuePos.has(t.id));
   return html`<h1>Queue</h1>
-    <div class="sub">What <code>pm run</code> works next: open tasks of open milestones that no pending decision blocks and whose prerequisite tasks are done (and exec tasks, as if at queue index 0),
-      by the milestone's queue index (lowest first), then highest priority first, then milestone, plan and task. Priority is a hint; prerequisites are strict.</div>
+    <div class="sub">What <code>pm run</code> works next: open tasks of open milestones that no pending decision blocks (and exec tasks, as if at queue index 0),
+      by the milestone's queue index (lowest first), then highest priority first, then milestone, plan and task. Priority is a hint; prerequisites are strict: a task that waits for one sits after it.</div>
     <${Banners} d=${d} />
-    <h2>${d.queue.length} workable</h2>
-    <${QueueTable} d=${d} ids=${d.queue} />
+    <h2>${d.shown.length} queued</h2>
+    <${QueueTable} d=${d} ids=${d.shown} />
     <h2>Open, not in the queue (${out.length})</h2>
     ${out.length ? html`<div class="tablewrap"><table>
       <thead><tr><th>task</th><th>why</th></tr></thead>
@@ -397,7 +397,7 @@ export function Task({ d, id, query, embedded = false }) {
     <div class="row sub">${running ? html`<${Pill} status="running" />` : html`<${Pill} status=${d.taskState(t)} />`}<${Kind} kind=${t.kind} />
       <span>priority <${TaskPrio} d=${d} t=${t} /></span>
       ${running ? html`<span>· <${Elapsed} start=${d.runningOf.get(t.id).started_at} /></span>` : null}
-      ${pos != null && !running ? html`<span>· ${pos === 0 ? "next in the queue" : `#${pos + 1} in the queue`}</span>` : null}
+      ${pos != null && !running ? html`<span>· ${t.id === d.queue[0] ? "next in the queue" : `#${pos + 1} in the queue`}</span>` : null}
       ${why && typeof why === "string" && !d.unmet(t).length ? html`<span>· not queued: ${why}</span>` : null}</div>
     <dl class="meta">
       <dt>created</dt><dd>${stamp(t.created_at)}${t.created_by_task != null ? html` by <a href=${`#/task/${t.created_by_task}`}>task ${t.created_by_task}</a>` : " by the human or pm"}</dd>

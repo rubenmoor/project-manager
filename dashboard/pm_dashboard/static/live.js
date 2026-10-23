@@ -9,7 +9,8 @@ import { usd } from "/data.js";
 const SHOW_BLOCKED = "pm-live-blocked";
 const loadShow = () => { try { return localStorage.getItem(SHOW_BLOCKED) === "1"; } catch { return false; } };
 
-// The queue view's order (pm/__init__.py: queue), so blocked tasks sit where they would queue once unblocked.
+// The queue view's order (pm/__init__.py: queue), so blocked tasks sit where they would queue once unblocked. Tasks
+// that wait only for prerequisite tasks aren't blocked: they queue (shown_queue).
 const queueKey = (d, t) => {
   const p = t.plan_id != null ? d.plan.get(t.plan_id) : null, m = d.milestoneOfTask(t);
   return [m ? m.queue_index : 0, -(t.effective_priority ?? 0), m ? m.id : 0, p ? p.id : 0, t.id];
@@ -76,8 +77,8 @@ export function Live({ d }) {
   const [showBlocked, setShowBlocked] = useState(loadShow);
   const toggleBlocked = (on) => { setShowBlocked(on); try { localStorage.setItem(SHOW_BLOCKED, on ? "1" : "0"); } catch {} };
   const blocked = d.tasks.filter((t) => t.status === "open" && !d.queuePos.has(t.id) && !isCurrent(t.id)
-    && (d.blockers(t).length || d.unmet(t).length) && (t.kind === "exec" || d.milestoneOfTask(t)?.status === "open"));
-  const queued = d.queue.filter((id) => !isCurrent(id)).map((id) => d.task.get(id));
+    && d.blockers(t).length && (t.kind === "exec" || d.milestoneOfTask(t)?.status === "open"));
+  const queued = d.shown.filter((id) => !isCurrent(id)).map((id) => d.task.get(id));
   const queue = (showBlocked && blocked.length
     ? [...queued, ...blocked].map((t) => [queueKey(d, t), t]).sort((a, b) => byKey(a[0], b[0])).map(([, t]) => t)
     : [...queued]).reverse();
@@ -121,12 +122,12 @@ export function Live({ d }) {
         ${queue.map((t) => {
           const q = qpos.get(t.id);
           if (q == null) return html`<${Item} key=${t.id} id=${t.id} sel=${sel} select=${setPicked} cls="blocked" zone="queue">
-            <span class="tl-pos num" title="waits for a pending decision or a prerequisite task">—</span>
+            <span class="tl-pos num" title="waits for a pending decision">—</span>
             <span class="tl-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} /> <${Worktree} name=${t.worktree} />
               <span class=${`tag waits${d.stuck(t) ? " stuck" : ""}`}>waits for ${[...d.blockers(t).map((x) => `d${x.id}`), ...d.unmet(t).map((x) => `t${x.id}${x.status === "dropped" ? " (dropped)" : ""}`)].join(", ")}</span></span><${Prio} p=${d.prio(t)} /></${Item}>`;
           return html`<${Item} key=${t.id} id=${t.id} sel=${sel} select=${setPicked} zone="queue">
-            <span class="tl-pos num">${q === 1 ? "next" : `#${q}`}</span>
-            <span class="tl-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} /> <${Worktree} name=${t.worktree} />${failedLast(t) ? html` <${Pill} status="failed" />` : null}${d.waitsFor(t) ? html` <span class="tag waits" title=${d.waitsFor(t)}>${d.holds.has(t.id) ? `waits for t${d.holds.get(t.id)}` : "waits: uncommitted"}</span>` : null}</span><${Prio} p=${d.prio(t)} /></${Item}>`;
+            <span class="tl-pos num">${t.id === d.queue[0] ? "next" : `#${q}`}</span>
+            <span class="tl-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} /> <${Worktree} name=${t.worktree} />${failedLast(t) ? html` <${Pill} status="failed" />` : null}${d.unmet(t).length ? html` <span class=${`tag waits${d.stuck(t) ? " stuck" : ""}`} title="waits for prerequisite tasks">waits for ${d.unmet(t).map((x) => `t${x.id}${x.status === "dropped" ? " (dropped)" : ""}`).join(", ")}</span>` : null}${d.waitsFor(t) ? html` <span class="tag waits" title=${d.waitsFor(t)}>${d.holds.has(t.id) ? `waits for t${d.holds.get(t.id)}` : "waits: uncommitted"}</span>` : null}</span><${Prio} p=${d.prio(t)} /></${Item}>`;
         })}</div></div>
       <div class="tl-current">
         ${now.length ? now.map(({ r, t, wrapping }) => wrapping ? html`<div class="tl-idle tl-busy"><span class="spinner"></span><div>

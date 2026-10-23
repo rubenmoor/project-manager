@@ -23,7 +23,8 @@ In the project's git repository (the one with `project-manager.toml`):
 - **Live** (home while pm runs): left, one timeline: queue above (next nearest), the running tasks between two rules, one per work tree, stacked (a warm hand-off: "same Claude session as task M (run N), task k of at most `warm_handoff`"), done and dropped tasks below (newest first); a click selects a task (outline); right, the selected task's task page (below), with a link to it
   - running tasks (or what pm run is doing) pinned in the middle; queue and done/dropped scroll on their own; queue opens at "next"
   - animated moves: a finished task's card morphs into its done row (green flash, older rows slide down); the next task's queue row into the running slot; not on load, not with reduced motion
-  - "blocked" (queue header, off by default, remembered in the browser): open tasks waiting for pending decisions or prerequisite tasks, in purple (red: a dropped prerequisite), where they would queue once unblocked, with what they wait for (`d5`, `t12`)
+  - Tasks waiting only for prerequisite tasks: queued like the others, after their prerequisites, tagged "waits for t12" (red: dropped)
+  - "blocked" (queue header, off by default, remembered in the browser): open tasks waiting for pending decisions, in purple, where they would queue once unblocked, with what they wait for (`d5`, `t12`)
   - failed last run: a red "failed" pill in the queue; with no worker running, "pm run stopped: task N failed" and the likely cause
   - crashed `pm run` (e.g. disk full): "pm not running", the task it was on and its error (also on the overview, and a notification); its stale `running` run shows as "crashed"
 - **Overview**: running tasks, decisions waiting on you, cost, open and on-hold milestones with progress, queue head; without milestones a welcome screen with one button

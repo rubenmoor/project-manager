@@ -17,9 +17,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
-PM_MIN_VERSION = 77     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
+PM_MIN_VERSION = 82     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
                         # summary_request, exec tasks, open_summary, report_request, report_rows, report_ask, WORKTREE_NAME,
-                        # task_requires)
+                        # task_requires, shown_queue)
 try:
     import pm
 except ImportError:
@@ -107,12 +107,13 @@ def read_state(project, last_good=None):
             "warm_handoff": project.config.get("warm_handoff"), "models": project.config.get("models"),
             "worktrees": project.config.get("worktrees") or {}, "holds": {}}
     if not project.db_path.exists():               # written by the first pm command, e.g. adding a milestone
-        return base | {"tables": {t: [] for t in TABLES}, "queue": [], "head_signoff": None, "done_plans": [], "errors": []}
+        return base | {"tables": {t: [] for t in TABLES}, "queue": [], "shown_queue": [], "head_signoff": None, "done_plans": [], "errors": []}
     try:
         with project.connect() as db:
             tables = {t: [dict(r) for r in db.execute(f"SELECT * FROM {t} ORDER BY rowid")] for t in TABLES}
             queue = [r["task_id"] for r in db.execute("SELECT task_id FROM queue")]
             in_log = project.log_ids(db)
+        shown_queue = [r[1] for r in project.shown_queue()]
         plan_prio = {p["id"]: p["priority"] for p in tables["plan"]}
         picks = project.picks_model()
         for t in tables["task"]:
@@ -133,7 +134,7 @@ def read_state(project, last_good=None):
         holds = project.planning_holds(project.queue())
     except pm.FormatError as e:
         return base | {"error": str(e), "last_good": last_good}
-    return base | {"tables": tables, "queue": queue, "head_signoff": head_signoff, "done_plans": done_plans,
+    return base | {"tables": tables, "queue": queue, "shown_queue": shown_queue, "head_signoff": head_signoff, "done_plans": done_plans,
                    "errors": errors, "open_summary": open_summary,
                    "open_report": open_report, "holds": holds}
 

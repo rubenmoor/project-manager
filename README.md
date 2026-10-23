@@ -55,7 +55,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 - run: one worker run of `pm run`: task, start, end, result (`running`, `done`, `blocked`, `failed`, `limit`), reason, exit code, `base_commit` (HEAD at the start), `worktree` (the task's then; empty: the trunk), `pid` of `pm run`; from claude's JSON output: model, session, `continues_run` (warm hand-off: the run whose session it resumed), turns, tokens (input, output, cache read, cache creation), cost in USD; while it runs, `running` (at most one per work tree, uncommitted); a `pm run` that died leaves it, the next `pm run` marks it `failed` (`interrupted`), or refuses while that process lives
 - timestamps in UTC; `created_by_task`: the task whose worker created the row (`PM_TASK`), empty for the human or pm
 
-**Queue** (the `queue` view): open tasks of open milestones (not on hold) that no pending decision blocks and whose prerequisite tasks are done, by the milestone's queue index (lowest first), then by priority (task's, else plan's, else 0; highest first), then milestone, plan and task id.
+**Queue** (the `queue` view): open tasks of open milestones (not on hold) that no pending decision blocks and whose prerequisite tasks are done, by the milestone's queue index (lowest first), then by priority (task's, else plan's, else 0; highest first), then milestone, plan and task id. `pm queue`, `pm status` and the dashboard also list the tasks that wait only for prerequisite tasks, each after its prerequisites, marked "waits for task N"; `pm run` starts them once those are done.
 
 **Dependencies.** Priority is a hint for what goes first; a strict order is a prerequisite task (`task_prerequisite_tasks`), declared by workers or you.
 
