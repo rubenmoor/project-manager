@@ -290,13 +290,14 @@ export function Log({ d, t, live, run = null, reveal = false }) {
   const [lines, setLines] = useState(null);
   const [cut, setCut] = useState(0);
   const f = useRef({ gen: 0, next: 0, busy: false, again: false });
-  const box = useRef(null), stick = useRef(true);
+  const box = useRef(null), stick = useRef(true), first = useRef(null);   // first: lines of the first load; later ones fade in
+  if (lines && first.current == null) first.current = cut + lines.length;
   useLayoutEffect(() => {
     if (box.current && stick.current) box.current.scrollTop = box.current.scrollHeight;
   }, [lines]);
   useEffect(() => { if (reveal && lines && box.current) box.current.scrollIntoView({ block: "nearest" }); }, [reveal, lines === null]);
   const size = (live && (d.state.__log || []).find((l) => l.task === t.id) || {}).size ?? null;
-  useEffect(() => { f.current = { gen: f.current.gen + 1, next: 0, busy: false, again: false }; stick.current = true; setLines(null); setCut(0); }, [t.id, run]);
+  useEffect(() => { f.current = { gen: f.current.gen + 1, next: 0, busy: false, again: false }; stick.current = true; first.current = null; setLines(null); setCut(0); }, [t.id, run]);
   useEffect(() => {
     const s = f.current;
     if (s.busy) { s.again = true; return; }
@@ -325,7 +326,7 @@ export function Log({ d, t, live, run = null, reveal = false }) {
   if (lines === null) return html`<div class="empty">Loading the log…</div>`;
   if (!lines.length) return html`<div class="empty">No log for this task.</div>`;
   return html`<div class="log" ref=${box}>${cut ? html`<div class="muted">… ${cut} earlier lines</div>` : null}
-    ${lines.map(([ts, l]) => html`<div class=${"line " + (l.startsWith("  → ") ? "tool" : /^\[\w+: \d+ turns/.test(l) ? "res" : "")}>
+    ${lines.map(([ts, l], i) => html`<div key=${cut + i} class=${"line " + (l.startsWith("  → ") ? "tool" : /^\[\w+: \d+ turns/.test(l) ? "res" : "") + (cut + i >= first.current ? " fresh" : "")}>
       <span class="ts">${ts ? clock(ts) : ""}</span><span>${l || " "}</span></div>`)}</div>`;
 }
 

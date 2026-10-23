@@ -28,36 +28,47 @@ function useHeight(ref) {
   return h;
 }
 
-// A task that changed place (running → done, next → running): a ghost box morphs from its old place to its new one;
-// done rows already shown slide down to make room. Nothing on the first render or with reduced motion.
-function useMoves(root) {
+// Moves between renders, so changes are easy to follow. A task that changed place (running → done, next → running): a
+// ghost box morphs from its old place to its new one. Rows that moved within their pane (queue reordered, done rows
+// pushed down) slide there; new rows flash. Nothing on the first render, after `reset` changes, or with reduced motion.
+function useMoves(root, reset) {
   const prev = useRef(null);
   useLayoutEffect(() => {
-    const els = [...root.current.querySelectorAll("[data-task][data-zone]")];
-    const now = new Map(els.map((el) => [el.dataset.task, { el, zone: el.dataset.zone, rect: el.getBoundingClientRect() }]));
+    const panes = new Map();
+    const pane = (el) => {
+      const p = el.closest(".tl-pane, .tl-current");
+      if (!panes.has(p)) panes.set(p, { box: p.getBoundingClientRect(), scroll: p.scrollTop, sh: p.scrollHeight });
+      return [p, panes.get(p)];
+    };
+    const now = new Map([...root.current.querySelectorAll("[data-task][data-zone]")].map((el) => {
+      const rect = el.getBoundingClientRect(), [p, pi] = pane(el);
+      // Its place in the pane's content, so scrolling isn't a move; the queue is bottom-aligned: from the end.
+      const y = rect.top - pi.box.top + pi.scroll;
+      return [el.dataset.task, { el, zone: el.dataset.zone, rect, pane: p, y: el.dataset.zone === "queue" ? y - pi.sh : y }];
+    }));
     const old = prev.current;
-    prev.current = now;
-    if (!old || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
-    let pushed = false;
+    prev.current = { now, reset };
+    if (!old || old.reset !== reset || matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+    const flash = (el, cls) => { el.classList.add(cls); el.addEventListener("animationend", () => el.classList.remove(cls), { once: true }); };
+    const box = (r) => ({ left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
     for (const [id, n] of now) {
-      const o = old.get(id);
-      if (!o || o.zone === n.zone) continue;
-      const pane = n.el.closest(".tl-pane, .tl-current").getBoundingClientRect();
-      if (n.rect.bottom < pane.top || n.rect.top > pane.bottom) continue;
-      if (n.zone === "retired") pushed = true;
+      const o = old.now.get(id);
+      const box2 = panes.get(n.pane).box;
+      const seen = n.rect.bottom > box2.top && n.rect.top < box2.bottom;
+      if (!o) { if (seen) flash(n.el, n.zone === "retired" && n.el.classList.contains("st-done") ? "just-done" : "just-added"); continue; }
+      if (o.zone === n.zone) {
+        const dy = o.y - n.y;
+        if (dy && seen) n.el.animate([{ transform: `translateY(${dy}px)` }, { transform: "none" }], { duration: 400, easing: "ease-out" });
+        continue;
+      }
+      if (!seen) continue;
       const ghost = document.createElement("div");
       ghost.className = "tl-ghost";
       document.body.append(ghost);
-      const box = (r) => ({ left: `${r.left}px`, top: `${r.top}px`, width: `${r.width}px`, height: `${r.height}px` });
       ghost.animate([{ ...box(o.rect), opacity: 1 }, { ...box(n.rect), opacity: 0.9, offset: 0.8 }, { ...box(n.rect), opacity: 0 }],
         { duration: 500, easing: "cubic-bezier(.3,.7,.3,1)" }).finished.then(() => ghost.remove(), () => ghost.remove());
       n.el.animate([{ opacity: 0 }, { opacity: 0, offset: 0.6 }, { opacity: 1 }], { duration: 500 });
-      if (n.zone === "retired") { n.el.classList.add("just-done"); n.el.addEventListener("animationend", () => n.el.classList.remove("just-done"), { once: true }); }
-    }
-    if (pushed) for (const [id, n] of now) {
-      const o = old.get(id);
-      if (o && o.zone === "retired" && n.zone === "retired" && o.rect.top !== n.rect.top)
-        n.el.animate([{ transform: `translateY(${o.rect.top - n.rect.top}px)` }, { transform: "none" }], { duration: 400, easing: "ease-out" });
+      if (n.zone === "retired") flash(n.el, "just-done");
     }
   });
 }
@@ -73,6 +84,7 @@ export function Live({ d }) {
   const now = d.runningAll.map((x) => { const t = d.task.get(x.task_id); return { r: x, t, wrapping: t.status !== "open" || d.blockers(t).length > 0 || d.unmet(t).length > 0 }; });
   const currents = now.filter((x) => !x.wrapping);
   const current = currents.length ? currents[0].t : null;
+  const wrapping = now.find((x) => x.wrapping);
   const isCurrent = (id) => currents.some((x) => x.t.id === id);
   const [showBlocked, setShowBlocked] = useState(loadShow);
   const toggleBlocked = (on) => { setShowBlocked(on); try { localStorage.setItem(SHOW_BLOCKED, on ? "1" : "0"); } catch {} };
@@ -101,7 +113,7 @@ export function Live({ d }) {
       sub: next ? `Next in the queue: t${next.id} ${next.subject}` : "" }
     : null;
   const [picked, setPicked] = useState(null);
-  const sel = picked != null && d.task.get(picked) ? picked : current ? current.id : crashed && crashed.run ? crashed.run.task_id : lastRun ? lastRun.task_id : null;
+  const sel = picked != null && d.task.get(picked) ? picked : current ? current.id : wrapping ? wrapping.t.id : crashed && crashed.run ? crashed.run.task_id : lastRun ? lastRun.task_id : null;
   // The queue scrolls on its own, opened at its end ("next"); again whenever the running task or the toggle changes.
   const qbox = useRef(null), H = useHeight(qbox), atEnd = useRef(null);
   useLayoutEffect(() => {
@@ -111,7 +123,7 @@ export function Live({ d }) {
     qbox.current.scrollTop = qbox.current.scrollHeight;
   }, [H, currents.map((x) => x.t.id).join(","), showBlocked]);
   const tl = useRef(null);
-  useMoves(tl);
+  useMoves(tl, showBlocked);
   const selTask = sel != null ? d.task.get(sel) : null;
   return html`<div class="live">
     <div class="tl" ref=${tl}>
@@ -150,7 +162,7 @@ export function Live({ d }) {
       <div class="tl-pane">${retired.length ? html`<div class="tl-label">done and dropped, newest first</div>` : null}
         ${retired.map((t) => {
           const runs = d.taskRuns(t);
-          return html`<${Item} key=${t.id} id=${t.id} sel=${sel} select=${setPicked} cls="retired" zone="retired"><${Pill} status=${t.status} />
+          return html`<${Item} key=${t.id} id=${t.id} sel=${sel} select=${setPicked} cls=${`retired st-${t.status}`} zone="retired"><${Pill} status=${t.status} />
             <span class="tl-subject"><${Named} kind="task" r=${t} /> <${Kind} kind=${t.kind} /> <${Worktree} name=${t.worktree} /></span>
             <span class="muted num" style="white-space:nowrap">${runs.length ? usd(d.cost(runs)) + " · " : ""}<${Time} ts=${t.retired_at} /></span></${Item}>`;
         })}</div>
