@@ -24,15 +24,15 @@ human's exec tasks and pm's planning and cleanup tasks. Standard library only (P
     pm task-pending-decision <task> <decision>
 
 Works on the git repository around the current directory. `pm init` writes the settings, project-manager.toml (the
-template is the file of that name next to this one), and commits it; the first command that uses the database
-writes it. pm commits its own changes to tasks.sql; workers commit them with their work. Nothing is pushed.
+template is the file of that name next to this one), and commits it; the first command that changes the
+database writes it. pm commits its own changes to tasks.sql; workers commit them with their work. Nothing is pushed.
 """
 import argparse, collections, contextlib, datetime, fcntl, functools, json, os, queue, re, shlex, signal, sqlite3, \
     subprocess, sys, threading, time, tomllib, traceback, zoneinfo
 from pathlib import Path
 
 
-VERSION = 77  # bump by one with every commit (AGENTS.md)
+VERSION = 78  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions.md"
@@ -551,7 +551,7 @@ def clock(stamp):
 
 def init(root, out=sys.stdout):
     """`pm init`: write project-manager.toml (the defaults) if missing and commit it. The database is created by
-    the first command that uses it."""
+    the first command that changes it."""
     path = Path(root) / CONFIG_FILE
     if path.exists():
         print(f"pm: already initialized ({CONFIG_FILE})", file=out)
@@ -642,6 +642,14 @@ def dump(con):
         out += [f"INSERT INTO {t} ({', '.join(cols)}) VALUES ({', '.join(r)});" for r in rows]
         out.append("")
     return "\n".join(out).rstrip() + "\n"
+
+
+SHRINKS = {"task_prerequisite_tasks"}     # the only tables a write may remove rows from
+
+
+def table_counts(con):
+    return {t: con.execute(f"SELECT count(*) FROM {t}").fetchone()[0]
+            for (t,) in con.execute("SELECT name FROM sqlite_schema WHERE type = 'table'").fetchall()}
 
 
 def running_run(db):
@@ -792,7 +800,8 @@ class Project:
     def connect(self, write=False):
         """The database file loaded into memory, foreign keys on; loaded once per process and again only when the
         file changes. write: one transaction under the lock, written back to the file if it changed; rolled back and
-        nothing written if the block raises. No file yet: written with the schema."""
+        nothing written if the block raises, or if it left a table with fewer rows than SHRINKS allows. No file in
+        a new project: the first write creates it."""
         with self.mutex, self.lock() if write else contextlib.nullcontext():
             con = self.loaded()
             if write and self.unsaved_migration:
@@ -805,6 +814,7 @@ class Project:
                 con.execute(f"PRAGMA query_only = {'OFF' if write else 'ON'}")
             if write:
                 con.execute("BEGIN")
+                counts = table_counts(con)
             try:
                 yield con
                 if con.in_transaction:
@@ -819,7 +829,9 @@ class Project:
                 raise
             if write and con.total_changes != before:
                 try:
-                    self.save(dump(con))
+                    if fewer := [t for t, n in table_counts(con).items() if n < counts.get(t, 0) and t not in SHRINKS]:
+                        raise FormatError(f"the change would remove rows from {', '.join(fewer)}; nothing written")
+                    self.save(dump(con), self.cache[0])
                 except BaseException:
                     self.forget()
                     raise
@@ -833,7 +845,14 @@ class Project:
     def loaded(self):
         """The cached connection, (re)loaded if the file changed since."""
         key = self.file_key()
-        if self.cache and self.cache[0] == key and key is not None:
+        if key is None and (self.cache and self.cache[0] is not None or self.tracked()):
+            for _ in range(3):      # git (autostash, checkout) may be rewriting it
+                time.sleep(0.2)
+                if (key := self.file_key()) is not None:
+                    break
+            else:
+                raise FormatError(f"{self.db} is missing, git may be rewriting it; try again")
+        if self.cache and self.cache[0] == key:
             return self.cache[1]
         self.forget()
         text = self.db_path.read_text(encoding="utf-8") if key else None
@@ -856,7 +875,7 @@ class Project:
                 if self.db_path.read_text(encoding="utf-8") != text:
                     con.close()
                     raise FormatError(f"{self.db} changed while migrating, try again")
-                self.save(dump(con))
+                self.save(dump(con), key)
                 key = self.file_key()
                 self.commit_db(f"{self.db}: schema {version} -> {SCHEMA_VERSION}", running_run(con))
             self.say(f"pm: migrated {self.db} from schema {version} to {SCHEMA_VERSION}")
@@ -864,9 +883,6 @@ class Project:
             con.close()
             raise FormatError(f"{self.db}: {problem}; the schema is pm's (SCHEMA in pm/__init__.py), "
                               f"undo the hand edit or merge")
-        elif text is None:
-            self.save(dump(con))
-            key = self.file_key()
         con.execute("PRAGMA foreign_keys = ON")
         # The key from before the read: a write since then must reload next time.
         self.cache = (key, con)
@@ -900,9 +916,23 @@ class Project:
             old.close()
         return con
 
-    def save(self, text):
+    def tracked(self):
+        """The database file is in git's index or in HEAD: missing, it isn't a new project."""
+        for args in (["ls-files", "--error-unmatch", "--", self.db], ["cat-file", "-e", f"HEAD:./{self.db}"]):
+            if subprocess.run(["git", *args], cwd=self.root, capture_output=True).returncode == 0:
+                return True
+        return False
+
+    def save(self, text, key):
+        """Write the file, unless it changed since it was loaded (key: its file_key() then)."""
         tmp = self.db_path.with_name(self.db_path.name + ".tmp")
-        tmp.write_text(text, encoding="utf-8")
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        if self.file_key() != key:
+            tmp.unlink()
+            raise FormatError(f"{self.db} changed under pm, nothing written; try again")
         os.replace(tmp, self.db_path)
 
     def commit_db(self, message, running=...):
@@ -918,13 +948,26 @@ class Project:
             self.say(f"pm: task {running['task_id']} is running; {self.db} is committed with it")
             return True
         try:
-            self.git("add", "--", self.db)
+            self.add_db()
             self.git("commit", "-q", "-m", f"pm: {message}", "--", self.db)
+            if self.git("diff-tree", "--root", "--no-commit-id", "-r", "--name-only", "--diff-filter=D", "HEAD", "--",
+                        self.db).strip():
+                self.git("reset", "-q", "--soft", "HEAD^")      # the file vanished in between: undo the deletion
+                self.git("reset", "-q", "--", self.db)
+                raise subprocess.CalledProcessError(1, "git commit", stderr=f"{self.db} is missing, git may be "
+                                                                          "rewriting it")
             self.gc()
             return True
         except subprocess.CalledProcessError as e:
             self.say(f"pm: committing {self.db} failed: {e.stderr.strip()}")
             return False
+
+    def add_db(self):
+        """`git add` the database file; missing (git may be rewriting it), its deletion is unstaged and refused."""
+        self.git("add", "--", self.db)
+        if self.git("diff", "--cached", "--name-only", "--diff-filter=D", "--", self.db).strip():
+            self.git("reset", "-q", "--", self.db)
+            raise subprocess.CalledProcessError(1, "git add", stderr=f"{self.db} is missing, git may be rewriting it")
 
     def rows(self, sql, *args):
         with self.connect() as db:
@@ -2443,7 +2486,7 @@ class Project:
         message = f"pm: merge work tree {name}" + (f": task {', '.join(map(str, ids))}" if ids else "")
         try:
             self.git("merge", "--no-ff", "--no-commit", sha)
-            self.git("add", "--", self.db)
+            self.add_db()
             self.git("commit", "-q", "-m", message)
         except subprocess.CalledProcessError as e:
             conflict = self.merging() and self.git("diff", "--name-only", "--diff-filter=U").split()
@@ -2801,7 +2844,7 @@ class Project:
         """Commit what the worker staged, with the database (in a work tree: without), as "task <id>: <subject>"; a
         merge the worker started is committed even if it changes nothing."""
         if not self.base:
-            self.git("add", "--", self.db)
+            self.add_db()
         if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=self.root).returncode or self.merging():
             self.git("commit", "-q", "-m", f"task {tid}: {subject}", "-m", body)
             self.gc()
@@ -3370,7 +3413,7 @@ def main(argv=None):
     ap.add_argument("--version", action="version", version=f"pm {VERSION}, database schema {SCHEMA_VERSION}")
     ap.add_argument("--root", help="the project's git repository (default: the one around the current directory)")
     sub = ap.add_subparsers(dest="cmd", required=True)
-    for name, text in [("init", f"write {CONFIG_FILE} (if missing) and commit it; the first command that uses the database writes it"),
+    for name, text in [("init", f"write {CONFIG_FILE} (if missing) and commit it; the first command that changes the database writes it"),
                        ("status", "open and on-hold milestones, the queue, pending decisions"), ("queue", "the whole queue"),
                        ("validate", "check the database"),
                        ("decide", "answer pending decisions in the terminal, one by one"),

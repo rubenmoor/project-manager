@@ -281,3 +281,5 @@ Record only answers the human gave.
 | `decision 3 is not pending` | Answered or marked irrelevant already |
 | `the database has errors (pm validate)` | `tasks.sql` was edited into an invalid state; `pm validate` lists the problems |
 | `no project-manager.toml: run pm init first` | The project has no pm yet; that's the human's call |
+| `tasks.sql is missing, git may be rewriting it; try again`, `tasks.sql changed under pm, nothing written; try again` | git (stash, checkout, rebase) is rewriting the file; wait a moment, run the command again |
+| `the change would remove rows from …; nothing written` | pm only adds rows (prerequisite links excepted); a bug in the command, report it |
