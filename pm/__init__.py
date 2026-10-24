@@ -32,7 +32,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 92  # bump by one with every commit (AGENTS.md)
+VERSION = 93  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions"
@@ -3142,15 +3142,17 @@ class Project:
 
     def planning_holds(self, q):
         """{task id: planning task id} for the queued tasks (q) that a queued masterplan, split or revise task of their
-        plan or a plan above it may rewrite; merge and investigate tasks aside."""
+        plan or a plan above it may rewrite; merge and investigate tasks aside. Within one plan a planning task waits
+        only for one before it in `order` (split after the others, then older first), so two never hold each other."""
         queued = {r[1] for r in q}
         with self.connect() as db:
             rows = [r for r in db.execute("SELECT t.id, t.plan_id, t.kind, p.milestone_id FROM task t "
                                           "JOIN plan p ON p.id = t.plan_id WHERE t.status = 'open'") if r[0] in queued]
-            planners = {}
+            planners, order = {}, {}
             for tid, pid, kind, _ in rows:
                 if kind in REPLANNING_KINDS:
                     planners.setdefault(pid, []).append(tid)
+                    order[tid] = (kind == "split", tid)
             if not planners:
                 return {}
             parent = {c: p for mid in {r[3] for r in rows} for p, cs in self.plan_children(db, mid).items() for c in cs}
@@ -3159,8 +3161,9 @@ class Project:
             seen = set()
             while kind not in ("merge", "investigate") and pid is not None and pid not in seen:
                 seen.add(pid)
-                if b := [x for x in planners.get(pid, ()) if x != tid]:
-                    holds[tid] = b[0]
+                if b := [x for x in planners.get(pid, ()) if x != tid and (tid not in order or len(seen) > 1
+                                                                            or order[x] < order[tid])]:
+                    holds[tid] = min(b, key=order.get)
                     break
                 pid = parent.get(pid)
         return holds
