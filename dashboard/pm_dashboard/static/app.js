@@ -70,7 +70,7 @@ function useState2() {
   return { state, log, projects, online };
 }
 
-const NAV = [["live", "Live"], ["overview", "Overview"], ["queue", "Queue"], ["tasks", "Tasks"], ["milestones", "Milestones"],
+const NAV = [["overview", "Overview"], ["live", "Live"], ["queue", "Queue"], ["tasks", "Tasks"], ["milestones", "Milestones"],
   ["decisions", "Decisions"], ["reports", "Reports"], ["runs", "Runs"]];
 const SECTION = { summary: "reports", added: "milestones", milestone: "milestones", plan: "milestones", task: "tasks", decision: "decisions" };
 
