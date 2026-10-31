@@ -45,7 +45,10 @@ One dashboard shows several independent pm projects, each in its own git reposit
   - "blocked" (queue header, off by default, remembered in the browser): open tasks waiting for pending decisions, in purple, where they would queue once unblocked, with what they wait for (`d5`, `t12`)
   - failed last run: a red "failed" pill in the queue; with no worker running, "pm run stopped: task N failed" and the likely cause
   - crashed `pm run` (e.g. disk full): "pm not running", the task it was on and its error (also on the overview, and a notification); its stale `running` run shows as "crashed"
-- **Overview**: running tasks, decisions waiting on you, cost, open and on-hold milestones with progress, queue head; without milestones a welcome screen with one button
+- **Overview**: run controls on top, then running tasks, decisions waiting on you, cost, open and on-hold milestones with progress, queue head; without milestones a welcome screen with one button
+  - Run: starts `pm run --quiet` with the dashboard's own pm, in its own session (outlives a restarted dashboard); its start errors in `.git/pm-run.out`
+  - Stop: like `pm stop` (SIGUSR1), "stopping…" until it ends; Force kill: SIGTERM after a confirm, like a second Ctrl-C (runs interrupted, leftovers stashed, tasks run again)
+  - below: last 200 lines of `.git/pm-run.log`, 20-row read-only textarea, follows the end unless scrolled up
 - **Queue**: as `pm run` sees it; open tasks it leaves out and why
 - **Tasks**: every task. On top: pending decisions by how many open tasks answering each frees (it is their only blocker), the top one highlighted, each listing its waiting tasks; then executive interventions (exec tasks, no plan; add one there); then by milestone (queue index) and plan, done plans folded; open, closed or all
 - **Milestones**: open and on-hold cards grouped by queue index (lowest first), completed ones in their own column on the right (newest first); with progress and the number of pending decisions its open tasks wait for, linked to exactly those (`#/decisions?milestone=N`); progress bars fill smoothly as tasks close

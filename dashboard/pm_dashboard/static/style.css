@@ -479,3 +479,7 @@ del { color: var(--critical); text-decoration: line-through; }
 .addproject .error { flex-basis: 100%; color: var(--critical); font-size: 12.5px; }
 .main:has(> .noproject) { grid-column: 1 / -1; width: 100%; max-width: 640px; margin: 40px auto; }
 .noproject .addproject { border-top: none; padding: 8px 0; }
+.run-controls { margin: 8px 0 14px; }
+textarea.runlog { display: block; width: 100%; box-sizing: border-box; margin-top: 10px; resize: vertical; background: var(--code);
+  color: var(--ink); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-family: var(--mono);
+  font-size: 12px; line-height: 18px; }

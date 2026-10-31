@@ -28,6 +28,7 @@ function reloadWhenIdle() {
 function useState2() {
   const [state, setState] = useState(null);
   const [log, setLog] = useState(null);
+  const [runlog, setRunlog] = useState(null);
   const [projects, setProjects] = useState(null);
   const [online, setOnline] = useState(true);
   useEffect(() => {
@@ -43,7 +44,7 @@ function useState2() {
     };
     load();
     // Polled, not a held connection: browsers allow ~6 per host, and every open tab would hold one.
-    let gone = false, timer = null, polling = false, seenProjects = null, seenLog = null;
+    let gone = false, timer = null, polling = false, seenProjects = null, seenLog = null, seenRunlog = null;
     const poll = () => {
       polling = true;
       fetch(`/api/poll?project=${encodeURIComponent(PROJECT || "")}`).then((r) => r.json()).then((m) => {
@@ -56,6 +57,8 @@ function useState2() {
         if (PROJECT && !m.projects.some((p) => p.name === PROJECT)) location.href = "/";   // removed
         const lg = JSON.stringify(m.log);
         if (lg !== seenLog) { seenLog = lg; setLog(m.log); }
+        const rl = JSON.stringify(m.runlog);
+        if (rl !== seenRunlog) { seenRunlog = rl; setRunlog(m.runlog); }
         if (m.version !== undefined && m.version !== version) { version = m.version; load(); }
       }).catch(() => !gone && setOnline(false)).finally(() => {
         polling = false;
@@ -67,7 +70,7 @@ function useState2() {
     document.addEventListener("visibilitychange", wake);
     return () => { gone = true; clearTimeout(timer); document.removeEventListener("visibilitychange", wake); };
   }, []);
-  return { state, log, projects, online };
+  return { state, log, runlog, projects, online };
 }
 
 const NAV = [["overview", "Overview"], ["live", "Live"], ["queue", "Queue"], ["tasks", "Tasks"], ["milestones", "Milestones"],
@@ -114,7 +117,7 @@ function Theme() {
 }
 
 function App() {
-  const { state, log, projects, online } = useState2();
+  const { state, log, runlog, projects, online } = useState2();
   const [r0, setR] = useState(route());
   let r = r0;
   useEffect(() => {
@@ -163,7 +166,7 @@ function App() {
       ${state && state.error ? html`<div class="banner error"><b>Can't read the database.</b> <pre>${state.error}</pre>
         ${state.last_good ? html`<div class="muted">Showing the last state that could be read.</div>` : null}</div>` : null}
       ${d ? html`<${TrunkDirty} d=${d} />` : null}
-      ${!state ? html`<div class="empty">Loading…</div>` : d && View ? html`<${View} d=${d} id=${r.id} query=${r.query} />`
+      ${!state ? html`<div class="empty">Loading…</div>` : d && View ? html`<${View} d=${d} id=${r.id} query=${r.query} runlog=${runlog} />`
         : d ? html`<div class="empty">No such page.</div>` : null}
     </main>
     <${UsageLine} d=${d} version=${shown} />

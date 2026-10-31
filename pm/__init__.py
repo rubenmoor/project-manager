@@ -32,7 +32,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 95  # bump by one with every commit (AGENTS.md)
+VERSION = 96  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions"
@@ -670,6 +670,27 @@ class PrefixOut:
         self.out.flush()
 
 
+class Tee:
+    """`pm run`'s output: the terminal (unless --quiet) and <git dir>/pm-run.log; a failing log write is dropped."""
+
+    def __init__(self, out, log):
+        self.out, self.log, self.lock = out, log, threading.RLock()
+
+    def write(self, s):
+        with self.lock:
+            if self.out:
+                self.out.write(s)
+            with contextlib.suppress(OSError, ValueError):
+                self.log.write(s)
+        return len(s)
+
+    def flush(self):
+        if self.out:
+            self.out.flush()
+        with contextlib.suppress(OSError, ValueError):
+            self.log.flush()
+
+
 def memory():
     con = sqlite3.connect(":memory:", isolation_level=None, check_same_thread=False)
     con.row_factory = sqlite3.Row
@@ -735,6 +756,7 @@ class Project:
         self.procs = set()          # the running workers' process ids
         self.task_procs = {}        # task id -> its worker's process id
         self.kills = set()          # `pm kill`: task ids whose workers are killed
+        self.log_fd = None          # `pm run`: <git dir>/pm-run.log's file descriptor
         self.finished = None        # `pm run`: queue.Queue of (work tree, task id, result, message)
         self.next_push = 0          # `pm run`: time.monotonic() of the next `git push` (push_minutes)
         self.merged = set()         # `pm run`: done prerequisite tasks whose work is in the trunk
@@ -2877,13 +2899,52 @@ class Project:
         if done:
             self.commit_db(", ".join(done))
 
-    def run(self, once=False, dry_run=False):
+    @contextlib.contextmanager
+    def run_output(self, quiet):
+        """`pm run`'s output also goes to <git dir>/pm-run.log, a new one per run (the dashboard shows it); quiet: only
+        there. <git dir>/pm-run.stopping exists while it stops (`run_stopping`)."""
+        with contextlib.suppress(OSError):
+            (self.git_dir / "pm-run.stopping").unlink()
+        out = self.out
+        try:
+            log = open(self.git_dir / "pm-run.log", "w", encoding="utf-8", buffering=1)
+        except OSError:
+            log = open(os.devnull, "w", encoding="utf-8")
+        self.out, self.log_fd = Tee(None if quiet else out, log), log.fileno()
+        try:
+            yield
+        except Exception as e:
+            with contextlib.suppress(OSError):
+                log.write(f"pm: {e}\n" if isinstance(e, FormatError) else traceback.format_exc())
+            raise
+        finally:
+            self.out, self.log_fd = out, None
+            with contextlib.suppress(OSError):
+                log.close()
+            with contextlib.suppress(OSError):
+                (self.git_dir / "pm-run.stopping").unlink()
+
+    def run_stopping(self):
+        """The running `pm run` was told to stop (`pm stop`, Ctrl-C, SIGTERM)."""
+        return self.run_pid() is not None and (self.git_dir / "pm-run.stopping").exists()
+
+    def run(self, once=False, dry_run=False, quiet=False):
         """Work the queue, a task per work tree at a time (the trunk is one). The first Ctrl-C (SIGINT) or a
         SIGUSR1 (`pm stop`): start nothing new, stop after the running tasks; a second Ctrl-C, SIGTERM or SIGHUP: stop
         now, the workers get SIGTERM. SIGUSR2 (`pm kill`): the tasks in <git dir>/pm-kill are killed."""
+        def say_now(msg):
+            # Not through self.out: a signal handler may interrupt its write.
+            for fd in ([] if quiet else [2]) + ([self.log_fd] if self.log_fd is not None else []):
+                with contextlib.suppress(OSError):
+                    os.write(fd, msg)
+
         def stop_later(sig, _):
+            if sig != signal.SIGUSR2 and not dry_run:
+                with contextlib.suppress(OSError):
+                    (self.git_dir / "pm-run.stopping").touch()
             if sig in (signal.SIGTERM, signal.SIGHUP) or sig == signal.SIGINT and self.stopping:
                 self.stopping, self.killed = True, signal.Signals(sig).name
+                say_now(f"\n== stopping now ({self.killed})\n".encode())
                 for pid in list(self.procs):
                     with contextlib.suppress(ProcessLookupError, PermissionError):
                         os.killpg(pid, signal.SIGTERM)
@@ -2892,12 +2953,12 @@ class Project:
             elif not self.stopping:
                 self.stopping = True
                 if not self.idle:
-                    os.write(2, b"\n== stopping after the running task(s) (Ctrl-C again: stop now)\n")
+                    say_now(b"\n== stopping after the running task(s) (Ctrl-C again: stop now)\n")
         old = {sig: signal.signal(sig, stop_later) for sig in (signal.SIGINT, signal.SIGUSR1, signal.SIGUSR2, signal.SIGTERM, signal.SIGHUP)}
         try:
             if dry_run:
                 return self.work_queue(once, dry_run)
-            with self.run_lock():
+            with self.run_lock(), self.run_output(quiet):
                 self.ignore_db()
                 return self.work_queue(once, dry_run)
         finally:
@@ -3448,6 +3509,7 @@ def main(argv=None):
     r = sub.add_parser("run", help="work the queue with the worker command (claude -p)")
     r.add_argument("--once", action="store_true", help="stop after one task")
     r.add_argument("--dry-run", action="store_true", help="print the next worker command; change nothing")
+    r.add_argument("--quiet", action="store_true", help="no output but errors; it still goes to .git/pm-run.log")
     sub.add_parser("stop", help="have the running `pm run` stop after its running task(s)")
     sub.add_parser("kill", help="have the running `pm run` kill a running task: dropped, no investigation; its "
                    "leftovers stashed for `pm task redo`").add_argument("task", type=int)
@@ -3636,7 +3698,7 @@ def main(argv=None):
         elif args.cmd == "decide":
             msg = pm.decide() and "decisions answered"
         elif args.cmd == "run":
-            return pm.run(once=args.once, dry_run=args.dry_run)
+            return pm.run(once=args.once, dry_run=args.dry_run, quiet=args.quiet)
         elif args.cmd == "stop":
             pm.stop()
         elif args.cmd == "kill":

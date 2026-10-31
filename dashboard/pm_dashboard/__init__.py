@@ -15,17 +15,19 @@ at /p/<name>/, and a JSON API:
     api/state            every table, the queue, git HEAD and changed files; or {"error": …}
     api/log/<task>       the task's latest worker log (?run=R: run R's) as readable lines, from byte ?from=N on
     api/task/<id>/commit the commit pm made for the task, with its patch and the rows it changed
+    api/runlog           the last 200 lines of `pm run`'s output (<git dir>/pm-run.log)
+    POST api/run         {"op": "start" | "stop" | "kill"}: start `pm run`, stop it after its task(s), or stop it now
     POST api/edit        {"op": …}: add or change milestones, plans, tasks, resolve decisions, request an
                          executive summary, a resource use report or a custom report through pm (edit.py)
 """
-import argparse, datetime, errno, json, mimetypes, os, subprocess, sys, threading, time
+import argparse, datetime, errno, json, mimetypes, os, signal, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-PM_MIN_VERSION = 82     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
+PM_MIN_VERSION = 96     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
                         # summary_request, exec tasks, open_summary, report_request, report_rows, report_ask, WORKTREE_NAME,
-                        # task_requires, shown_queue)
+                        # task_requires, shown_queue, run_stopping, pm run --quiet)
 try:
     import pm
 except ImportError:
@@ -60,7 +62,7 @@ class Watcher:
         self.last_good = None
         self.sig = None
         self.dirty, self.dirty_at = None, 0.0
-        self.alive = None                       # the pid of `pm run`, while it lives
+        self.alive = None                       # (pid, stopping) of `pm run`, while it lives
 
     def signature(self):
         git = self.project.git_dir
@@ -108,9 +110,11 @@ class Watcher:
                 sig = self.signature() + [self.dirty]
                 changed = sig != self.sig
                 state = read_state(self.project, self.last_good) if changed else self.state
-                log, alive = self.running_log(state), self.project.run_pid()
+                log, pid = self.running_log(state), self.project.run_pid()
+                alive = pid and (pid, self.project.run_stopping())
                 if changed or log != self.log or alive != self.alive:
-                    state = state | {"pm_run": alive, "pm_crash": None if alive else self.project.run_crash()}  # a new dict
+                    state = state | {"pm_run": pid, "pm_stopping": bool(alive and alive[1]),
+                                     "pm_crash": None if pid else self.project.run_crash()}  # a new dict
                     if "error" not in state:
                         self.last_good = state
                     self.state, self.sig, self.log, self.alive = state, sig, log, alive
@@ -354,6 +358,59 @@ def read_log(project, tid, start=0, rid=None):
     return lines, start + cut
 
 
+def run_control(project, op):
+    """POST api/run: start `pm run` (in its own session: it outlives a restarted dashboard), stop it after its task(s)
+    (`pm stop`) or now (SIGTERM, like a second Ctrl-C)."""
+    pid = project.run_pid()
+    if op == "start":
+        if pid:
+            raise ValueError(f"`pm run` (pid {pid}) is already working this project")
+        # The pm this dashboard imports, not the one on PATH; sys.path rather than PYTHONPATH, which the workers would inherit.
+        code = (f"import sys; sys.path.insert(0, {str(Path(pm.__file__).resolve().parent.parent)!r}); import pm; "
+                f"sys.exit(pm.main(['--root', {str(project.root)!r}, 'run', '--quiet']))")
+        out = project.git_dir / "pm-run.out"
+        with open(out, "wb") as f:
+            proc = subprocess.Popen([sys.executable, "-c", code], cwd=project.root, stdin=subprocess.DEVNULL, stdout=f,
+                                    stderr=subprocess.STDOUT, start_new_session=True)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and project.run_pid() != proc.pid:
+            if proc.poll() is not None:
+                if proc.returncode:
+                    raise ValueError(out.read_text(encoding="utf-8", errors="replace").strip()
+                                     or f"`pm run` ended with exit code {proc.returncode}")
+                return {"pid": None}
+            time.sleep(0.1)
+        threading.Thread(target=proc.wait, daemon=True).start()
+        return {"pid": proc.pid}
+    if not pid:
+        raise ValueError("no `pm run` is working this project")
+    try:
+        os.kill(pid, signal.SIGUSR1 if op == "stop" else signal.SIGTERM)
+    except ProcessLookupError:
+        raise ValueError("`pm run` just ended") from None
+    return {"pid": pid}
+
+
+def run_log(project, n=200):
+    """The last n lines of `pm run`'s output."""
+    try:
+        with open(project.git_dir / "pm-run.log", "rb") as f:
+            size = f.seek(0, os.SEEK_END)
+            f.seek(max(0, size - 128 * 1024))
+            lines = f.read().decode("utf-8", errors="replace").splitlines()
+    except FileNotFoundError:
+        return []
+    return (lines if size <= 128 * 1024 else lines[1:])[-n:]
+
+
+def run_log_key(project):
+    try:
+        st = (project.git_dir / "pm-run.log").stat()
+        return [st.st_size, st.st_mtime_ns]
+    except FileNotFoundError:
+        return None
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = "pm-dashboard"
     projects: Projects = None
@@ -389,7 +446,7 @@ class Handler(BaseHTTPRequestHandler):
         if host not in self.allowed_hosts or self.headers.get("Origin") not in (f"http://{host}", f"https://{host}"):
             return self.send(403, {"error": "unknown host or origin"})
         w, path = self.split(self.path)
-        if path not in ("/api/edit", "/api/projects") or (path == "/api/edit") != bool(w) \
+        if path not in ("/api/edit", "/api/projects", "/api/run") or (path != "/api/projects") != bool(w) \
                 or not (self.headers.get("Content-Type") or "").startswith("application/json"):
             return self.send(404, {"error": "not found"})
         try:
@@ -416,6 +473,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(400, {"error": str(e)})
         if not w.project:
             return self.send(400, {"error": w.state["error"]})
+        if path == "/api/run":
+            if op.get("op") not in ("start", "stop", "kill"):
+                return self.send(400, {"error": "unknown op"})
+            try:
+                with self.write_lock:
+                    return self.send(200, run_control(w.project, op["op"]))
+            except (ValueError, OSError) as e:
+                return self.send(400, {"error": str(e)})
         with self.write_lock:
             try:
                 result = edit.edit(w.project, op)
@@ -455,6 +520,8 @@ class Handler(BaseHTTPRequestHandler):
                 except ValueError:
                     return self.send(400, {"error": "bad task id"})
                 return self.send(200, edit.task_commit(w.project, tid))
+            if path == "/api/runlog":
+                return self.send(200, {"lines": run_log(w.project)})
             if path.startswith("/api/log/"):
                 try:
                     tid, start = int(path.rsplit("/", 1)[1]), int(query.get("from", ["0"])[0])
@@ -480,7 +547,8 @@ class Handler(BaseHTTPRequestHandler):
         ps = self.projects
         msg = {"pm": pm.VERSION, "projects": ps.list()}
         if w:
-            msg |= {"version": w.version, "log": [{"task": t, "size": n} for t, n in w.log or ()]}
+            msg |= {"version": w.version, "log": [{"task": t, "size": n} for t, n in w.log or ()],
+                    "runlog": w.project and run_log_key(w.project)}
         self.send(200, msg)
 
 

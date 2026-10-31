@@ -54,7 +54,7 @@ function RunningCard({ d }) {
   if (!r && (d.stale || d.crash)) return html`<div class="card"><div class="row"><${Pill} status="failed" label="pm not running" />
       <span class="sub"><code>pm run</code> crashed${d.stale ? html` during <${TaskLink} t=${d.task.get(d.stale.task_id)} />` : ""}.</span></div>
     ${d.crash ? html`<pre class="crash">${d.crash.error}</pre>` : null}</div>`;
-  if (!r) return html`<div class="card"><div class="sub">No worker is running${d.queue.length ? html`: start them with <code>pm run</code> in the project's terminal` : ""}.</div>
+  if (!r) return html`<div class="card"><div class="sub">No worker is running${d.queue.length && d.state.pm_run == null ? html`: start them with Run above` : ""}.</div>
     ${d.queue.length ? html`<div class="muted" style="margin-top:4px">Next: <${TaskLink} t=${d.task.get(d.queue[0])} /></div>` : null}</div>`;
   return d.runningAll.map((r) => {
     const t = d.task.get(r.task_id);
@@ -67,7 +67,52 @@ function RunningCard({ d }) {
   });
 }
 
-export function Overview({ d }) {
+// `pm run` from the dashboard: start it, stop it after its task(s), or stop it now; its output below.
+function RunControls({ d, runlog }) {
+  const pid = d.state.pm_run, stopping = !!d.state.pm_stopping;
+  const [busy, setBusy] = useState(null);
+  const [error, setError] = useState(null);
+  const go = async (op) => {
+    if (op === "kill" && !confirm("Force kill pm run? Its workers stop now: their runs are recorded as interrupted, what they left is stashed, and the tasks run again next time."))
+      return;
+    setBusy(op);
+    try {
+      const r = await fetch("api/run", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ op }) });
+      const j = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+      if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
+      setError(null);
+    } catch (e) { setError(e.message); }
+    setBusy(null);
+  };
+  const status = pid == null ? "pm not running" : stopping ? `stopping after the running task(s) (pid ${pid})` : `pm running (pid ${pid})`;
+  return html`<div class="card run-controls">
+    <div class="row">
+      <button class="btn primary" disabled=${pid != null || busy} onClick=${() => go("start")} title="start pm run">▶ Run</button>
+      <button class="btn" disabled=${pid == null || stopping || busy} onClick=${() => go("stop")} title="stop after the running task(s), like pm stop">■ Stop</button>
+      <button class="btn danger" disabled=${pid == null || busy} onClick=${() => go("kill")} title="stop now, like a second Ctrl-C">Force kill</button>
+      <span class="sub">${busy ? "…" : status}</span>
+      ${error ? html`<span class="err">${error}</span>` : null}
+    </div>
+    <${RunLog} runlog=${runlog} />
+  </div>`;
+}
+
+// The last 200 lines of pm run's output; follows the end unless scrolled up.
+function RunLog({ runlog }) {
+  const [lines, setLines] = useState([]);
+  const ref = useRef(null), follow = useRef(true);
+  const key = JSON.stringify(runlog);
+  useEffect(() => {
+    if (!runlog) { setLines([]); return; }
+    fetch("api/runlog").then((r) => r.json()).then((j) => setLines(j.lines || [])).catch(() => {});
+  }, [key]);
+  useLayoutEffect(() => { if (ref.current && follow.current) ref.current.scrollTop = ref.current.scrollHeight; }, [lines]);
+  const scrolled = (e) => { const el = e.target; follow.current = el.scrollTop + el.clientHeight >= el.scrollHeight - 4; };
+  return html`<textarea ref=${ref} class="runlog" readonly rows="20" wrap="off" spellcheck="false" value=${lines.join("\n")}
+    onScroll=${scrolled} placeholder="No output of pm run yet." />`;
+}
+
+export function Overview({ d, runlog }) {
   if (!d.milestones.length) return html`<${Welcome} />`;
   const open = d.milestones.filter((m) => m.status !== "implemented").sort((a, b) => a.queue_index - b.queue_index || a.id - b.id);
   const pending = d.decisions.filter((x) => x.status === "pending");
@@ -76,6 +121,7 @@ export function Overview({ d }) {
   const costToday = d.cost(finished.filter((r) => day(r.started_at) === today));
   return html`
     <h1>Overview</h1>
+    <${RunControls} d=${d} runlog=${runlog} />
     <${Banners} d=${d} />
     <div class="grid2"><${RunningCard} d=${d} />
       <div class="card"><div class="section-head"><b>Waiting on you</b><a href="#/decisions">decisions</a></div>
