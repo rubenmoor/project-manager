@@ -1,9 +1,9 @@
-// The status line: the Claude account's 5-hour and weekly limits (from the workers' last rate_limit_event) and the
-// tokens pm's workers used in each window.
+// The status line: the Claude account's weekly limit (from the workers' last rate_limit_event) and the tokens pm's
+// workers used in the week.
 import { html, useState, useEffect } from "/vendor/preact-htm.js";
 import { tokens, usd, ago } from "/data.js";
 
-const WINDOWS = [["five_hour", "5-hour window", 5 * 3600e3], ["seven_day", "week", 7 * 86400e3]];
+const WEEK = 7 * 86400e3;
 
 function useUsage(version) {
   const [u, setU] = useState(null);
@@ -63,8 +63,7 @@ export function UsageLine({ d, version }) {
   const e = u && u.event;
   return html`<footer class="usage">
     <span class="muted">Claude usage</span>
-    ${WINDOWS.map(([k, label, span]) => html`<${Window} d=${d} label=${label} w=${e && e.windows[k]} span=${span}>
-      ${k === "seven_day" && html`<${BurnClock} b=${u && u.burn} />`}</${Window}>`)}
+    <${Window} d=${d} label="week" w=${e && e.windows.seven_day} span=${WEEK}><${BurnClock} b=${u && u.burn} /></${Window}>
     <span class="grow"></span>
     ${e ? html`<span class="muted" title="from the last rate_limit_event a pm worker logged">${e.status && e.status !== "allowed" ? html`<b class="err">${e.status}</b> · ` : ""}${e.overage ? "using extra usage · " : ""}limits as of ${ago(e.at)}</span>`
       : u ? html`<span class="muted">limits show after the first <code>pm run</code> worker</span>` : null}

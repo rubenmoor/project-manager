@@ -252,8 +252,8 @@ def read_state(project, last_good=None):
 
 
 def usage(projects):
-    """The last rate_limit_event claude's stream-json wrote to a worker log of any project: how much of the 5-hour and
-    the weekly limit the account had used then. Only `pm run` workers write logs, so it is as of their last API call."""
+    """The last rate_limit_event claude's stream-json wrote to a worker log of any project: how much of the weekly limit
+    the account had used then. Only `pm run` workers write logs, so it is as of their last API call."""
     logs = set()
     for p in projects:
         try:
@@ -278,6 +278,7 @@ def usage(projects):
             windows = info.get("unifiedWindows") or {}
             if not windows and info.get("rateLimitType"):
                 windows = {info["rateLimitType"]: {"utilization": info.get("utilization"), "resetsAt": info.get("resetsAt")}}
+            windows = {k: v for k, v in windows.items() if k == "seven_day"}
             return {"event": {"status": info.get("status"), "windows": windows, "overage": info.get("isUsingOverage"),
                               "at": datetime.datetime.fromtimestamp(st.st_mtime, datetime.UTC).isoformat()},
                     "burn": burn(logs)}
