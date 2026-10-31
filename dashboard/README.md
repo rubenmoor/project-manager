@@ -46,7 +46,7 @@ One dashboard shows several independent pm projects, each in its own git reposit
   - failed last run: a red "failed" pill in the queue; with no worker running, "pm run stopped: task N failed" and the likely cause
   - crashed `pm run` (e.g. disk full): "pm not running", the task it was on and its error (also on the overview, and a notification); its stale `running` run shows as "crashed"
 - **Overview**: run controls on top, then running tasks, decisions waiting on you, cost, open and on-hold milestones with progress, queue head; without milestones a welcome screen with one button
-  - Run: starts `pm run --quiet` with the dashboard's own pm, in its own session (outlives a restarted dashboard); its start errors in `.git/pm-run.out`
+  - Run: starts `pm run --quiet` with the dashboard's own pm, in its own session (outlives a restarted dashboard), PATH from your login shell (`$SHELL -lic`; a systemd-started dashboard lacks claude); its start errors in `.git/pm-run.out`
   - Stop: like `pm stop` (SIGUSR1), "stopping…" until it ends; Force kill: SIGTERM after a confirm, like a second Ctrl-C (runs interrupted, leftovers stashed, tasks run again)
   - below: last 200 lines of `.git/pm-run.log`, 20-row read-only textarea, follows the end unless scrolled up
 - **Queue**: as `pm run` sees it; open tasks it leaves out and why

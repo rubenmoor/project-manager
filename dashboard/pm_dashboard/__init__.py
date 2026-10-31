@@ -20,7 +20,7 @@ at /p/<name>/, and a JSON API:
     POST api/edit        {"op": …}: add or change milestones, plans, tasks, resolve decisions, request an
                          executive summary, a resource use report or a custom report through pm (edit.py)
 """
-import argparse, datetime, errno, json, mimetypes, os, signal, subprocess, sys, threading, time
+import argparse, datetime, errno, json, mimetypes, os, pwd, signal, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
@@ -358,6 +358,23 @@ def read_log(project, tid, start=0, rid=None):
     return lines, start + cut
 
 
+def login_path():
+    """PATH as your login shell sets it, then the dashboard's own: a dashboard started by systemd or a desktop launcher
+    has a minimal PATH, without claude. Asked every time: the shell's setup may have changed."""
+    shell = os.environ.get("SHELL") or pwd.getpwuid(os.getuid()).pw_shell or "/bin/sh"
+    try:
+        r = subprocess.run([shell, "-lic", 'printf "\n__PM_PATH__%s\n" "$PATH"'], stdin=subprocess.DEVNULL,
+                           capture_output=True, text=True, timeout=10)
+        shell_path = next((l[len("__PM_PATH__"):] for l in r.stdout.splitlines() if l.startswith("__PM_PATH__")), "")
+    except (OSError, subprocess.TimeoutExpired):
+        shell_path = ""
+    home = Path.home()
+    extra = [home / ".local/bin", home / ".nix-profile/bin", Path("/etc/profiles/per-user") / pwd.getpwuid(os.getuid()).pw_name / "bin",
+             Path("/run/current-system/sw/bin"), home / ".claude/local", home / ".npm-global/bin"]
+    dirs = shell_path.split(os.pathsep) + os.environ.get("PATH", "").split(os.pathsep) + [str(d) for d in extra if d.is_dir()]
+    return os.pathsep.join(dict.fromkeys(d for d in dirs if d))
+
+
 def run_control(project, op):
     """POST api/run: start `pm run` (in its own session: it outlives a restarted dashboard), stop it after its task(s)
     (`pm stop`) or now (SIGTERM, like a second Ctrl-C)."""
@@ -371,7 +388,8 @@ def run_control(project, op):
         out = project.git_dir / "pm-run.out"
         with open(out, "wb") as f:
             proc = subprocess.Popen([sys.executable, "-c", code], cwd=project.root, stdin=subprocess.DEVNULL, stdout=f,
-                                    stderr=subprocess.STDOUT, start_new_session=True)
+                                    stderr=subprocess.STDOUT, start_new_session=True,
+                                    env=os.environ | {"PATH": login_path()})
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline and project.run_pid() != proc.pid:
             if proc.poll() is not None:
