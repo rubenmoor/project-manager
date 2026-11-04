@@ -32,7 +32,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 97  # bump by one with every commit (AGENTS.md)
+VERSION = 98  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions"
@@ -2328,7 +2328,9 @@ class Project:
                         cache_creation_tokens=u.get("cache_creation_input_tokens"), result=e.get("result"),
                         is_error=bool(e.get("is_error")) or e.get("subtype", "success") != "success")
             cost = f", ${e['total_cost_usd']:.2f}" if e.get("total_cost_usd") is not None else ""
-            return f"[{e.get('subtype', 'result')}: {e.get('num_turns')} turns{cost}]\n"
+            # Claude Code reports e.g. a failed login as subtype "success" with is_error set
+            label = "error" if info["is_error"] and e.get("subtype", "success") == "success" else e.get("subtype", "result")
+            return f"[{label}: {e.get('num_turns')} turns{cost}]\n"
         return None
 
     @staticmethod
