@@ -143,6 +143,24 @@ def summary(state):
             "queue": len(good.get("queue") or ())}
 
 
+def folder_error(p):
+    """Why the dashboard can't use folder p: missing, or hidden from this process (other user, systemd sandbox)."""
+    try:
+        os.stat(p)
+        return f"not a folder: {p}"
+    except OSError as e:
+        reason = e.strerror
+    seen = next((a for a in p.parents if os.path.isdir(a)), Path("/"))
+    try:
+        user = pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        user = f"uid {os.getuid()}"
+    msg = f"pm-dashboard (user {user}) can't open {p}: {reason}; it sees {seen} but not {p.relative_to(seen).parts[0]} in it"
+    if os.environ.get("INVOCATION_ID"):
+        msg += "; it runs under systemd: check ProtectHome=, User= and the other sandbox options of its unit"
+    return msg
+
+
 class Projects:
     """The projects shown, in order: the command line's, then the saved ones (added in the dashboard)."""
 
@@ -167,14 +185,17 @@ class Projects:
 
     def add(self, path, saved):
         """Watch the git repository at or around path; its name, or a ValueError."""
+        path = "".join(c for c in path if c.isprintable()).strip().strip("'\"")
+        if path.startswith("file://"):
+            path = unquote(path[7:])
         p = Path(path).expanduser()
         if not p.is_absolute():
             raise ValueError("give an absolute path")
         if not p.is_dir():
-            raise ValueError(f"no such folder: {p}")
+            raise ValueError(folder_error(p))
         r = subprocess.run(["git", "-C", str(p), "rev-parse", "--show-toplevel"], capture_output=True, text=True)
         if r.returncode:
-            raise ValueError(f"not in a git repository: {p}")
+            raise ValueError(f"not in a git repository: {p} ({r.stderr.strip().splitlines()[-1] if r.stderr.strip() else 'git failed'})")
         root = str(Path(r.stdout.strip()).resolve())
         with self.lock:
             for w in self.watchers.values():
