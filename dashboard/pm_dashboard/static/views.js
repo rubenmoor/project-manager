@@ -661,7 +661,7 @@ export function Decisions({ d, query }) {
 }
 
 const KNOWN = new Set(["id", "subject", "status", "options", "body", "intro", "answer", "reason", "created_at", "closed_at",
-  "created_by_task", "signoff", "signoff_view", "kind", "decided_by_task", "consequences"]);
+  "created_by_task", "signoff", "signoff_view", "signoff_plan", "kind", "decided_by_task", "consequences"]);
 
 const links = (d, xs, verb) => xs.map((s) => html`<div class="sub">${(s.note ? "Partly " + verb.toLowerCase() : verb) + " "}<a href=${`#/decision/${s.id}`}>decision ${s.id}: ${(d.decision.get(s.id) || {}).subject}</a>${s.note ? ` (${s.note})` : ""}</div>`);
 
@@ -687,6 +687,7 @@ export function Decision({ d, id, query }) {
   const waiting = d.tasksWaiting.get(x.id) || [];
   const extra = Object.entries(x).filter(([k, v]) => !KNOWN.has(k) && v != null);
   const pending = x.status === "pending";
+  const plan = pending && x.signoff_plan != null ? d.plan.get(x.signoff_plan) : null;
   return html`<div class="crumbs"><a href=${newest ? "#/decisions?view=newest" : "#/decisions"}>Decisions</a></div>
     <h1>${x.subject}</h1>
     <div class="row sub"><${Pill} status=${x.status} />${x.signoff ? html`<span class="tag signoff">sign-off: ${x.signoff}</span>` : null}
@@ -696,12 +697,15 @@ export function Decision({ d, id, query }) {
       ${extra.map(([k, v]) => html`<span class="tag">${k}: ${String(v)}</span>`)}</div>
     ${links(d, d.supersededBy.get(x.id) || [], "Superseded by")}${links(d, d.supersedes.get(x.id) || [], "Supersedes")}
     <${Intro} key=${x.id} intro=${x.intro}>${x.body.trim() || !x.signoff_view ? html`<div class="card"><${Markdown} text=${x.body} empty="No body." /></div>` : null}</${Intro}>
-    ${x.status !== "pending" ? html`<h3>${x.status === "answered" ? "Answer" : "Irrelevant"}</h3>
+    ${x.status !== "pending" ? html`<h3>${{ answered: "Answer", returned: "Returned with feedback" }[x.status] || "Irrelevant"}</h3>
       <div class="sub">${stamp(x.closed_at)}${x.decided_by_task != null ? html`, the own choice of <a href=${`#/task/${x.decided_by_task}`}>task ${x.decided_by_task}</a>` : null}</div>
       <div class="card"><${Markdown} text=${x.answer || x.reason} /></div>` : null}
     ${x.consequences ? html`<${Consequences} text=${x.consequences} />` : null}
     ${x.options.length && !pending ? html`<h3>Options</h3><ol class="options">${x.options.map((o, i) => html`<li class=${i === 0 ? "rec" : ""}><${InlineMd} text=${o} /></li>`)}</ol>` : null}
-    ${x.signoff_view ? html`<h2>What it approves</h2><div class="card"><${Markdown} text=${x.signoff_view} /></div>` : null}
+    ${plan ? html`<h2>What it approves</h2>
+      <div class="sub"><${NamedLink} kind="plan" r=${plan} />: click or press i to edit; it is saved to the plan, and Approve approves the edited version.</div>
+      <${EditableBody} key=${plan.id} text=${plan.body} save=${planSave(d, plan.id, "body")} />`
+      : x.signoff_view ? html`<h2>What it approves</h2><div class="card"><${Markdown} text=${x.signoff_view} /></div>` : null}
     ${pending ? html`<${Resolve} key=${x.id} d=${d} x=${x} next=${nextPending(d, x, newest)} view=${newest ? "?view=newest" : ""} />` : null}
     <h2>Tasks waiting for it (${waiting.length})</h2>
     ${waiting.length ? html`<div class="tablewrap"><${TaskRows} d=${d} tasks=${waiting} /></div>` : html`<div class="empty">None.</div>`}`;

@@ -14,7 +14,8 @@ pm decision list                       # pending decisions: context, options, bl
 pm decision answer 3 1                 # option 1; or own text: pm decision answer 3 "tabs"
 pm decision answer 3 1 --once --supersedes 2
 pm decision irrelevant 3 "<reason>"    # drops the open tasks it blocks
-pm decision approve 4                  # sign-offs only
+pm decision approve 4 [--edit]         # sign-offs only; --edit: a plan sign-off, edit the plan first
+pm decision return 4 < feedback.md     # a plan sign-off: revised with the feedback, then asked again
 pm decision kind 3 rule                # rule: lasting, in the log; once: a one-off
 pm task add --exec "<subject>" [--priority N] < body.md
 pm summary request ; pm report request # queue an executive summary / resource use report; show, list

@@ -19,7 +19,7 @@ human's exec tasks and pm's planning and cleanup tasks. Standard library only (P
 
     pm init | status | queue | show <task|d32|p3|m1> | validate | decide | run [--once] [--dry-run] | instructions [topic|--all]
     pm milestone add|set|hold|resume|list|show …   pm plan add|edit|list …   pm task add|set|done|drop|redo|requires|priority …
-    pm decision add|list|show|answer|approve|irrelevant|record|supersede|consequences|kind …
+    pm decision add|list|show|answer|approve|return|irrelevant|record|supersede|consequences|kind …
     pm summary request|add|show|list   pm report request|tasks|add|ask|answer|show|list
     pm task-pending-decision <task> <decision>
 
@@ -32,7 +32,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 99  # bump by one with every commit (AGENTS.md)
+VERSION = 100  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions"
@@ -47,6 +47,7 @@ REPACK = ("import fcntl, subprocess, sys\nf = open(sys.argv[1], 'w')\ntry:\n    
 WORKER_ENV = {"CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1", "BASH_MAX_TIMEOUT_MS": "3600000"}
 EPILOG = "Agents (LLMs): read `pm instructions` first: rules, every command, topics for details."
 PROMPT_KEYS = ("masterplan_prompt", "plan_tasks_prompt", "revise_masterplan_prompt", "revise_plan_prompt",
+               "revise_feedback_prompt",
                "cleanup_prompt", "investigate_prompt", "summary_prompt",
                "report_prompt", "custom_report_prompt", "merge_prompt")
 PRIORITY_KEYS = ("plan_priority_prompt", "task_priority_prompt")
@@ -93,7 +94,7 @@ SIGNOFF_INTROS = {
 IN_LOG = ("status = 'answered' AND signoff IS NULL AND kind = 'rule' AND id NOT IN (SELECT superseded_id FROM "
           "decision_supersedes s JOIN decision n ON n.id = s.decision_id WHERE s.note = '' AND n.status = 'answered')")
 
-SCHEMA_VERSION = 30
+SCHEMA_VERSION = 31
 # A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
 # run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
 # Columns and tables SCHEMA dropped are left behind, new ones get their defaults; so only renames, moved data and new
@@ -123,7 +124,7 @@ def trunk_kinds(con):
 
 
 MIGRATIONS = {12: "", 13: "", 14: revise_kind, 15: "", 16: "", 17: "", 18: drop_summary_kind, 19: exec_kind,
-              20: "", 21: "", 22: "", 23: "", 24: "", 25: "", 26: trunk_kinds, 27: "", 28: "", 29: ""}
+              20: "", 21: "", 22: "", 23: "", 24: "", 25: "", 26: trunk_kinds, 27: "", 28: "", 29: "", 30: ""}
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -172,12 +173,12 @@ CREATE TABLE task (
 CREATE TABLE decision (
     id              INTEGER PRIMARY KEY,
     subject         TEXT NOT NULL CHECK (trim(subject) <> ''),
-    status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'answered', 'irrelevant')),
+    status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'answered', 'irrelevant', 'returned')),
     options         TEXT NOT NULL DEFAULT '[]' CHECK (json_type(options) = 'array'),  -- recommended first
     body            TEXT NOT NULL DEFAULT '',
     intro           TEXT NOT NULL DEFAULT '',              -- plain English: what is to be decided; required since schema 23
     answer          TEXT,
-    reason          TEXT,
+    reason          TEXT,                                  -- irrelevant: why; returned: the human's feedback
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     closed_at       TEXT,
     created_by_task INTEGER REFERENCES task (id),
@@ -187,12 +188,15 @@ CREATE TABLE decision (
     consequences    TEXT NOT NULL DEFAULT '',              -- what changed because of the answer; appended
     CONSTRAINT "a sign-off is only approved"
     CHECK (signoff IS NULL OR status <> 'irrelevant' AND coalesce(answer, 'approve') = 'approve'),
+    CONSTRAINT "only a plan or masterplan sign-off is returned"
+    CHECK (status <> 'returned' OR signoff IN ('masterplan', 'plan')),
     CONSTRAINT "only an answered question has a decider and consequences"
     CHECK (status = 'answered' AND signoff IS NULL OR decided_by_task IS NULL AND consequences = ''),
-    CONSTRAINT "pending: no answer, reason or closed_at; answered: answer and closed_at; irrelevant: reason and closed_at"
+    CONSTRAINT "pending: no answer, reason or closed_at; answered: answer and closed_at; irrelevant, returned: reason and closed_at"
     CHECK (status = 'pending' AND answer IS NULL AND reason IS NULL AND closed_at IS NULL
            OR status = 'answered' AND answer IS NOT NULL AND closed_at IS NOT NULL
-           OR status = 'irrelevant' AND reason IS NOT NULL AND closed_at IS NOT NULL)
+           OR status = 'irrelevant' AND reason IS NOT NULL AND closed_at IS NOT NULL
+           OR status = 'returned' AND answer IS NULL AND reason IS NOT NULL AND closed_at IS NOT NULL)
 ) STRICT;
 
 CREATE TABLE run (                                         -- one worker run of `pm run`
@@ -1186,7 +1190,9 @@ class Project:
             if d["status"] != "pending":
                 raise FormatError(f"decision {did} is not pending")
             if d["signoff"] and (irrelevant is not None or answer != SIGNOFF_ANSWER):
-                raise FormatError(f"decision {did} is a sign-off: its only answer is {SIGNOFF_ANSWER!r}")
+                raise FormatError(f"decision {did} is a sign-off: its only answer is {SIGNOFF_ANSWER!r}"
+                                  + ("; or return it with feedback (pm decision return)"
+                                     if d["signoff"] in ("masterplan", "plan") else ""))
             if irrelevant is None:
                 db.execute("UPDATE decision SET status = 'answered', answer = ?, closed_at = ?, kind = ? WHERE id = ?",
                            (answer, now(), kind or d["kind"], did))
@@ -1269,7 +1275,7 @@ class Project:
             out += ["", f"Answer ({stamp(d['closed_at'])}" + (f", task {d['decided_by_task']}'s own choice" if
                                                              d["decided_by_task"] else "") + f"): {d['answer']}"]
         elif d["reason"]:
-            out += ["", f"Irrelevant ({stamp(d['closed_at'])}): {d['reason']}"]
+            out += ["", f"{d['status'].capitalize()} ({stamp(d['closed_at'])}): {d['reason']}"]
         if d["consequences"]:
             out += ["", "Consequences:", d["consequences"]]
         if tasks:
@@ -1283,8 +1289,11 @@ class Project:
             if d["signoff"]:
                 if d["intro"]:
                     out.append("  " + d["intro"].replace("\n", "\n  "))
+                if d["body"]:
+                    out.append("  " + d["body"].replace("\n", "\n  "))
                 out.append("  " + self.signoff_view(d["id"], d["signoff"]).replace("\n", "\n  "))
-                out.append(f"  pm decision approve {d['id']}\n")
+                out.append(f"  pm decision approve {d['id']}" + (f" [--edit]  |  pm decision return {d['id']} < feedback.md"
+                                                               if d["signoff"] in ("masterplan", "plan") else "") + "\n")
                 continue
             blocks = [str(r["id"]) for r in self.rows(
                 "SELECT t.id FROM task_decision td JOIN task t ON t.id = td.task_id "
@@ -1305,8 +1314,15 @@ class Project:
         for d in self.pending():
             self.say("\n" + self.decisions_of([d]).rstrip("\n"))
             if d["signoff"]:
-                if ask(f"Answer [a = {SIGNOFF_ANSWER}, s = skip]: ").strip().lower() in ("a", SIGNOFF_ANSWER):
+                plan = d["signoff"] in ("masterplan", "plan")
+                reply = ask(f"Answer [a = {SIGNOFF_ANSWER}, " + ("r <feedback> = return, " if plan else "")
+                            + "s = skip]: ").strip()
+                if reply.lower() in ("a", SIGNOFF_ANSWER):
                     self.resolve(d["id"], answer=SIGNOFF_ANSWER)
+                    closed += 1
+                elif plan and reply.lower().startswith("r ") and reply[2:].strip():
+                    tid, _ = self.return_signoff(d["id"], reply[2:])
+                    self.say(f"decision {d['id']} returned; task {tid} revises the plan")
                     closed += 1
                 continue
             hint = f"1-{len(d['options'])}, " if d["options"] else ""
@@ -1323,11 +1339,73 @@ class Project:
             closed += 1
         return closed
 
-    def approve(self, did):
+    def approve(self, did, body=None, intro=None):
+        """Approve sign-off did. A plan or masterplan sign-off: a body or intro first edits the plan, which is then what
+        is approved. Returns the tasks the edit queued: [(id, subject)]."""
+        human_only("answer, approve or close decisions")
         with self.connect() as db:
-            if not self.get(db, "decision", did)["signoff"]:
+            d = self.get(db, "decision", did)
+            if not d["signoff"]:
                 raise FormatError(f"decision {did} is not a sign-off; answer it (pm decision answer)")
+            if d["status"] != "pending":
+                raise FormatError(f"decision {did} is not pending")
+            pid = self.signoff_plan(db, did) if body is not None or intro is not None else None
+        queued = self.plan_edit(pid, body=body, intro=intro) if pid is not None else []
         self.resolve(did, answer=SIGNOFF_ANSWER)
+        return queued
+
+    def signoff_plan(self, db, did):
+        """The plan a pending plan or masterplan sign-off approves."""
+        d = self.get(db, "decision", did)
+        if d["status"] != "pending":
+            raise FormatError(f"decision {did} is not pending")
+        if d["signoff"] not in ("masterplan", "plan"):
+            raise FormatError(f"decision {did} is {'a ' + d['signoff'] + ' sign-off' if d['signoff'] else 'a question'}, "
+                              f"not the sign-off of a plan")
+        pids = [r[0] for r in db.execute("SELECT DISTINCT t.plan_id FROM task_decision td JOIN task t ON t.id = td.task_id "
+                                         "WHERE td.decision_id = ? AND t.status = 'open' AND t.kind = 'split'", (did,))]
+        if len(pids) != 1:
+            raise FormatError(f"decision {did}: no open task waits for it" if not pids else
+                              f"decision {did} waits for plans {', '.join(map(str, pids))}, not one")
+        return pids[0]
+
+    def return_signoff(self, did, feedback):
+        """Return plan or masterplan sign-off did with the human's feedback: it closes as returned and a revise task of
+        the plan gets the feedback (a waiting one: appended). Once revised, the split asks for a new sign-off.
+        Returns (task id, subject)."""
+        human_only("return sign-offs")
+        feedback = (feedback or "").strip()
+        if not feedback:
+            raise FormatError("returning a sign-off needs feedback: what to change")
+        with self.connect(write=True) as db:
+            d = self.get(db, "decision", did)
+            if d["status"] != "pending":
+                raise FormatError(f"decision {did} is not pending")
+            pid = self.signoff_plan(db, did)
+            db.execute("UPDATE decision SET status = 'returned', reason = ?, closed_at = ? WHERE id = ?",
+                       (feedback, now(), did))
+            p = self.get(db, "plan", pid)
+            quoted = f"# Feedback ({ref('decision', did, d['subject'])})\n\n{feedback}"
+            if old := db.execute("SELECT id, subject, body FROM task WHERE plan_id = ? AND kind = 'revise' "
+                                 "AND status = 'open' " + NOT_RUNNING, (pid,)).fetchone():
+                db.execute("UPDATE task SET body = ? WHERE id = ?", (old[2].rstrip() + "\n\n" + quoted, old[0]))
+                return old[0], old[1]
+            if self.masterplan(db, p["milestone_id"]) == pid:
+                m = self.get(db, "milestone", p["milestone_id"])
+                subject = REVISE_MASTERPLAN_SUBJECT.format(ref("milestone", m["id"], m["subject"]))
+            else:
+                subject = REVISE_PLAN_SUBJECT.format(ref("plan", pid, p["subject"]))
+            body = self.prompt("revise_feedback_prompt", plan=ref("plan", pid, p["subject"], True), plan_id=pid,
+                               decision=ref("decision", did, d["subject"], True)) + "\n\n" + quoted
+            tid = db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task) "
+                             "VALUES (?, ?, 'revise', ?, ?, NULL)",
+                             (pid, subject, self.config["planning_priority"], body)).lastrowid
+            return tid, subject
+
+    def returned(self, db, tid):
+        """The returned sign-offs of task tid, oldest first."""
+        return db.execute("SELECT d.* FROM task_decision td JOIN decision d ON d.id = td.decision_id "
+                          "WHERE td.task_id = ? AND d.status = 'returned' ORDER BY d.id", (tid,)).fetchall()
 
     def answer(self, did, reply, kind=None, supersedes=()):
         """Answer decision did: an option's number or own text. Returns the answer."""
@@ -1440,7 +1518,7 @@ class Project:
         with self.connect(write=True) as db:
             t = self.get(db, "task", tid)
             level = self.missing_signoff(db, t)
-            did = None
+            did, body = None, ""
             if level == "task-queue":
                 did = db.execute("SELECT min(id) FROM decision WHERE signoff = 'task-queue' AND status = 'pending'"
                                  ).fetchone()[0]
@@ -1461,9 +1539,12 @@ class Project:
                 subject = (f"Sign off the masterplan of {ref('milestone', m['id'], m['subject'])}"
                            if level == "masterplan" else f"Sign off {ref('plan', p['id'], p['subject'])}")
                 intro = "\n\n".join(x for x in (p["intro"], SIGNOFF_INTROS["plan"]) if x)
+                body = "\n\n".join(f"Returned in decision {r['id']} ({stamp(r['closed_at'])}) with this feedback:\n\n"
+                                    + "\n".join("> " + x for x in r["reason"].splitlines())
+                                    for r in self.returned(db, tid))
             if did is None:
-                did = db.execute("INSERT INTO decision (subject, options, signoff, intro) VALUES (?, ?, ?, ?)",
-                                 (subject, json.dumps([SIGNOFF_ANSWER]), level, intro)).lastrowid
+                did = db.execute("INSERT INTO decision (subject, options, signoff, intro, body) VALUES (?, ?, ?, ?, ?)",
+                                 (subject, json.dumps([SIGNOFF_ANSWER]), level, intro, body)).lastrowid
             for x in tids:
                 self.block(db, x, did)
         return did
@@ -3635,6 +3716,13 @@ def main(argv=None):
     dk.add_argument("kind", choices=("rule", "once"))
     dap = d.add_parser("approve", help="approve a sign-off")
     dap.add_argument("decision", type=int)
+    dap.add_argument("--edit", action="store_true", help="plan or masterplan sign-off: edit the plan's body in the "
+                     "editor first, and approve the edited version")
+    dre = d.add_parser("return", help="return a plan or masterplan sign-off with feedback: a revise task changes the "
+                       "plan, then pm asks for the sign-off again")
+    dre.add_argument("decision", type=int)
+    dre.add_argument("feedback", nargs="?", type=text_arg, help="what to change (Markdown); - reads stdin; "
+                     "without: editor")
     di = d.add_parser("irrelevant", help="close without answer; drops the open tasks it blocks")
     di.add_argument("decision", type=int)
     di.add_argument("reason")
@@ -3817,8 +3905,22 @@ def main(argv=None):
                 pm.set_kind(args.decision, args.kind)
                 msg = f"decision {args.decision}: kind {args.kind}"
             elif args.action == "approve":
-                pm.approve(args.decision)
-                msg = f"decision {args.decision} approved"
+                body = None
+                if args.edit:
+                    with pm.connect() as db:
+                        pid = pm.signoff_plan(db, args.decision)
+                        old = pm.get(db, "plan", pid)["body"]
+                    if (body := pm.edit("PM_PLAN", old + "\n")) is None:
+                        raise FormatError("editor quit without saving; nothing approved")
+                pm.approve(args.decision, body=body)
+                msg = f"decision {args.decision} approved" + (f", plan {pid} edited" if body is not None
+                                                              and body.strip() != old else "")
+            elif args.action == "return":
+                feedback = args.feedback
+                if feedback is None and (feedback := pm.edit("PM_FEEDBACK")) is None:
+                    raise FormatError("editor quit without saving; nothing returned")
+                tid, subject = pm.return_signoff(args.decision, feedback)
+                msg = f"decision {args.decision} returned; task {tid}: {subject}"
             elif args.action == "irrelevant":
                 pm.resolve(args.decision, irrelevant=args.reason)
                 msg = f"decision {args.decision} irrelevant: {args.reason}"

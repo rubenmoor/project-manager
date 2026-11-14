@@ -74,6 +74,14 @@ revise_plan_prompt = '''
 below it and of its own open tasks; its done and dropped tasks stay as they are.
 '''
 
+# The task a returned sign-off queues in its plan: the human read {plan} and asks for changes before approving it.
+# {plan}, {plan_id} and {decision} are replaced; the human's feedback follows.
+revise_feedback_prompt = '''
+The owner returned {plan} at its sign-off ({decision}) with the feedback quoted below. Revise the plan accordingly
+(`pm plan edit {plan_id} --body - [--intro …]`); where the feedback is unclear or conflicts with a decision, follow it
+as far as it is clear and raise a decision for the rest. pm then asks for the sign-off again.
+'''
+
 # The task "post-milestone cleanup of milestone N: …", queued in a milestone's first plan once all its other tasks are
 # closed; the milestone is implemented when it is closed too. {milestone} is replaced.
 cleanup_prompt = '''

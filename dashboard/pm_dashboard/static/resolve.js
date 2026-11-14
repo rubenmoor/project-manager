@@ -1,4 +1,4 @@
-// Resolving a pending decision on its page, as `pm decision answer|approve|irrelevant`: the answer or reason is a
+// Resolving a pending decision on its page, as `pm decision answer|approve|return|irrelevant`: the answer, feedback or reason is a
 // Markdown draft (rendered; a click: source; Esc: rendered again), sent with a button or Ctrl-Enter; "& next"
 // (Ctrl-Shift-Enter) then opens the next pending decision.
 import { html, useState, useRef, useEffect } from "/vendor/preact-htm.js";
@@ -32,6 +32,8 @@ export function Resolve({ d, x, next, view = "" }) {
   const [mode, setMode] = useState("answer");
   const answer = useDraft(`pm-answer:${x.id}:${x.subject}`);
   const reason = useDraft(`pm-reason:${x.id}:${x.subject}`);
+  const feedback = useDraft(`pm-feedback:${x.id}:${x.subject}`);
+  const returnable = x.signoff_plan != null;
   const [once, setOnce] = useState(x.kind === "once");
   const [sup, setSup] = useState("");
   const [busy, setBusy] = useState(false);
@@ -48,6 +50,7 @@ export function Resolve({ d, x, next, view = "" }) {
     catch (e) { setError(e.message); setBusy(false); }
   };
   const submit = (then) => {
+    if (mode === "return") return go({ op: "decision_return", id: x.id, feedback: feedback.cur.current }, feedback, then);
     if (x.signoff) return go({ op: "decision_approve", id: x.id }, null, then);
     if (mode === "irrelevant") return go({ op: "decision_irrelevant", id: x.id, reason: reason.cur.current }, reason, then);
     const ids = (sup.match(/\d+/g) || []).map(Number);
@@ -57,9 +60,20 @@ export function Resolve({ d, x, next, view = "" }) {
     title=${next != null ? `then open decision ${next}` : "none left: then back to the decisions"}>${label} & next</button>`;
   const keys = (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) { e.preventDefault(); submit(e.shiftKey); } };
   const status = html`<span class="grow"></span>${error ? html`<span class="err">${error}</span>` : null}`;
+  if (mode === "return") return html`<div class="resolve" onKeyDown=${keys}>
+    <h2>Return with feedback</h2>
+    <${Draft} value=${feedback.value} set=${feedback.set} empty="What should change: click or press i to write." />
+    <div class="row" style="margin-top:10px">
+      <span class="sub">A planning task revises the plan with your feedback; then it comes back for sign-off.</span>
+      ${status}<button class="iconbtn" onClick=${() => { setMode("answer"); setError(null); }}>cancel</button>
+      <button class="btn" onClick=${() => submit()} disabled=${busy || !feedback.value.trim()}>Return</button>
+      ${nextBtn("Return", busy || !feedback.value.trim())}</div>
+    <div class="edit-hint">Markdown supported · Esc: render · Ctrl-Enter: return · Ctrl-Shift-Enter: return & next</div></div>`;
   if (x.signoff) return html`<div class="card resolve">
-    <div class="row"><span class="sub">${open ? `Unblocks ${open} open task${open > 1 ? "s" : ""}. ` : ""}Leave it pending to change plans or tasks first.</span>
-      ${status}<button class="btn" onClick=${() => submit()} disabled=${busy}>Approve</button>${nextBtn("Approve", busy)}</div></div>`;
+    <div class="row"><span class="sub">${open ? `Unblocks ${open} open task${open > 1 ? "s" : ""}. ` : ""}${returnable
+      ? "Edit the plan above, or return it with feedback." : "Leave it pending to change plans or tasks first."}</span>
+      ${status}${returnable ? html`<button class="iconbtn" onClick=${() => { setMode("return"); setError(null); }}>return with feedback…</button>` : null}
+      <button class="btn" onClick=${() => submit()} disabled=${busy}>Approve</button>${nextBtn("Approve", busy)}</div></div>`;
   if (mode === "irrelevant") return html`<div class="resolve" onKeyDown=${keys}>
     <h2>Close as irrelevant</h2>
     <${Draft} value=${reason.value} set=${reason.set} empty="Why it no longer matters: click or press i to write." />

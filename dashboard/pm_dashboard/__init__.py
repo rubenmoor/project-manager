@@ -25,9 +25,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-PM_MIN_VERSION = 96     # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
+PM_MIN_VERSION = 100    # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
                         # summary_request, exec tasks, open_summary, report_request, report_rows, report_ask, WORKTREE_NAME,
-                        # task_requires, shown_queue, run_stopping, pm run --quiet)
+                        # task_requires, shown_queue, run_stopping, pm run --quiet, return_signoff, signoff_plan)
 try:
     import pm
 except ImportError:
@@ -262,6 +262,12 @@ def read_state(project, last_good=None):
             d["in_log"] = d["id"] in in_log
             if d.get("signoff") and d["status"] == "pending":
                 d["signoff_view"] = project.signoff_view(d["id"], d["signoff"])
+                if d["signoff"] in ("masterplan", "plan"):
+                    with project.connect() as db:
+                        try:
+                            d["signoff_plan"] = project.signoff_plan(db, d["id"])
+                        except pm.FormatError:
+                            pass
         head_signoff = project.needs_signoff(queue[0]) if queue else None
         done_plans = project.done_plans()
         open_summary, open_report = project.open_summary(), project.open_report()

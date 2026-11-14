@@ -143,7 +143,7 @@ h3 { font-size: 14px; margin: 16px 0 6px; font-weight: 600; }
 .pill.done .dot, .pill.answered .dot, .pill.implemented .dot { background: var(--good); }
 .pill.dropped .dot, .pill.irrelevant .dot { background: var(--dropped); }
 .pill.failed .dot { background: var(--critical); }
-.pill.blocked .dot, .pill.on-hold .dot { background: var(--warning); }
+.pill.blocked .dot, .pill.on-hold .dot, .pill.returned .dot { background: var(--warning); }
 .pill.limit .dot { background: var(--serious); }
 .pill.killed .dot { background: var(--muted); }
 .pill.running .dot { background: var(--good); animation: pulse 1.4s ease-in-out infinite; }

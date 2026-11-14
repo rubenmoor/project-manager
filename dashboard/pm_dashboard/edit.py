@@ -124,6 +124,9 @@ def apply(project, op):
     if kind == "decision_approve":
         project.approve(int(op["id"]))
         return f"decision {op['id']} approved", None
+    if kind == "decision_return":
+        tid, subject = project.return_signoff(int(op["id"]), text(op.get("feedback"), "the feedback"))
+        return f"decision {op['id']} returned; task {tid}: {short(subject)}", tid
     if kind == "decision_irrelevant":
         reason = text(op.get("reason"), "the reason").strip()
         project.resolve(int(op["id"]), irrelevant=reason)
