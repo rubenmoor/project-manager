@@ -23,7 +23,7 @@
           pyproject = true;
           src = ./.;
           build-system = [ pkgs.python3Packages.setuptools ];
-          makeWrapperArgs = [ "--prefix" "PATH" ":" "${pkgs.git}/bin" ];
+          makeWrapperArgs = [ "--prefix" "PATH" ":" "${pkgs.git}/bin:${pkgs.git-lfs}/bin" ];
           meta.mainProgram = "pm";
         };
         dashboard = pkgs.python3Packages.buildPythonApplication {
@@ -34,7 +34,7 @@
           build-system = [ pkgs.python3Packages.setuptools ];
           dependencies = [ (pkgs.python3Packages.toPythonModule default) ];
           # PYTHONPATH would come first: an older pm on it (a checkout) would shadow the pm built here
-          makeWrapperArgs = [ "--prefix" "PATH" ":" "${pkgs.git}/bin" "--unset" "PYTHONPATH" ];
+          makeWrapperArgs = [ "--prefix" "PATH" ":" "${pkgs.git}/bin:${pkgs.git-lfs}/bin" "--unset" "PYTHONPATH" ];
           meta.mainProgram = "pm-dashboard";
         };
       });
