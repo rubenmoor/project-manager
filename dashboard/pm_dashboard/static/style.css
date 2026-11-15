@@ -141,7 +141,8 @@ h3 { font-size: 14px; margin: 16px 0 6px; font-weight: 600; }
 .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
 .pill.open .dot, .pill.pending .dot { background: var(--accent); }
 .pill.done .dot, .pill.answered .dot, .pill.implemented .dot { background: var(--good); }
-.pill.dropped .dot, .pill.irrelevant .dot { background: var(--dropped); }
+.pill.dropped .dot, .pill.irrelevant .dot, .pill.archived .dot { background: var(--dropped); }
+.pill.rejected .dot { background: var(--critical); }
 .pill.failed .dot { background: var(--critical); }
 .pill.blocked .dot, .pill.on-hold .dot, .pill.returned .dot { background: var(--warning); }
 .pill.limit .dot { background: var(--serious); }
@@ -483,3 +484,6 @@ del { color: var(--critical); text-decoration: line-through; }
 textarea.runlog { display: block; width: 100%; box-sizing: border-box; margin-top: 10px; resize: vertical; background: var(--code);
   color: var(--ink); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font-family: var(--mono);
   font-size: 12px; line-height: 18px; }
+.iconbtn.on { border-color: var(--accent); color: var(--accent); }
+.reject-one { margin-top: 10px; }
+.row.reject { margin-top: 6px; }

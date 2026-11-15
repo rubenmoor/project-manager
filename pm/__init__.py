@@ -32,7 +32,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 102  # bump by one with every commit (AGENTS.md)
+VERSION = 103  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions"
@@ -94,7 +94,7 @@ SIGNOFF_INTROS = {
 IN_LOG = ("status = 'answered' AND signoff IS NULL AND kind = 'rule' AND id NOT IN (SELECT superseded_id FROM "
           "decision_supersedes s JOIN decision n ON n.id = s.decision_id WHERE s.note = '' AND n.status = 'answered')")
 
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 32
 WHICH_PM = f"pm {VERSION}, {__file__}"     # a stale PYTHONPATH can load another pm than the one installed
 # A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
 # run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
@@ -125,7 +125,7 @@ def trunk_kinds(con):
 
 
 MIGRATIONS = {12: "", 13: "", 14: revise_kind, 15: "", 16: "", 17: "", 18: drop_summary_kind, 19: exec_kind,
-              20: "", 21: "", 22: "", 23: "", 24: "", 25: "", 26: trunk_kinds, 27: "", 28: "", 29: "", 30: ""}
+              20: "", 21: "", 22: "", 23: "", 24: "", 25: "", 26: trunk_kinds, 27: "", 28: "", 29: "", 30: "", 31: ""}
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -147,7 +147,8 @@ CREATE TABLE plan (
     body            TEXT NOT NULL CONSTRAINT "a plan needs a body" CHECK (trim(body) <> ''),
     intro           TEXT NOT NULL DEFAULT '',              -- plain English for an outsider; required by pm since schema 23
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    created_by_task INTEGER REFERENCES task (id)
+    created_by_task INTEGER REFERENCES task (id),
+    archived_by_decision INTEGER REFERENCES decision (id)  -- its sign-off was rejected: kept, hidden; NULL: live
 ) STRICT;
 
 CREATE TABLE task (
@@ -155,12 +156,12 @@ CREATE TABLE task (
     plan_id         INTEGER REFERENCES plan (id),          -- NULL: exec, and only exec
     subject         TEXT NOT NULL CHECK (trim(subject) <> ''),
     kind            TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'plan', 'masterplan', 'split', 'cleanup', 'revise', 'investigate', 'merge', 'exec')),
-    status          TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done', 'dropped')),
+    status          TEXT NOT NULL DEFAULT 'open' CHECK (status IN ('open', 'done', 'dropped', 'archived')),  -- archived: a rejected sign-off
     priority        INTEGER,                               -- NULL: the plan's
-    note            TEXT,                                  -- done: date, files; dropped: reason
+    note            TEXT,                                  -- done: date, files; dropped, archived: reason
     body            TEXT NOT NULL DEFAULT '',              -- Markdown
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
-    retired_at      TEXT,                                  -- done or dropped
+    retired_at      TEXT,                                  -- done, dropped or archived
     created_by_task INTEGER REFERENCES task (id),
     web             INTEGER NOT NULL DEFAULT 0 CHECK (web IN (0, 1)),  -- 1: its worker gets WebSearch and WebFetch
     model           TEXT CHECK (model IS NULL OR trim(model) <> ''),  -- claude --model; NULL: [models] in the config
@@ -174,12 +175,12 @@ CREATE TABLE task (
 CREATE TABLE decision (
     id              INTEGER PRIMARY KEY,
     subject         TEXT NOT NULL CHECK (trim(subject) <> ''),
-    status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'answered', 'irrelevant', 'returned')),
+    status          TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'answered', 'irrelevant', 'returned', 'rejected')),
     options         TEXT NOT NULL DEFAULT '[]' CHECK (json_type(options) = 'array'),  -- recommended first
     body            TEXT NOT NULL DEFAULT '',
     intro           TEXT NOT NULL DEFAULT '',              -- plain English: what is to be decided; required since schema 23
     answer          TEXT,
-    reason          TEXT,                                  -- irrelevant: why; returned: the human's feedback
+    reason          TEXT,                                  -- irrelevant: why; returned: the human's feedback; rejected: why, optional
     created_at      TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
     closed_at       TEXT,
     created_by_task INTEGER REFERENCES task (id),
@@ -191,13 +192,15 @@ CREATE TABLE decision (
     CHECK (signoff IS NULL OR status <> 'irrelevant' AND coalesce(answer, 'approve') = 'approve'),
     CONSTRAINT "only a plan or masterplan sign-off is returned"
     CHECK (status <> 'returned' OR signoff IN ('masterplan', 'plan')),
+    CONSTRAINT "only a sign-off is rejected" CHECK (status <> 'rejected' OR signoff IS NOT NULL),
     CONSTRAINT "only an answered question has a decider and consequences"
     CHECK (status = 'answered' AND signoff IS NULL OR decided_by_task IS NULL AND consequences = ''),
-    CONSTRAINT "pending: no answer, reason or closed_at; answered: answer and closed_at; irrelevant, returned: reason and closed_at"
+    CONSTRAINT "pending: no answer, reason or closed_at; answered: answer and closed_at; irrelevant, returned: reason and closed_at; rejected: closed_at"
     CHECK (status = 'pending' AND answer IS NULL AND reason IS NULL AND closed_at IS NULL
            OR status = 'answered' AND answer IS NOT NULL AND closed_at IS NOT NULL
            OR status = 'irrelevant' AND reason IS NOT NULL AND closed_at IS NOT NULL
-           OR status = 'returned' AND answer IS NULL AND reason IS NOT NULL AND closed_at IS NOT NULL)
+           OR status = 'returned' AND answer IS NULL AND reason IS NOT NULL AND closed_at IS NOT NULL
+           OR status = 'rejected' AND answer IS NULL AND closed_at IS NOT NULL)
 ) STRICT;
 
 CREATE TABLE run (                                         -- one worker run of `pm run`
@@ -380,6 +383,20 @@ class GitError(subprocess.CalledProcessError):
 
 def now():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def archived_note(p):
+    return f"; archived: sign-off rejected in decision {p['archived_by_decision']}" if p["archived_by_decision"] else ""
+
+
+def archived_text(plans, tasks):
+    return ", ".join([f"plan(s) {', '.join(map(str, plans))}"] * bool(plans)
+                     + [f"task(s) {', '.join(map(str, tasks))}"] * bool(tasks)) or "nothing"
+
+
+def rejected_text(did, tid, plans, tasks):
+    return (f"decision {did}: task {tid} rejected" if tid is not None else f"decision {did} rejected") + \
+        f"; archived {archived_text(plans, tasks)}"
 
 
 def need_intro(intro, what):
@@ -1041,8 +1058,8 @@ class Project:
         """Task tid waits until task pid is done. Refused: a cycle; a dropped pid, unless moving links."""
         if tid == pid:
             raise FormatError(f"task {tid} can't require itself")
-        if cls.get(db, "task", pid)["status"] == "dropped" and not moving:
-            raise FormatError(f"task {pid} is dropped; require the task that replaces it")
+        if (st := cls.get(db, "task", pid)["status"]) in ("dropped", "archived") and not moving:
+            raise FormatError(f"task {pid} is {st}; require the task that replaces it")
         if path := cls.requires_path(db, pid, tid):
             raise FormatError("a cycle: task " + " requires ".join(map(str, [tid, *path])))
         db.execute("INSERT OR IGNORE INTO task_prerequisite_tasks VALUES (?, ?)", (tid, pid))
@@ -1066,11 +1083,11 @@ class Project:
                                          "WHERE r.task_id = ? AND q.status <> 'done' ORDER BY q.id", (tid,))]
 
     def stuck(self):
-        """{open task id: [its dropped prerequisite tasks]}: they wait for good unless the links change."""
+        """{open task id: [its dropped or archived prerequisite tasks]}: they wait for good unless the links change."""
         out = {}
         for r in self.rows("SELECT r.task_id, r.prerequisite_id FROM task_prerequisite_tasks r "
                            "JOIN task t ON t.id = r.task_id JOIN task q ON q.id = r.prerequisite_id "
-                           "WHERE t.status = 'open' AND q.status = 'dropped' ORDER BY 1, 2"):
+                           "WHERE t.status = 'open' AND q.status IN ('dropped', 'archived') ORDER BY 1, 2"):
             out.setdefault(r["task_id"], []).append(r["prerequisite_id"])
         return out
 
@@ -1188,8 +1205,10 @@ class Project:
                     "WHERE p.milestone_id = m.id AND t.status = 'open') "
                     "ORDER BY m.id").fetchall():
                 done = db.execute("SELECT 1 FROM task t JOIN plan p ON p.id = t.plan_id "
-                                  "WHERE p.milestone_id = ? AND t.kind = 'cleanup'", (mid,)).fetchone()
-                pid = db.execute("SELECT min(id) FROM plan WHERE milestone_id = ?", (mid,)).fetchone()[0]
+                                  "WHERE p.milestone_id = ? AND t.kind = 'cleanup' AND t.status <> 'archived'",
+                                  (mid,)).fetchone()
+                pid = db.execute("SELECT min(id) FROM plan WHERE milestone_id = ? AND archived_by_decision IS NULL",
+                                 (mid,)).fetchone()[0]
                 if pid is not None and not done:
                     m = self.get(db, "milestone", mid)
                     db.execute("INSERT INTO task (plan_id, subject, kind, body, created_by_task) "
@@ -1217,7 +1236,7 @@ class Project:
             if d["signoff"] and (irrelevant is not None or answer != SIGNOFF_ANSWER):
                 raise FormatError(f"decision {did} is a sign-off: its only answer is {SIGNOFF_ANSWER!r}"
                                   + ("; or return it with feedback (pm decision return)"
-                                     if d["signoff"] in ("masterplan", "plan") else ""))
+                                     if d["signoff"] in ("masterplan", "plan") else "") + "; or reject it (pm decision reject)")
             if irrelevant is None:
                 db.execute("UPDATE decision SET status = 'answered', answer = ?, closed_at = ?, kind = ? WHERE id = ?",
                            (answer, now(), kind or d["kind"], did))
@@ -1341,8 +1360,12 @@ class Project:
             if d["signoff"]:
                 plan = d["signoff"] in ("masterplan", "plan")
                 reply = ask(f"Answer [a = {SIGNOFF_ANSWER}, " + ("r <feedback> = return, " if plan else "")
-                            + "s = skip]: ").strip()
-                if reply.lower() in ("a", SIGNOFF_ANSWER):
+                            + "x [reason] = reject (archive it), s = skip]: ").strip()
+                if reply.lower() == "x" or reply.lower().startswith("x "):
+                    plans, tasks = self.reject(d["id"], reply[1:])
+                    self.say(rejected_text(d["id"], None, plans, tasks))
+                    closed += 1
+                elif reply.lower() in ("a", SIGNOFF_ANSWER):
                     self.resolve(d["id"], answer=SIGNOFF_ANSWER)
                     closed += 1
                 elif plan and reply.lower().startswith("r ") and reply[2:].strip():
@@ -1426,6 +1449,67 @@ class Project:
                              "VALUES (?, ?, 'revise', ?, ?, NULL)",
                              (pid, subject, self.config["planning_priority"], body)).lastrowid
             return tid, subject
+
+    def reject(self, did, reason=None, tid=None):
+        """Reject sign-off did: what it would approve is archived, kept but hidden. Plan or masterplan: the plan, the
+        plans below it and their open tasks; a masterplan's milestone goes on hold (resumed: a new masterplan). Task
+        queue or web: its open tasks; tid: only that task of a task-queue sign-off, which stays pending for the others.
+        Returns (archived plan ids, archived task ids)."""
+        human_only("reject sign-offs")
+        reason = (reason or "").strip() or None
+        with self.connect(write=True) as db:
+            d = self.get(db, "decision", did)
+            if not d["signoff"]:
+                raise FormatError(f"decision {did} is not a sign-off; answer it or close it as irrelevant")
+            if d["status"] != "pending":
+                raise FormatError(f"decision {did} is not pending")
+            waiting = [r[0] for r in db.execute("SELECT t.id FROM task_decision td JOIN task t ON t.id = td.task_id "
+                                                "WHERE td.decision_id = ? AND t.status = 'open' ORDER BY t.id", (did,))]
+            plans = []
+            if tid is not None and d["signoff"] != "task-queue":
+                raise FormatError(f"decision {did} is a {d['signoff']} sign-off; only a task-queue sign-off rejects "
+                                  f"one task of it")
+            if tid is not None and tid not in waiting:
+                raise FormatError(f"open task {tid} doesn't wait for decision {did}")
+            if d["signoff"] in ("masterplan", "plan"):
+                plans = self.plan_tree(db, self.signoff_plan(db, did))
+                tasks = [r[0] for r in db.execute(f"SELECT id FROM task WHERE status = 'open' AND plan_id IN "
+                                                  f"({', '.join('?' * len(plans))}) ORDER BY id", plans)]
+            else:
+                tasks = [tid] if tid is not None else waiting
+            if running := [r[0] for r in db.execute("SELECT DISTINCT task_id FROM run WHERE result = 'running'")
+                           if r[0] in tasks]:
+                raise FormatError(f"task(s) {', '.join(map(str, sorted(running)))} running; wait for it, or "
+                                  f"`pm kill` it, then reject")
+            note, ts = f"rejected in decision {did}" + (f": {reason}" if reason else ""), now()
+            for x in tasks:
+                db.execute("UPDATE task SET status = 'archived', note = ?, retired_at = ? WHERE id = ?", (note, ts, x))
+            for x in plans:
+                db.execute("UPDATE plan SET archived_by_decision = ? WHERE id = ?", (did, x))
+            if tid is None or not set(waiting) - {tid}:
+                db.execute("UPDATE decision SET status = 'rejected', reason = ?, closed_at = ? WHERE id = ?",
+                           (reason, ts, did))
+            if d["signoff"] == "masterplan":
+                db.execute("UPDATE milestone SET status = 'on-hold' WHERE status = 'open' AND id = ?",
+                           (self.get(db, "plan", plans[0])["milestone_id"],))
+        return plans, tasks
+
+    def archived(self):
+        """`pm plan list --archived`: archived plans and tasks, by the rejected sign-off."""
+        out = []
+        for d in self.rows("SELECT DISTINCT d.* FROM decision d WHERE d.id IN (SELECT archived_by_decision FROM plan) "
+                           "OR d.id IN (SELECT td.decision_id FROM task_decision td JOIN task t ON t.id = td.task_id "
+                           "WHERE t.status = 'archived') ORDER BY d.id"):
+            out.append(f"Decision {d['id']} ({self.decision_tags(d)}): {d['subject']}"
+                       + (f" → {d['reason']}" if d["reason"] else ""))
+            plans = self.rows("SELECT id, subject FROM plan WHERE archived_by_decision = ? ORDER BY id", d["id"])
+            out += [f"  plan {p['id']}: {p['subject']}" for p in plans]
+            same = f"rejected in decision {d['id']}" + (f": {d['reason']}" if d["reason"] else "")
+            out += [f"  task {t['id']} [{t['kind']}] {t['subject']}" + (f" ({t['note']})" if t["note"] != same else "")
+                    for t in self.rows("SELECT id, kind, subject, note FROM task WHERE status = 'archived' AND (plan_id IN "
+                                       "(SELECT id FROM plan WHERE archived_by_decision = ?1) OR id IN (SELECT task_id "
+                                       "FROM task_decision WHERE decision_id = ?1)) ORDER BY id", d["id"])]
+        return "\n".join(out) + "\n" if out else "Nothing archived.\n"
 
     def returned(self, db, tid):
         """The returned sign-offs of task tid, oldest first."""
@@ -1833,17 +1917,21 @@ class Project:
         with self.connect(write=True) as db:
             mid = db.execute("INSERT INTO milestone (subject, body, queue_index) VALUES (?, ?, ?)",
                              (subject, (body or "").strip(), queue_index or 0)).lastrowid
-            pid = db.execute("INSERT INTO plan (milestone_id, subject, priority, body, created_by_task) "
-                             "VALUES (?, 'masterplan', ?, 'tbd.', ?)",
-                             (mid, self.config["planning_priority"], creator())).lastrowid
-            db.execute("INSERT INTO task (plan_id, subject, kind, body, created_by_task) "
-                       "VALUES (?, ?, 'masterplan', ?, ?)",
-                       (pid, WRITE_MASTERPLAN_SUBJECT.format(ref("milestone", mid, subject)),
-                        self.prompt("masterplan_prompt", milestone_id=mid, milestone_subject=subject, plan_id=pid,
-                                    milestone=ref("milestone", mid, subject, True),
-                                    plan=ref("plan", pid, "masterplan", True)),
-                        creator()))
+            self.add_masterplan(db, mid, subject)
         return mid
+
+    def add_masterplan(self, db, mid, subject):
+        """Milestone mid's masterplan (a stub) and the task that writes it."""
+        pid = db.execute("INSERT INTO plan (milestone_id, subject, priority, body, created_by_task) "
+                         "VALUES (?, 'masterplan', ?, 'tbd.', ?)",
+                         (mid, self.config["planning_priority"], creator())).lastrowid
+        db.execute("INSERT INTO task (plan_id, subject, kind, body, created_by_task) "
+                   "VALUES (?, ?, 'masterplan', ?, ?)",
+                   (pid, WRITE_MASTERPLAN_SUBJECT.format(ref("milestone", mid, subject)),
+                    self.prompt("masterplan_prompt", milestone_id=mid, milestone_subject=subject, plan_id=pid,
+                                milestone=ref("milestone", mid, subject, True),
+                                plan=ref("plan", pid, "masterplan", True)),
+                    creator()))
 
     def milestone_hold(self, mid, hold):
         """Put a milestone on hold, or resume one on hold."""
@@ -1880,6 +1968,9 @@ class Project:
                     db.execute(f"UPDATE milestone SET {k} = ? WHERE id = ?", (v.strip() if isinstance(v, str) else v, mid))
             if fields.get("subject") is not None:
                 self.rename_refs(db, "milestone", mid, m["subject"], fields["subject"].strip())
+            if fields.get("status") == "open" and master is None:
+                self.add_masterplan(db, mid, self.get(db, "milestone", mid)["subject"])
+                return []
             return [q for q in [self.queue_revision(db, master)] if q] if changed and master else []
 
     # --- plan tree ---------------------------------------------------------------------------
@@ -1889,14 +1980,16 @@ class Project:
     @staticmethod
     def masterplan(db, mid):
         return db.execute("SELECT min(t.plan_id) FROM task t JOIN plan p ON p.id = t.plan_id "
-                          "WHERE p.milestone_id = ? AND t.kind = 'masterplan'", (mid,)).fetchone()[0]
+                          "WHERE p.milestone_id = ? AND t.kind = 'masterplan' AND p.archived_by_decision IS NULL",
+                          (mid,)).fetchone()[0]
 
     def plan_children(self, db, mid):
         """{plan id: [ids of the plans below it]} of milestone mid."""
         master = self.masterplan(db, mid)
         rows = db.execute("SELECT p.id, CASE WHEN q.milestone_id = p.milestone_id AND q.id <> p.id THEN q.id END "
                           "FROM plan p LEFT JOIN task t ON t.id = p.created_by_task LEFT JOIN plan q ON q.id = t.plan_id "
-                          "WHERE p.milestone_id = ? AND p.id <> ? ORDER BY p.id", (mid, master or 0)).fetchall()
+                          "WHERE p.milestone_id = ? AND p.id <> ? AND p.archived_by_decision IS NULL ORDER BY p.id",
+                          (mid, master or 0)).fetchall()
         children = {}
         for c, parent in rows:
             if (parent or master) not in (None, c):
@@ -1905,6 +1998,15 @@ class Project:
 
     def child_plans(self, db, pid):
         return self.plan_children(db, self.get(db, "plan", pid)["milestone_id"]).get(pid, [])
+
+    def plan_tree(self, db, pid):
+        """Plan pid and every plan below it."""
+        children, out, todo = self.plan_children(db, self.get(db, "plan", pid)["milestone_id"]), [], [pid]
+        while todo:
+            if (x := todo.pop()) not in out:
+                out.append(x)
+                todo += children.get(x, [])
+        return sorted(out)
 
     def plan_done(self, db, pid, children=None, memo=None):
         """Plan pid has tasks, none open, and every plan below it is done. children: plan_children of its milestone;
@@ -1925,11 +2027,15 @@ class Project:
             out = []
             for (mid,) in db.execute("SELECT id FROM milestone ORDER BY id").fetchall():
                 children, memo = self.plan_children(db, mid), {}
-                out += [pid for (pid,) in db.execute("SELECT id FROM plan WHERE milestone_id = ?", (mid,)).fetchall()
+                out += [pid for (pid,) in db.execute("SELECT id FROM plan WHERE milestone_id = ? "
+                                                     "AND archived_by_decision IS NULL", (mid,)).fetchall()
                         if self.plan_done(db, pid, children, memo)]
             return sorted(out)
 
     def check_plan_open(self, db, pid):
+        if (did := self.get(db, "plan", pid)["archived_by_decision"]) is not None:
+            raise FormatError(f"plan {pid} is archived (its sign-off was rejected in decision {did}) and can't be "
+                              f"changed; add a new plan instead: pm plan add {self.get(db, 'plan', pid)['milestone_id']}")
         if self.plan_done(db, pid):
             mid = self.get(db, "plan", pid)["milestone_id"]
             raise FormatError(f"plan {pid} is done (no open task, nor in the plans below it) and can't be changed; "
@@ -2119,7 +2225,7 @@ class Project:
                                (pid,)).fetchall()
         by = f", by task {p['created_by_task']}" if p["created_by_task"] else ""
         out = [f"# Plan {pid}: {p['subject']} (milestone {m['id']}: {m['subject']}; priority {p['priority'] or 0}, "
-               f"created {stamp(p['created_at'])}{by})", ""] + [p["intro"], ""] * bool(p["intro"]) + [p["body"], ""]
+               f"created {stamp(p['created_at'])}{by}{archived_note(p)})", ""] + [p["intro"], ""] * bool(p["intro"]) + [p["body"], ""]
         out += [f"- task {x['id']} [{x['status']}{'' if x['kind'] == 'work' else ', ' + x['kind']}] {x['subject']}"
                 for x in tasks]
         return "\n".join(out).rstrip() + "\n"
@@ -2128,7 +2234,8 @@ class Project:
         with self.connect() as db:
             m = self.get(db, "milestone", mid)
             plans = db.execute("SELECT p.id, p.subject, sum(t.status = 'open') AS open, count(t.id) AS n FROM plan p "
-                               "LEFT JOIN task t ON t.plan_id = p.id WHERE p.milestone_id = ? GROUP BY p.id ORDER BY p.id",
+                               "LEFT JOIN task t ON t.plan_id = p.id AND t.status <> 'archived' "
+                               "WHERE p.milestone_id = ? AND p.archived_by_decision IS NULL GROUP BY p.id ORDER BY p.id",
                                (mid,)).fetchall()
         implemented = f", implemented {stamp(m['implemented_at'])}" if m["implemented_at"] else ""
         out = [f"# Milestone {mid}: {m['subject']} ({m['status']}, queue index {m['queue_index']}, created {stamp(m['created_at'])}{implemented})", "",
@@ -2140,7 +2247,8 @@ class Project:
         """`pm milestone list`: every milestone, one per line: id, queue index, status, closed/all tasks, subject;
         by queue index."""
         rows = self.rows("SELECT m.id, m.queue_index, m.status, m.subject, count(t.id) AS n, coalesce(sum(t.status <> 'open'), 0) AS closed "
-                         "FROM milestone m LEFT JOIN plan p ON p.milestone_id = m.id LEFT JOIN task t ON t.plan_id = p.id "
+                         "FROM milestone m LEFT JOIN plan p ON p.milestone_id = m.id AND p.archived_by_decision IS NULL "
+                         "LEFT JOIN task t ON t.plan_id = p.id AND t.status <> 'archived' "
                          "GROUP BY m.id ORDER BY m.queue_index, m.id")
         if not rows:
             return "No milestones (`pm milestone add` starts one).\n"
@@ -2156,9 +2264,10 @@ class Project:
             if t["plan_id"] is not None:
                 p = self.get(db, "plan", t["plan_id"])
                 m = self.get(db, "milestone", p["milestone_id"])
-                plans = db.execute("SELECT id, subject FROM plan WHERE milestone_id = ? ORDER BY id", (m["id"],)).fetchall()
-                siblings = db.execute("SELECT id, status, kind, subject FROM task WHERE plan_id = ? ORDER BY id",
-                                      (p["id"],)).fetchall()
+                plans = db.execute("SELECT id, subject FROM plan WHERE milestone_id = ? AND (archived_by_decision IS "
+                                   "NULL OR id = ?) ORDER BY id", (m["id"], p["id"])).fetchall()
+                siblings = db.execute("SELECT id, status, kind, subject FROM task WHERE plan_id = ? "
+                                      "AND (status <> 'archived' OR id = ?) ORDER BY id", (p["id"], tid)).fetchall()
             ds = db.execute("SELECT d.* FROM task_decision td JOIN decision d ON d.id = td.decision_id "
                             "WHERE td.task_id = ? ORDER BY d.id", (tid,)).fetchall()
             runs = db.execute("SELECT * FROM run WHERE task_id = ? ORDER BY id", (tid,)).fetchall()
@@ -2178,7 +2287,8 @@ class Project:
             implemented = f", implemented {stamp(m['implemented_at'])}" if m["implemented_at"] else ""
             out = [f"# Milestone {m['id']}: {m['subject']} ({m['status']}, created {stamp(m['created_at'])}{implemented})",
                    "", m["body"], "", "Plans: " + ", ".join(f"{x['id']} {x['subject']}" for x in plans), "",
-                   f"# Plan {p['id']}: {p['subject']} (priority {p['priority'] or 0}, created {stamp(p['created_at'])}{by(p)})",
+                   f"# Plan {p['id']}: {p['subject']} (priority {p['priority'] or 0}, created {stamp(p['created_at'])}{by(p)}"
+                   f"{archived_note(p)})",
                    "", p["body"], ""]
             out += [f"- task {x['id']} [{x['status']}{'' if x['kind'] == 'work' else ', ' + x['kind']}] {x['subject']}"
                     + (" ← this task" if x["id"] == tid else "") for x in siblings] + [""]
@@ -3279,7 +3389,7 @@ class Project:
         seen, holds = set(), self.planning_holds(q)
         trunk_dirty = "" not in running and self.dirty()   # planning tasks run in the trunk
         for tid, dropped in self.stuck().items():
-            self.say_once(f"task {tid} waits for dropped task(s) {', '.join(map(str, dropped))}: `pm task redo <id>`, "
+            self.say_once(f"task {tid} waits for dropped or archived task(s) {', '.join(map(str, dropped))}: `pm task redo <id>`, "
                           f"`pm task requires {tid} --remove <id>` or `pm task drop {tid}`")
         for _, tid, _, kind, index, tree in q:
             if index != q[0][4] or len(running) >= limit:
@@ -3549,10 +3659,11 @@ class Project:
             self.say(f"`pm run` (pid {c['pid']}) {'stopped' if c['stopped'] else 'crashed'} at {stamp(c['at'])}: {c['error']}")
         for m in self.rows(
                 "SELECT m.id, m.subject, m.status, m.created_at, m.queue_index, "
-                "(SELECT count(*) FROM plan p WHERE p.milestone_id = m.id) AS plans, "
-                "(SELECT count(*) FROM task t JOIN plan p ON p.id = t.plan_id WHERE p.milestone_id = m.id) AS tasks, "
-                "(SELECT count(*) FROM task t JOIN plan p ON p.id = t.plan_id "
-                "WHERE p.milestone_id = m.id AND t.status <> 'open') AS closed, "
+                "(SELECT count(*) FROM plan p WHERE p.milestone_id = m.id AND p.archived_by_decision IS NULL) AS plans, "
+                "(SELECT count(*) FROM task t JOIN plan p ON p.id = t.plan_id WHERE p.milestone_id = m.id "
+                "AND t.status <> 'archived' AND p.archived_by_decision IS NULL) AS tasks, "
+                "(SELECT count(*) FROM task t JOIN plan p ON p.id = t.plan_id WHERE p.milestone_id = m.id "
+                "AND t.status NOT IN ('open', 'archived') AND p.archived_by_decision IS NULL) AS closed, "
                 "(SELECT count(*) FROM run r JOIN task t ON t.id = r.task_id JOIN plan p ON p.id = t.plan_id "
                 "WHERE p.milestone_id = m.id) AS runs, "
                 "(SELECT count(*) FROM run r JOIN task t ON t.id = r.task_id JOIN plan p ON p.id = t.plan_id "
@@ -3566,7 +3677,7 @@ class Project:
                      f"${m['cost']:.2f}")
         self.print_queue(limit=10)
         if stuck := self.stuck():
-            self.say("\nWaiting for dropped prerequisite tasks, for good: "
+            self.say("\nWaiting for dropped or archived prerequisite tasks, for good: "
                      + ", ".join(f"task {t} ({', '.join(map(str, ps))})" for t, ps in stuck.items()))
         pending = self.pending()
         self.say(f"\nPending decisions ({len(pending)}):")
@@ -3706,7 +3817,8 @@ def main(argv=None):
     pe.add_argument("--intro", type=text_arg, help="plain English for an outsider; queues nothing")
     pe.add_argument("--priority", type=lambda v: v if v == "none" else int(v), help="integer, or none for 0")
     p.add_parser("list", help="plans with open tasks in open milestones, one per line: priority, id, subject; by the "
-                  "milestone's queue index, then highest priority first")
+                  "milestone's queue index, then highest priority first").add_argument(
+        "--archived", action="store_true", help="instead: archived plans and tasks, by the sign-off that rejected them")
 
     t = sub.add_parser("task", help="add or change tasks").add_subparsers(dest="action", required=True)
     a = t.add_parser("add", help="new task; prints its id. `pm task add --exec [<subject>]`: an exec task, no plan")
@@ -3799,6 +3911,11 @@ def main(argv=None):
     dre.add_argument("decision", type=int)
     dre.add_argument("feedback", nargs="?", type=text_arg, help="what to change (Markdown); - reads stdin; "
                      "without: editor")
+    drj = d.add_parser("reject", help="reject a sign-off: archive what it would approve (kept, hidden): a plan with the "
+                       "plans below it and their open tasks (a masterplan: its milestone goes on hold), or its tasks")
+    drj.add_argument("decision", type=int)
+    drj.add_argument("reason", nargs="?", help="optional: why")
+    drj.add_argument("--task", type=int, help="task-queue sign-off: archive only this task of it")
     di = d.add_parser("irrelevant", help="close without answer; drops the open tasks it blocks")
     di.add_argument("decision", type=int)
     di.add_argument("reason")
@@ -3889,7 +4006,9 @@ def main(argv=None):
                                               body=args.body, queue_index=args.queue))
                 msg = f"milestone {args.milestone} changed"
         elif args.cmd in ("plan", "plans"):
-            if args.action == "list":
+            if args.action == "list" and args.archived:
+                print(pm.archived(), end="")
+            elif args.action == "list":
                 pm.print_plans()
             elif args.action == "add":
                 pm.require("milestone", args.milestone)
@@ -3997,6 +4116,9 @@ def main(argv=None):
                     raise FormatError("editor quit without saving; nothing returned")
                 tid, subject = pm.return_signoff(args.decision, feedback)
                 msg = f"decision {args.decision} returned; task {tid}: {subject}"
+            elif args.action == "reject":
+                plans, tasks = pm.reject(args.decision, args.reason, args.task)
+                msg = rejected_text(args.decision, args.task, plans, tasks)
             elif args.action == "irrelevant":
                 pm.resolve(args.decision, irrelevant=args.reason)
                 msg = f"decision {args.decision} irrelevant: {args.reason}"

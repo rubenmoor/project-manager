@@ -45,13 +45,13 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 **Data.** Everything is referenced by its integer id.
 
 - milestone: subject, body, status (`open`, `on-hold`, `implemented`), `queue_index` (default 0), `created_at`, `implemented_at`
-- plan: belongs to a milestone; subject, body, priority, `created_at`, `created_by_task`
-- task: belongs to a plan, except kind `exec`; subject, body, kind (`work`, `plan`: writes a plan; `exec`: an executive intervention by the human, no plan or milestone, queued as if at queue index 0, by priority; made by pm: `masterplan`, `split` for "create tasks for plan N: …", `cleanup`, `revise` for "revise the masterplan of …" and "revise plan N: …", `investigate` for "investigate the failure of task N: …", `merge` for "merge the trunk and work tree X"), status, priority, note, `created_at`, `retired_at` (done or dropped), `created_by_task`, `web`, `model` (NULL: by kind, `[models]`), `worktree` (`[worktrees]`; NULL: the trunk, for exec, planning and cleanup tasks)
+- plan: belongs to a milestone; subject, body, priority, `created_at`, `created_by_task`, `archived_by_decision` (its sign-off was rejected)
+- task: belongs to a plan, except kind `exec`; subject, body, kind (`work`, `plan`: writes a plan; `exec`: an executive intervention by the human, no plan or milestone, queued as if at queue index 0, by priority; made by pm: `masterplan`, `split` for "create tasks for plan N: …", `cleanup`, `revise` for "revise the masterplan of …" and "revise plan N: …", `investigate` for "investigate the failure of task N: …", `merge` for "merge the trunk and work tree X"), status (`open`, `done`, `dropped`, `archived`), priority, note, `created_at`, `retired_at` (done, dropped or archived), `created_by_task`, `web`, `model` (NULL: by kind, `[models]`), `worktree` (`[worktrees]`; NULL: the trunk, for exec, planning and cleanup tasks)
 - task_prerequisite_tasks: `task_id` runs only once `prerequisite_id` is done; many-to-many, no cycles
 - summary: an executive summary (Markdown), the task that wrote it, `head_commit` (where the next one's delta starts), `created_at`
 - resource_use_report: the task that wrote it, `head_commit`, `created_at`; `resource_use_category`: its mutually exclusive categories (name, one sentence of criteria); `resource_use_task`: each task done when it was written, in one category
 - custom_report: the human's question, its task, the one-paragraph answer (empty until answered), `created_at`, `answered_at`
-- decision: subject, body, options, status (`pending` | `answered` | `irrelevant` | `returned`), answer or reason, `created_at`, `closed_at`, `created_by_task`, `signoff` (made by pm, see below), `kind` (`rule` | `once`), `decided_by_task` (a worker's own choice), `consequences`; `task_decision` links tasks to the decisions they wait for; `decision_supersedes` links a decision to the ones it replaces (note: only partly)
+- decision: subject, body, options, status (`pending` | `answered` | `irrelevant` | `returned` | `rejected`), answer or reason, `created_at`, `closed_at`, `created_by_task`, `signoff` (made by pm, see below), `kind` (`rule` | `once`), `decided_by_task` (a worker's own choice), `consequences`; `task_decision` links tasks to the decisions they wait for; `decision_supersedes` links a decision to the ones it replaces (note: only partly)
 - run: one worker run of `pm run`: task, start, end, result (`running`, `done`, `blocked`, `failed`, `limit`), reason, exit code, `base_commit` (HEAD at the start), `worktree` (the task's then; empty: the trunk), `pid` of `pm run`; from claude's JSON output: model, session, `continues_run` (warm hand-off: the run whose session it resumed), turns, tokens (input, output, cache read, cache creation), cost in USD; while it runs, `running` (at most one per work tree, uncommitted); a `pm run` that died leaves it, the next `pm run` marks it `failed` (`interrupted`), or refuses while that process lives
 - timestamps in UTC; `created_by_task`: the task whose worker created the row (`PM_TASK`), empty for the human or pm
 
@@ -76,7 +76,13 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 - plan and masterplan sign-offs, two more ways:
   - edit, then approve: `pm decision approve <id> --edit` opens the plan in the editor; the dashboard shows the plan editable on the sign-off page
   - return with feedback: `pm decision return <id> < feedback.md` (`pm decide`: `r <feedback>`); the decision closes as `returned` (feedback in `reason`), "revise …" of that plan gets the feedback (`revise_feedback_prompt`; a waiting one: appended), and the split then asks for a new sign-off, quoting the earlier feedback
-- no `x` (irrelevant) for sign-offs
+- reject, any sign-off: `pm decision reject <id> [<reason>]` (`pm decide`: `x [reason]`); the decision closes as `rejected` (optional reason), what it would approve is archived: kept, hidden from lists, counts, the queue and `pm status`
+  - plan: the plan, the plans below it and their open tasks; masterplan: the same, and the milestone goes on hold; resuming it queues a new masterplan
+  - task queue: all its open tasks; `--task <id>`: only that one, the sign-off stays pending for the others
+  - web: the task
+  - done tasks stay done; a running task is refused (`pm kill` first); tasks requiring an archived task wait for good, like with a dropped one
+  - archived plans can't be changed; no restore; `pm plan list --archived` lists them, by sign-off
+- no irrelevant for sign-offs
 
 **Priorities.** Set by workers, following rules in project-manager.toml:
 
@@ -104,7 +110,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 | `task done\|drop <task> <note>`, `task priority <task> <N\|none>` | Close a task, set its priority; `drop --replaced-by <task>`: that task takes over its prerequisite links |
 | `task requires <task> <prerequisite>… [--remove <task>]` | It runs only once these are done (see Dependencies) |
 | `decision add <subject>` | `--intro` (required: what has to be decided, plain English for an outsider), `--body`, `--option` (recommended first) |
-| `decide` | Answer pending decisions one by one in the terminal (number, text, `s` skip, `x <reason>` irrelevant; sign-offs: `a` approve, `r <feedback>` return (plans), `s` skip) |
+| `decide` | Answer pending decisions one by one in the terminal (number, text, `s` skip, `x <reason>` irrelevant; sign-offs: `a` approve, `r <feedback>` return (plans), `x [reason]` reject, `s` skip) |
 | `decision list` | Pending decisions: context, options, blocked tasks; sign-offs with what they approve. `--answered`: the decision log (answered `rule` decisions nothing fully supersedes, newest first); `--all`: every decision; `--grep <text>` |
 | `decision show <id>` | One decision: context, options, answer, consequences, tasks, supersede links (also `pm show d<id>`) |
 | `decision record <subject> --answer …` | A decision nobody asked, added answered; `--intro` (required), `--body`, `--once`, `--supersedes <id>`, `--consequences`. In a worker: its own choice (`decided_by_task`) |
@@ -112,7 +118,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 | `report request`, `report show [id]`, `report list` | Queue a resource use report (an exec task, priority 10000; two passes over all done tasks and their diffs: draw up mutually exclusive categories with criteria, then put each task in one; pm sums time, tokens and cost per category); show the newest or one; list them (with custom reports) |
 | `report ask <question>`, `report answer` | A custom report: queue an exec task (priority 10000) that answers the question in one plain paragraph; in its worker, store the answer (stdin); `pm show c2` |
 | `decision supersede <new> <old>`, `decision consequences <id> <text>`, `decision kind <id> rule\|once` | Link a replaced decision (`--note`: only partly); append what changed because of an answer; lasting rule or one-off |
-| `decision answer <id> <n\|text>`, `decision approve <id> [--edit]`, `decision return <id> [<feedback>\|-]`, `decision irrelevant <id> <reason>` | Close a decision (`answer`: `--once`, `--supersedes <id>`); irrelevant drops the open tasks it blocks; approve: sign-offs only (`--edit`: plan sign-offs, edit the plan first); return: plan sign-offs, with feedback. Refused in a worker |
+| `decision answer <id> <n\|text>`, `decision approve <id> [--edit]`, `decision return <id> [<feedback>\|-]`, `decision reject <id> [<reason>] [--task <id>]`, `decision irrelevant <id> <reason>` | Close a decision (`answer`: `--once`, `--supersedes <id>`); irrelevant drops the open tasks it blocks; approve: sign-offs only (`--edit`: plan sign-offs, edit the plan first); return: plan sign-offs, with feedback; reject: sign-offs, archives what they approve. Refused in a worker |
 | `task-pending-decision <task> <decision>` | The task waits until the decision is answered |
 
 Global: `--root <repo>`. A text value `-` reads stdin.
@@ -135,7 +141,7 @@ Each task runs the configured `worker` command (default: `claude -p` with `Bash 
 - Milestones are mine; edit them with pm when we answer decisions: `pm decision list`, `pm milestone set <id> --body - <<'EOF'`, then `pm decision answer <id> …`.
 ```
 
-Sections for the human's own sessions only: check `PM_TASK` (`pm run` sets it in every worker), and pm enforces it anyway: `milestone add|set|hold|resume` and `decision answer|approve|return|irrelevant` are refused in a worker. These checks, like the guard hook below, keep an honest worker on track; they are no security boundary: a worker with a shell can unset `PM_TASK`.
+Sections for the human's own sessions only: check `PM_TASK` (`pm run` sets it in every worker), and pm enforces it anyway: `milestone add|set|hold|resume` and `decision answer|approve|return|reject|irrelevant` are refused in a worker. These checks, like the guard hook below, keep an honest worker on track; they are no security boundary: a worker with a shell can unset `PM_TASK`.
 
 **The worker has full shell access in the project.** The default command has claude print JSON (`--output-format stream-json --verbose`): `pm` shows the text and tool calls in the terminal, each with the local time it got it, and records model, turns, tokens and cost in the run. Other commands' plain output is shown as it is. Logs, raw, each line prefixed with its UTC time and a tab: `.git/pm-logs/task-<id>-run-<run>.log` (`log_dir`), `task-<id>.log` links to the latest. On a usage limit, `pm` waits for the reset and retries.
 

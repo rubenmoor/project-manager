@@ -127,6 +127,12 @@ def apply(project, op):
     if kind == "decision_return":
         tid, subject = project.return_signoff(int(op["id"]), text(op.get("feedback"), "the feedback"))
         return f"decision {op['id']} returned; task {tid}: {short(subject)}", tid
+    if kind == "decision_reject":
+        reason, tid = op.get("reason") or "", op.get("task")
+        if not isinstance(reason, str) or tid is not None and type(tid) is not int:
+            raise EditError("reason must be text, task a task id")
+        plans, tasks = project.reject(int(op["id"]), reason, tid)
+        return pm.rejected_text(int(op["id"]), tid, plans, tasks), None
     if kind == "decision_irrelevant":
         reason = text(op.get("reason"), "the reason").strip()
         project.resolve(int(op["id"]), irrelevant=reason)

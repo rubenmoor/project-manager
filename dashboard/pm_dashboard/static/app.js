@@ -126,7 +126,9 @@ function App() {
     return () => removeEventListener("hashchange", f);
   }, []);
   const shown = state && (state.tables ? state : state.last_good);
-  const d = useMemo(() => (shown ? index({ ...shown, __log: log }) : null), [shown, log]);
+  const [archived, setArchived] = useState(() => { try { return localStorage.getItem("pm-archived") === "1"; } catch { return false; } });
+  const toggleArchived = () => { try { localStorage.setItem("pm-archived", archived ? "0" : "1"); } catch {} setArchived(!archived); };
+  const d = useMemo(() => (shown ? index({ ...shown, __log: log }, archived) : null), [shown, log, archived]);
   useNotifications(projects);
   // The home page: the run view while pm runs (or ran in the last 5 minutes), else the overview; chosen on arrival.
   const [home, setHome] = useState(null);
@@ -157,6 +159,8 @@ function App() {
         ${state && state.dirty && state.dirty.length ? html` <span class="tag" title=${state.dirty.join("\n")}>${state.dirty.length} uncommitted</span>` : null}</span>
       <${Search} d=${d} />
       <${NotifyButton} />
+      <button class=${"iconbtn" + (archived ? " on" : "")} onClick=${toggleArchived}
+        title="plans and tasks of rejected sign-offs: kept, hidden unless shown">${archived ? "archived: shown" : "archived: hidden"}</button>
       <${Theme} />
     </header>
     <nav class="nav">${NAV.map(([k, label]) => html`<a href=${`#/${k}`} class=${page === k ? "on" : ""}>

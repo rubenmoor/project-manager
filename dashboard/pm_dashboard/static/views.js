@@ -180,7 +180,7 @@ function QueueTable({ d, ids }) {
       const run = d.isRunning(id);
       return html`<tr class=${d.queuePos.get(id) === 0 ? "head-row" : ""}>
         <td class="r num muted">${d.queuePos.get(id) + 1}</td><td><${Prio} p=${d.prio(t)} /></td>
-        <td class="subject"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /> <${Worktree} name=${t.worktree} /> ${run ? html`<${Pill} status="running" />` : null}${d.unmet(t).length ? html` <span class=${`tag waits${d.stuck(t) ? " stuck" : ""}`} title="waits for prerequisite tasks">waits for ${d.unmet(t).map((x) => `t${x.id}${x.status === "dropped" ? " (dropped)" : ""}`).join(", ")}</span>` : null}</td>
+        <td class="subject"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /> <${Worktree} name=${t.worktree} /> ${run ? html`<${Pill} status="running" />` : null}${d.unmet(t).length ? html` <span class=${`tag waits${d.stuck(t) ? " stuck" : ""}`} title="waits for prerequisite tasks">waits for ${d.unmet(t).map((x) => `t${x.id}${d.gone(x)}`).join(", ")}</span>` : null}</td>
         <td class="ink2">${p ? html`<a class="ink2" href=${`#/plan/${p.id}`}><${Named} kind="plan" r=${p} /></a>` : html`<a class="ink2" href="#/tasks">executive intervention</a>`}</td><td class="muted">${m ? html`<${Named} kind="milestone" r=${m} />` : null}</td></tr>`;
     })}</tbody></table></div>`;
 }
@@ -275,7 +275,7 @@ export function Milestone({ d, id }) {
       const c = counts(d.tasksOf.get(p.id) || []);
       return html`<details class="plan" open=${ts.length > 0}>
         <summary><${PrioEdit} value=${p.priority} effective=${0} from="–" save=${planSave(d, p.id, "priority")} /><a href=${`#/plan/${p.id}`} onClick=${(e) => e.stopPropagation()}><b><${Named} kind="plan" r=${p} /></b></a>
-          ${d.held(m) && c.open ? html`<${Pill} status="on-hold" />` : null}<span class="muted">${c.open} open · ${c.done} done${c.dropped ? ` · ${c.dropped} dropped` : ""}</span></summary>
+          ${p.archived_by_decision != null ? html`<${Pill} status="archived" />` : null}${d.held(m) && c.open ? html`<${Pill} status="on-hold" />` : null}<span class="muted">${c.open} open · ${c.done} done${c.dropped ? ` · ${c.dropped} dropped` : ""}</span></summary>
         <div class="tasks">${ts.length ? html`<${TaskRows} d=${d} tasks=${ts} />` : html`<div class="empty" style="padding:10px 12px">No tasks match.</div>`}</div>
       </details>`;
     })}
@@ -286,13 +286,15 @@ export function Plan({ d, id }) {
   const p = d.plan.get(id);
   if (!p) return html`<div class="empty">No plan ${id}.</div>`;
   const m = d.milestone.get(p.milestone_id);
-  const tasks = d.tasksOf.get(p.id) || [];
+  const gone = p.archived_by_decision != null;
+  const tasks = gone ? d.state.tables.task.filter((x) => x.plan_id === p.id) : d.tasksOf.get(p.id) || [];
   return html`<div class="crumbs"><a href="#/milestones">Milestones</a> › <${NamedLink} kind="milestone" r=${m} /></div>
     <${Titled} kind="plan" id=${p.id}><${EditableLine} text=${p.subject} save=${planSave(d, p.id, "subject")} /></${Titled}>
-    <div class="row sub">${d.held(m) && !d.planDone.has(p.id) ? html`<${Pill} status="on-hold" />` : null}<span>priority <${PrioEdit} value=${p.priority} effective=${0} from="none"
+    <div class="row sub">${d.held(m) && !d.planDone.has(p.id) && !gone ? html`<${Pill} status="on-hold" />` : null}<span>priority <${PrioEdit} value=${p.priority} effective=${0} from="none"
       save=${planSave(d, p.id, "priority")} /></span>
       <span>· created ${stamp(p.created_at)}</span>${p.created_by_task != null ? html`<span>· by <a href=${`#/task/${p.created_by_task}`}>task ${p.created_by_task}</a></span>` : null}</div>
-    ${d.held(m) && !d.planDone.has(p.id) ? html`<div class="hold-note">On hold with <a href=${`#/milestone/${m.id}`}>milestone ${m.id}</a>: its tasks stay out of the queue.</div>` : null}
+    ${gone ? html`<div class="hold-note"><${Pill} status="archived" /> Its sign-off was rejected in <a href=${`#/decision/${p.archived_by_decision}`}>decision ${p.archived_by_decision}</a>${d.decision.get(p.archived_by_decision)?.reason ? `: ${d.decision.get(p.archived_by_decision).reason}` : ""}. Kept, hidden from the lists; it can't be changed.</div>`
+      : d.held(m) && !d.planDone.has(p.id) ? html`<div class="hold-note">On hold with <a href=${`#/milestone/${m.id}`}>milestone ${m.id}</a>: its tasks stay out of the queue.</div>` : null}
     <${Intro} key=${p.id} intro=${p.intro} saveIntro=${planSave(d, p.id, "intro")}>
       <${EditableBody} text=${p.body} save=${planSave(d, p.id, "body")} />
       <div class="sub" style="margin-top:4px">${d.planDone.has(p.id)
@@ -301,7 +303,7 @@ export function Plan({ d, id }) {
     <${Progress} ...${counts(tasks)} />
     <h2>Tasks</h2>
     <div class="tablewrap">${tasks.length ? html`<${TaskRows} d=${d} tasks=${tasks} />` : html`<div class="empty" style="padding:10px 12px">No tasks yet.</div>`}</div>
-    ${d.planDone.has(p.id) ? null : html`<div style="margin-top:12px"><${AddButton} kind="task" parent=${p.id} worktrees=${d.state.worktrees} /></div>`}`;
+    ${d.planDone.has(p.id) || gone ? null : html`<div style="margin-top:12px"><${AddButton} kind="task" parent=${p.id} worktrees=${d.state.worktrees} /></div>`}`;
 }
 
 function RunsTable({ d, runs, showTask = false }) {
@@ -686,7 +688,7 @@ export function Decision({ d, id, query }) {
   const newest = new URLSearchParams(query || "").get("view") === "newest";
   const x = d.decision.get(id);
   if (!x) return html`<div class="empty">No decision ${id}.</div>`;
-  const waiting = d.tasksWaiting.get(x.id) || [];
+  const waiting = (d.tasksWaiting.get(x.id) || []).filter((t) => d.showArchived || t.status !== "archived");
   const extra = Object.entries(x).filter(([k, v]) => !KNOWN.has(k) && v != null);
   const pending = x.status === "pending";
   const plan = pending && x.signoff_plan != null ? d.plan.get(x.signoff_plan) : null;
@@ -699,9 +701,9 @@ export function Decision({ d, id, query }) {
       ${extra.map(([k, v]) => html`<span class="tag">${k}: ${String(v)}</span>`)}</div>
     ${links(d, d.supersededBy.get(x.id) || [], "Superseded by")}${links(d, d.supersedes.get(x.id) || [], "Supersedes")}
     <${Intro} key=${x.id} intro=${x.intro}>${x.body.trim() || !x.signoff_view ? html`<div class="card"><${Markdown} text=${x.body} empty="No body." /></div>` : null}</${Intro}>
-    ${x.status !== "pending" ? html`<h3>${{ answered: "Answer", returned: "Returned with feedback" }[x.status] || "Irrelevant"}</h3>
+    ${x.status !== "pending" ? html`<h3>${{ answered: "Answer", returned: "Returned with feedback", rejected: "Rejected: archived" }[x.status] || "Irrelevant"}</h3>
       <div class="sub">${stamp(x.closed_at)}${x.decided_by_task != null ? html`, the own choice of <a href=${`#/task/${x.decided_by_task}`}>task ${x.decided_by_task}</a>` : null}</div>
-      <div class="card"><${Markdown} text=${x.answer || x.reason} /></div>` : null}
+      <div class="card"><${Markdown} text=${x.answer || x.reason || ""} empty="No reason given." /></div>` : null}
     ${x.consequences ? html`<${Consequences} text=${x.consequences} />` : null}
     ${x.options.length && !pending ? html`<h3>Options</h3><ol class="options">${x.options.map((o, i) => html`<li class=${i === 0 ? "rec" : ""}><${InlineMd} text=${o} /></li>`)}</ol>` : null}
     ${plan ? html`<h2>What it approves</h2>

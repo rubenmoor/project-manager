@@ -16,6 +16,8 @@ pm decision answer 3 1 --once --supersedes 2
 pm decision irrelevant 3 "<reason>"    # drops the open tasks it blocks
 pm decision approve 4 [--edit]         # sign-offs only; --edit: a plan sign-off, edit the plan first
 pm decision return 4 < feedback.md     # a plan sign-off: revised with the feedback, then asked again
+pm decision reject 4 ["<reason>"]      # a sign-off: archive what it approves (kept, hidden); --task 9: one task of the task queue
+pm plan list --archived                # archived plans and tasks, by rejected sign-off
 pm decision kind 3 rule                # rule: lasting, in the log; once: a one-off
 pm task add --exec "<subject>" [--priority N] < body.md
 pm summary request ; pm report request # queue an executive summary / resource use report; show, list

@@ -38,7 +38,7 @@ pm decision consequences <decision> "<what changed>" | pm decision supersede <ne
 # the human's (run only when the human asks, in their session)
 pm init | pm run [--once|--dry-run] | pm stop | pm kill <task> | pm task redo <task> | pm decide
 pm milestone add "<goal>" [--queue N] <<'EOF' … EOF | pm milestone set|hold|resume <milestone>
-pm decision answer <d> <option|"text"> [--once] [--supersedes <d>] | approve <d> [--edit] | return <d> "<feedback>" | irrelevant <d> "<why>" | kind <d> rule|once
+pm decision answer <d> <option|"text"> [--once] [--supersedes <d>] | approve <d> [--edit] | return <d> "<feedback>" | reject <d> ["<why>"] | irrelevant <d> "<why>" | kind <d> rule|once
 pm task add --exec "<subject>" | pm summary request | pm report request | pm report ask "<question>"
 ```
 

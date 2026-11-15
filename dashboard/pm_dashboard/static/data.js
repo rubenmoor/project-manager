@@ -1,11 +1,18 @@
 // The state from /api/state, indexed, with what pm derives: effective priorities, blocking decisions, runs per task.
-export function index(state) {
-  const t = state.tables;
+// Archived plans and tasks (a rejected sign-off) are left out of the lists unless showArchived; by id they stay.
+export function index(state, showArchived = false) {
+  const t = { ...state.tables };
+  const all = { plan: t.plan, task: t.task };
+  if (!showArchived) {
+    const gone = new Set(t.plan.filter((p) => p.archived_by_decision != null).map((p) => p.id));
+    t.plan = t.plan.filter((p) => !gone.has(p.id));
+    t.task = t.task.filter((x) => x.status !== "archived" && !gone.has(x.plan_id));
+  }
   const by = (rows) => new Map(rows.map((r) => [r.id, r]));
   const d = {
     state, milestones: t.milestone, plans: t.plan, tasks: t.task, decisions: t.decision, runs: t.run, summaries: t.summary || [],
     reports: t.resource_use_report || [], customs: t.custom_report || [],
-    milestone: by(t.milestone), plan: by(t.plan), run: by(t.run), task: by(t.task), decision: by(t.decision),
+    milestone: by(t.milestone), plan: by(all.plan), run: by(t.run), task: by(all.task), decision: by(t.decision), showArchived,
     queue: state.queue, shown: state.shown_queue || state.queue, queuePos: new Map((state.shown_queue || state.queue).map((id, i) => [id, i])),
     // A 'running' row whose pm run is gone (it crashed) is stale, not running. One per work tree: the trunk's
     // first, then by work tree.
@@ -47,7 +54,8 @@ export function index(state) {
   d.requires = group(pre, (l) => l.task_id, (l) => d.task.get(l.prerequisite_id));
   d.requiredBy = group(pre, (l) => l.prerequisite_id, (l) => d.task.get(l.task_id));
   d.unmet = (task) => (d.requires.get(task.id) || []).filter((x) => x.status !== "done");
-  d.stuck = (task) => task.status === "open" && d.unmet(task).some((x) => x.status === "dropped");
+  d.stuck = (task) => task.status === "open" && d.unmet(task).some((x) => x.status === "dropped" || x.status === "archived");
+  d.gone = (x) => (x.status === "dropped" || x.status === "archived" ? ` (${x.status})` : "");
   // Supersede links: decision id → [{ id, note }] of the decisions it replaces, and of those replacing it.
   const sup = t.decision_supersedes || [];
   d.supersedes = group(sup, (l) => l.decision_id, (l) => ({ id: l.superseded_id, note: l.note }));
@@ -72,7 +80,7 @@ export function index(state) {
     const b = d.blockers(task);
     if (b.length) return b;
     const u = d.unmet(task);
-    return u.length ? `waits for ${u.map((x) => `task ${x.id}${x.status === "dropped" ? " (dropped)" : ""}`).join(", ")}` : null;
+    return u.length ? `waits for ${u.map((x) => `task ${x.id}${d.gone(x)}`).join(", ")}` : null;
   };
   // Pending decisions by what answering them frees: alone = open tasks it is the only pending blocker of; waiting = all
   // open tasks it blocks. Most freed first.
