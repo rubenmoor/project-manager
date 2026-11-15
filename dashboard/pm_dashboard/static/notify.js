@@ -24,7 +24,8 @@ export function useNotifications(projects) {
         pending: new Set(x.pending.map((d) => d.id)),
         failed: new Set(x.failed.map((r) => r.id)),
         running: x.running.length,
-        crash: x.crash ? x.crash.at : null,
+        crash: x.crash && !x.crash.stopped ? x.crash.at : null,
+        halt: x.crash && x.crash.stopped ? x.crash.at : null,
         queue: x.queue,
       };
       const p = prev.current.get(x.name);
@@ -42,6 +43,9 @@ export function useNotifications(projects) {
       if (now.crash && now.crash !== p.crash) {
         clearTimeout(timers.get(x.name));
         say("pm run crashed", x.crash.error || "no error message", "#/live");
+      } else if (now.halt && now.halt !== p.halt) {
+        clearTimeout(timers.get(x.name));
+        say("pm run stopped", x.crash.error, "#/live");
       } else if (now.running) clearTimeout(timers.get(x.name));
       else if (p.running) {
         // Between two tasks nothing runs for a moment; only a lasting pause means pm run stopped.

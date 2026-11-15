@@ -25,9 +25,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-PM_MIN_VERSION = 100    # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
+PM_MIN_VERSION = 102    # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
                         # summary_request, exec tasks, open_summary, report_request, report_rows, report_ask, WORKTREE_NAME,
-                        # task_requires, shown_queue, run_stopping, pm run --quiet, return_signoff, signoff_plan)
+                        # task_requires, shown_queue, run_stopping, pm run --quiet, return_signoff, signoff_plan,
+                        # GitError, run_crash()["stopped"])
 try:
     import pm
 except ImportError:
@@ -91,7 +92,8 @@ class Watcher:
         try:
             self.project = pm.Project(self.root, pm.load_config(self.root))
         except (pm.FormatError, OSError) as e:
-            if self.state != (state := {"error": f"{self.root}: {e}", "root": self.root, "last_good": None}):
+            if self.state != (state := {"error": f"{self.root}: {e}", "error_title": error_title(None, e),
+                                        "root": self.root, "last_good": None}):
                 self.state, self.summary = state, {"error": state["error"]}
                 with self.cond:
                     self.version += 1
@@ -123,9 +125,22 @@ class Watcher:
                         self.version += 1
                         self.cond.notify_all()
             except Exception as e:  # keep watching whatever happens; the error shows in the client
-                self.state = {"error": f"pm-dashboard: {e}", "root": self.root, "last_good": self.last_good}
+                self.state = {"error": f"pm-dashboard: {e}", "error_title": error_title(self.project, e),
+                              "root": self.root, "last_good": self.last_good}
                 self.sig = None                         # read again next time
             time.sleep(POLL)
+
+
+def error_title(project, e):
+    """What failed, for the banner above the error."""
+    if isinstance(e, pm.GitError):
+        cwd = Path(e.cwd).resolve()
+        return "git failed " + ("in the trunk" if project and cwd == project.root.resolve() else f"in work tree {cwd.name}")
+    if isinstance(e, pm.FormatError) and project:
+        return f"Can't read {project.db}"
+    if isinstance(e, (pm.FormatError, OSError)) and not project:
+        return "Can't open the project"
+    return "pm-dashboard failed"
 
 
 def summary(state):
@@ -276,7 +291,7 @@ def read_state(project, last_good=None):
         errors = project.validate()
         holds = project.planning_holds(project.queue())
     except pm.FormatError as e:
-        return base | {"error": str(e), "last_good": last_good}
+        return base | {"error": str(e), "error_title": error_title(project, e), "last_good": last_good}
     return base | {"tables": tables, "queue": queue, "shown_queue": shown_queue, "head_signoff": head_signoff, "done_plans": done_plans,
                    "errors": errors, "open_summary": open_summary,
                    "open_report": open_report, "holds": holds}

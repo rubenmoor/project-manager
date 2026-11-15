@@ -54,6 +54,8 @@ function RunningCard({ d }) {
   if (!r && (d.stale || d.crash)) return html`<div class="card"><div class="row"><${Pill} status="failed" label="pm not running" />
       <span class="sub"><code>pm run</code> crashed${d.stale ? html` during <${TaskLink} t=${d.task.get(d.stale.task_id)} />` : ""}.</span></div>
     ${d.crash ? html`<pre class="crash">${d.crash.error}</pre>` : null}</div>`;
+  if (!r && d.halt && d.state.pm_run == null) return html`<div class="card"><div class="row"><${Pill} status="failed" label="pm not running" />
+      <span class="sub"><code>pm run</code> stopped.</span></div><pre class="crash">${d.halt.error}</pre></div>`;
   if (!r) return html`<div class="card"><div class="sub">No worker is running${d.queue.length && d.state.pm_run == null ? html`: start them with Run above` : ""}.</div>
     ${d.queue.length ? html`<div class="muted" style="margin-top:4px">Next: <${TaskLink} t=${d.task.get(d.queue[0])} /></div>` : null}</div>`;
   return d.runningAll.map((r) => {

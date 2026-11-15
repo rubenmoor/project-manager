@@ -178,3 +178,7 @@ Claude's own errors aren't the task's, so pm handles them itself: with stream-js
 - passing (overloaded, 5xx, 429, connection error, timeout, network errors, a limit without a readable reset): the same task again, at once, then after 1, 2, 5, 10, 20, 30, then every 60 minutes (`RETRY_MINUTES`)
 - needs you (invalid API key, /login, credit balance, unknown model, a worker command that can't start, a failure before any tool call that matches nothing): `pm run` stops, the task stays as it is
 - `pm run` also stops on an invalid database, a failed `git commit` or stash, a dirty tree before a task
+- Its last line names why it stopped (`Stopped: …`); the reason stays in `.git/pm-run.lock` for `pm status` and the dashboard until the next `pm run`
+- A work tree that can't be prepared (merging the trunk in fails): its tasks wait, the other work trees go on; once nothing else runs, `pm run` stops with that git error
+- A stash that leaves the tree dirty (files still listed as changed, e.g. after a `.gitattributes` filter change): said, with the files and `git add --renormalize`; a stash with the same changes as the task's previous one is dropped again
+- git errors carry git's own message and the directory git ran in; `pm --version` and schema errors name the version and file of the pm module (a stale `PYTHONPATH` can load another pm; the Nix wrapper sets it aside and gives it back to the workers)

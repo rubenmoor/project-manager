@@ -45,6 +45,8 @@ One dashboard shows several independent pm projects, each in its own git reposit
   - "blocked" (queue header, off by default, remembered in the browser): open tasks waiting for pending decisions, in purple, where they would queue once unblocked, with what they wait for (`d5`, `t12`)
   - failed last run: a red "failed" pill in the queue; with no worker running, "pm run stopped: task N failed" and the likely cause
   - crashed `pm run` (e.g. disk full): "pm not running", the task it was on and its error (also on the overview, and a notification); its stale `running` run shows as "crashed"
+  - `pm run` stopped for a reason (`Stopped: …`): "pm not running" and the reason (also on the overview, and a notification)
+- Error banner: names what failed ("git failed in work tree creative-writing", "Can't read tasks.sql"), then the error
 - **Overview**: run controls on top, then running tasks, decisions waiting on you, cost, open and on-hold milestones with progress, queue head; without milestones a welcome screen with one button
   - Run: starts `pm run --quiet` with the dashboard's own pm, in its own session (outlives a restarted dashboard), PATH from your login shell (`$SHELL -lic`; a systemd-started dashboard lacks claude); its start errors in `.git/pm-run.out`
   - Stop: like `pm stop` (SIGUSR1), "stopping…" until it ends; Force kill: SIGTERM after a confirm, like a second Ctrl-C (runs interrupted, leftovers stashed, tasks run again)

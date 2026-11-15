@@ -12,7 +12,8 @@ export function index(state) {
     runningAll: state.pm_run == null ? [] : t.run.filter((r) => r.result === "running")
       .sort((a, b) => (a.worktree || "").localeCompare(b.worktree || "")),
     stale: (state.pm_run == null && t.run.find((r) => r.result === "running")) || null,
-    crash: state.pm_crash || null,
+    crash: state.pm_crash && !state.pm_crash.stopped ? state.pm_crash : null,
+    halt: state.pm_crash && state.pm_crash.stopped ? state.pm_crash : null,   // pm run stopped, saying why
     planDone: new Set(state.done_plans || []),
   };
   d.running = d.runningAll[0] || null;

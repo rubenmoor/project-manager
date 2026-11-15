@@ -163,7 +163,7 @@ function App() {
       <span>${label}</span>${k === "decisions" && pending ? html`<span class="tag">${pending}</span>` : null}
       ${k === "live" && d && d.running ? html`<span class="livedot" title="a worker is running"></span>` : null}</a>`)}</nav>
     <main class=${"main" + (page === "live" ? " full" : "")}>
-      ${state && state.error ? html`<div class="banner error"><b>Can't read the database.</b> <pre>${state.error}</pre>
+      ${state && state.error ? html`<div class="banner error"><b>${state.error_title || "Can't read the database"}.</b> <pre>${state.error}</pre>
         ${state.last_good ? html`<div class="muted">Showing the last state that could be read.</div>` : null}</div>` : null}
       ${d ? html`<${TrunkDirty} d=${d} />` : null}
       ${!state ? html`<div class="empty">Loading…</div>` : d && View ? html`<${View} d=${d} id=${r.id} query=${r.query} runlog=${runlog} />`

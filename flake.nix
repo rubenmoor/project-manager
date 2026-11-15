@@ -24,6 +24,10 @@
           src = ./.;
           build-system = [ pkgs.python3Packages.setuptools ];
           makeWrapperArgs = [ "--prefix" "PATH" ":" "${pkgs.git}/bin:${pkgs.git-lfs}/bin" ];
+          # PYTHONPATH (a dev shell's) could load an older pm; set aside for pm itself, restored for the workers
+          postFixup = ''
+            wrapProgram $out/bin/pm --run 'export PM_PYTHONPATH="''${PYTHONPATH-}"' --unset PYTHONPATH
+          '';
           meta.mainProgram = "pm";
         };
         dashboard = pkgs.python3Packages.buildPythonApplication {

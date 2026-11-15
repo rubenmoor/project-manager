@@ -32,7 +32,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, json, os, 
 from pathlib import Path
 
 
-VERSION = 101  # bump by one with every commit (AGENTS.md)
+VERSION = 102  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions"
@@ -95,6 +95,7 @@ IN_LOG = ("status = 'answered' AND signoff IS NULL AND kind = 'rule' AND id NOT 
           "decision_supersedes s JOIN decision n ON n.id = s.decision_id WHERE s.note = '' AND n.status = 'answered')")
 
 SCHEMA_VERSION = 31
+WHICH_PM = f"pm {VERSION}, {__file__}"     # a stale PYTHONPATH can load another pm than the one installed
 # A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
 # run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
 # Columns and tables SCHEMA dropped are left behind, new ones get their defaults; so only renames, moved data and new
@@ -365,6 +366,18 @@ class FormatError(Exception):
     """The database breaks the schema, or a command names something that doesn't exist."""
 
 
+class GitError(subprocess.CalledProcessError):
+    """A failed git command; its message carries git's own (stderr) and the directory git ran in."""
+
+    def __init__(self, r, cwd):
+        super().__init__(r.returncode, r.args, r.stdout, r.stderr)
+        self.cwd = cwd
+
+    def __str__(self):
+        err = (self.stderr or "").strip()
+        return f"`{shlex.join(self.cmd)}` failed in {self.cwd} (exit {self.returncode})" + (f": {err}" if err else "")
+
+
 def now():
     return datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -450,15 +463,21 @@ def matches(d, texts):
     return not texts or any(t.casefold() in hay for t in texts)
 
 
+STOPPED = "Stopped: "
+
+
 def stamp(ts):
     """"2026-10-11 16:30" (UTC) from a timestamp."""
     return ts[:16].replace("T", " ") if ts else ""
 
 
 def parse_crash(lock):
-    """The run lock's content: the pid; after a crash also its time and the error."""
+    """The run lock's content: the pid; after a crash or a stop for a reason also its time and the error (stopped:
+    the reason a stop named)."""
     pid, at, error = (lock.decode(errors="replace").split("\n", 2) + ["", ""])[:3]
-    return {"pid": int(pid) if pid.isdigit() else None, "at": at, "error": error.strip()} if at else None
+    stopped = error.startswith(STOPPED)
+    return {"pid": int(pid) if pid.isdigit() else None, "at": at, "stopped": stopped,
+            "error": error.removeprefix(STOPPED).strip() if stopped else error.strip()} if at else None
 
 
 def seconds(start, end):
@@ -749,6 +768,8 @@ class Project:
         self.stopping = False       # `pm run` stops after the current task
         self.idle = False           # `pm run` waits for tasks
         self.crash = None           # run_crash() as `pm run` started
+        self.stop_reason = None     # why `pm run` stops (stop_for), said last and kept in the run lock
+        self.broken_trees = {}      # work tree -> why preparing it failed; its tasks wait for the next `pm run`
         self.cache = None           # (file_key(), the loaded database)
         self.unsaved_migration = None   # (old schema version, pid of the `pm run` that kept it) while only read
         self.mutex = threading.RLock()
@@ -902,11 +923,12 @@ class Project:
         """`old` (schema `version`) brought to SCHEMA_VERSION: MIGRATIONS in order, then the rows of the tables and
         columns SCHEMA still has copied into a fresh SCHEMA database, whose constraints check them."""
         if version > SCHEMA_VERSION:
-            raise FormatError(f"{self.db}: schema version {version}, this pm knows up to {SCHEMA_VERSION}: update pm")
+            raise FormatError(f"{self.db}: schema version {version}, this pm knows up to {SCHEMA_VERSION}: update pm "
+                              f"({WHICH_PM})")
         missing = [v for v in range(version, SCHEMA_VERSION) if v not in MIGRATIONS]
         if missing:
             raise FormatError(f"{self.db}: schema version {version}, this pm knows {SCHEMA_VERSION} "
-                              f"and has no migration from {missing[0]}")
+                              f"and has no migration from {missing[0]} ({WHICH_PM})")
         try:
             for v in range(version, SCHEMA_VERSION):
                 step = MIGRATIONS[v]
@@ -1104,7 +1126,10 @@ class Project:
     # --- git ---------------------------------------------------------------------------------
 
     def git(self, *args):
-        return subprocess.run(["git", *args], cwd=self.root, capture_output=True, text=True, check=True).stdout
+        r = subprocess.run(["git", *args], cwd=self.root, capture_output=True, text=True)
+        if r.returncode:
+            raise GitError(r, self.root)
+        return r.stdout
 
     def gc(self):
         """Packs loose objects, in the background, once they exceed REPACK_LOOSE_MB: packed, a copy of the database
@@ -2471,6 +2496,9 @@ class Project:
             os.pwrite(fd, f"{os.getpid()}\n".encode(), 0)
             try:
                 yield
+                if self.stop_reason:
+                    with contextlib.suppress(OSError):
+                        os.pwrite(fd, f"{os.getpid()}\n{now()}\n{STOPPED}{self.stop_reason}\n".encode(errors="replace"), 0)
             except Exception as e:
                 # Into the lock file's own block, which needs no new space (a full disk is a likely cause).
                 msg = "".join(traceback.format_exception_only(e)).strip()[:2000]
@@ -2496,7 +2524,8 @@ class Project:
             os.close(fd)
 
     def run_crash(self):
-        """While no `pm run` lives: how the last one crashed, {"pid", "at", "error"}, or None."""
+        """While no `pm run` lives: how the last one crashed or why it stopped, {"pid", "at", "stopped", "error"}, or
+        None."""
         try:
             fd = os.open(self.git_dir / "pm-run.lock", os.O_RDONLY)
         except FileNotFoundError:
@@ -2515,10 +2544,11 @@ class Project:
         rs = self.rows("SELECT * FROM run WHERE result = 'running' ORDER BY id")
         if not rs:
             return
+        crashed = self.crash and not self.crash["stopped"]
         with self.connect(write=True) as db:
             for r in rs:
                 db.execute("UPDATE run SET ended_at = ?, result = 'failed', reason = ? WHERE id = ?",
-                           (now(), f"pm run crashed: {self.crash['error']}" if self.crash else "interrupted", r["id"]))
+                           (now(), f"pm run crashed: {self.crash['error']}" if crashed else "interrupted", r["id"]))
         for r in rs:
             if r["worktree"] and (path := self.worktree_path(r["worktree"])) in self.worktrees():
                 with contextlib.suppress(subprocess.CalledProcessError, OSError):
@@ -2526,7 +2556,7 @@ class Project:
                             f"pm: task {r['task_id']} run {r['id']} failed"):
                         self.say(f"[{r['worktree']}] {stash}")
         self.commit_db(", ".join(f"run {r['id']} (task {r['task_id']})" for r in rs)
-                       + (" crashed" if self.crash else " interrupted"))
+                       + (" crashed" if crashed else " interrupted"))
 
     # --- work trees --------------------------------------------------------------------------
 
@@ -2939,17 +2969,45 @@ class Project:
         if self.merging():
             with contextlib.suppress(subprocess.CalledProcessError):
                 self.git("merge", "--abort")
-        files = [l[3:] for l in self.git("status", "--porcelain").splitlines() if l[3:] != self.db]
-        if not files:
+        changed = lambda: [l[3:] for l in self.git("status", "--porcelain").splitlines() if l[3:] != self.db]
+        if not (files := changed()):
             return None
         n = f"{len(files)} file{'s' if len(files) > 1 else ''}"
         try:
             with STASH_LOCK:
                 self.git("stash", "push", "-q", "--include-untracked", "-m", message, "--", ".", f":(exclude){self.db}")
                 sha = self.git("rev-parse", "--short", "stash@{0}").strip()
+                if same := self.same_stash():
+                    self.git("stash", "drop", "-q", "stash@{0}")
+                    sha = same
+                still = changed()
         except subprocess.CalledProcessError as e:
-            return f"left behind: {n}, stashing failed: {e.stderr.strip()}"
-        return f"left behind: {n}, stashed as {sha} ({message}); get them back with `git stash apply {sha}`"
+            return f"left behind: {n}, stashing failed: {e}"
+        out = (f"left behind: {n}, the same changes as stash {sha}, not stashed again" if same else
+               f"left behind: {n}, stashed as {sha} ({message})") + f"; get them back with `git stash apply {sha}`"
+        if still:
+            paths = " ".join(shlex.quote(f) for f in still[:20]) + (" …" if len(still) > 20 else "")
+            out += (f"\nStill listed as changed after the stash, so the work tree stays dirty: {paths}\n"
+                    "Probably identical content that a changed .gitattributes filter (e.g. LFS) sees as changed; "
+                    f"fix: `git add --renormalize -- {paths}` and commit")
+        return out
+
+    def same_stash(self):
+        """The short sha of stash@{1} if pm left it for the same task as stash@{0} and it holds the same changes and
+        files, else None. Untracked files count as the same only with the same content."""
+        def untracked(s):
+            r = subprocess.run(["git", "rev-parse", "-q", "--verify", f"{s}^3^{{tree}}"], cwd=self.root,
+                               capture_output=True, text=True)
+            return r.stdout.strip() if not r.returncode else None
+        try:
+            subjects = self.git("stash", "list", "-2", "--format=%s").splitlines()
+            tasks = {m[1] if (m := re.search(r"pm: task (\d+) run \d+ ", x)) else None for x in subjects}
+            if len(subjects) < 2 or len(tasks) > 1 or None in tasks:
+                return None
+            new, old = ([self.git("diff", "--binary", f"{s}^1", s), untracked(s)] for s in ("stash@{0}", "stash@{1}"))
+        except subprocess.CalledProcessError:
+            return None
+        return self.git("rev-parse", "--short", "stash@{1}").strip() if new == old else None
 
     def planning_snapshot(self):
         """The plans: to tell whether a plan-writing task changed them."""
@@ -3043,7 +3101,10 @@ class Project:
                 return self.work_queue(once, dry_run)
             with self.run_lock(), self.run_output(quiet):
                 self.ignore_db()
-                return self.work_queue(once, dry_run)
+                code = self.work_queue(once, dry_run)
+                if code and self.stop_reason:
+                    self.say(f"\n{STOPPED}{self.stop_reason}")
+                return code
         finally:
             for sig, handler in old.items():
                 signal.signal(sig, handler)
@@ -3095,7 +3156,7 @@ class Project:
             return 0
         self.finished, self.merge_errors, self.said = queue.Queue(), {}, set()
         running = {}                # work tree ("": the trunk) -> (thread, task id)
-        code, last, waiting = 0, None, None
+        code, last, waiting, told = 0, None, None, None
         self.git("worktree", "prune")
         self.close_stale_run()
         if bad := self.misplaced():
@@ -3109,7 +3170,7 @@ class Project:
                 self.say("Open tasks that can't run: give each a work tree of [worktrees] in "
                          f"{CONFIG_FILE} (`pm task set <id> --worktree <name>`):\n"
                          + "\n".join(f"  task {t}: {why}" for t, why in bad))
-                return 1
+                return self.stop_for("open tasks can't run (see above); give each a work tree, then `pm run`")
         while True:
             while not self.finished.empty():
                 tree, tid, result, message = self.finished.get()
@@ -3128,17 +3189,23 @@ class Project:
                 self.push()
             if not code and (errors := self.validate()):
                 self.say("the database has errors:\n  " + "\n  ".join(errors))
-                code = 1
+                code = self.stop_for("the database has errors (see above); fix them, then `pm run`")
             if once and last is not None and not running:
                 return code or int(last == "failed")
             if code or self.stopping:
                 if running:
+                    if code and self.stop_reason and not told:
+                        told = self.stop_reason
+                        self.say(f"Stopping once the running task(s) finish: {told.splitlines()[0]}")
                     self.wait_event()
                     continue
                 if not code:
                     self.say("Stopped as asked; `pm run` continues with the queue.")
                 return code
             code = self.start_tasks(running, once)
+            if not code and not running and self.broken_trees:
+                code = self.stop_for("\n".join(f"preparing work tree {t} failed: {e}" for t, e in self.broken_trees.items())
+                                     + "\nFix it, then `pm run`.")
             if code or running:
                 waiting = None
                 if running:
@@ -3203,8 +3270,8 @@ class Project:
         """Start the first queued task of the trunk and of each work tree that runs nothing, within the lowest milestone
         queue index in the queue, up to max_parallel (once: one task); none while a worker waits for the usage limit.
         A task waits while a planning task above it is queued (planning_holds). A work tree with an open merge task runs
-        only that; the trunk's tasks wait while it has changes. Returns 1 if
-        `pm run` has to stop (git failed), else 0."""
+        only that; the trunk's tasks wait while it has changes. A work tree that can't be prepared is skipped for the
+        rest of the run (broken_trees); the others go on. Returns 1 if `pm run` has to stop, else 0."""
         if (until := self.limit_until) and datetime.datetime.now(until.tzinfo) < until:
             return 0
         q = self.queue()
@@ -3229,7 +3296,7 @@ class Project:
                               "into the trunk")
                 continue
             seen.add(tree)
-            if tree in running:
+            if tree in running or tree in self.broken_trees:
                 continue
             if tree and tree not in self.config["worktrees"] or not tree and kind not in (*TRUNK_KINDS, "investigate"):
                 self.say_once(f"task {tid} can't run: " + (f"work tree {tree!r} isn't in [worktrees]" if tree else
@@ -3251,7 +3318,7 @@ class Project:
                                      + (" …" if len(waiting) > 10 else "") if waiting else "") + ".")
                     continue
                 if not self.commit_db("uncommitted changes"):
-                    return 1
+                    return self.stop_for(f"committing {self.db} in the trunk failed (see above)")
                 project = self
             else:
                 try:
@@ -3259,8 +3326,10 @@ class Project:
                     if kind != "merge" and not self.update_worktree(project, tid):
                         continue
                 except (subprocess.CalledProcessError, FormatError) as e:
-                    self.say(f"[{tree}] preparing the work tree failed: {getattr(e, 'stderr', None) or e}".rstrip())
-                    return 1
+                    self.broken_trees[tree] = str(e).strip()
+                    self.say(f"[{tree}] preparing the work tree failed: {e}".rstrip()
+                             + f"\nIts tasks wait for the next `pm run`; the other work trees go on.")
+                    continue
             self.said.clear()
             thread = threading.Thread(target=self.run_task, args=(project, tree, tid), name=f"task {tid}", daemon=True)
             running[tree] = thread, tid
@@ -3312,6 +3381,11 @@ class Project:
                 pid = parent.get(pid)
         return holds
 
+    def stop_for(self, reason):
+        """`pm run` stops: the first reason is kept (stop_reason). Returns 1, the exit code."""
+        self.stop_reason = self.stop_reason or reason
+        return 1
+
     def say_once(self, msg):
         """Say it unless said since a task last started."""
         if msg not in self.said:
@@ -3333,7 +3407,8 @@ class Project:
         at = f"[{tree}] " if tree else ""
         if result == "error":
             self.say(f"\n{at}task {tid} failed: {message}\nStopping: this may hit every task.")
-            return 1
+            return self.stop_for(f"{at}task {tid} failed with an error that may hit every task (see above): "
+                                 f"{message.strip().splitlines()[-1] if message.strip() else 'no message'}")
         if result == "interrupted":
             self.say(f"\n{at}task {tid}: {message.splitlines()[0]}")
         elif result == "killed":
@@ -3346,11 +3421,10 @@ class Project:
                 self.commit_db(f"task {tid} failed: dropped")
                 self.say(f"task {tid} has no plan to investigate in: dropped")
             elif self.task_kind(tid) == "investigate":
-                self.say(f"Stopping: task {tid} investigated a failure; pm doesn't investigate an investigation.")
-                return 1
+                return self.stop_for(f"{at}task {tid} investigated a failure and failed itself; pm doesn't investigate "
+                                     "an investigation (see above)")
             elif not (iid := self.investigate(tid, message)):
-                self.say(f"Stopping: task {tid} failed again after {MAX_INVESTIGATIONS} investigations.")
-                return 1
+                return self.stop_for(f"{at}task {tid} failed again after {MAX_INVESTIGATIONS} investigations (see above)")
             else:
                 self.say(f"{at}task {iid} investigates it first")
         else:
@@ -3472,7 +3546,7 @@ class Project:
             self.say(f"Running: task {r['task_id']}{where} (run {r['id']}, pid {r['pid']}) since {stamp(r['started_at'])}, "
                      f"{duration(seconds(r['started_at'], None))}{gone}")
         if (c := self.run_crash()) and not self.run_pid():
-            self.say(f"`pm run` (pid {c['pid']}) crashed at {stamp(c['at'])}: {c['error']}")
+            self.say(f"`pm run` (pid {c['pid']}) {'stopped' if c['stopped'] else 'crashed'} at {stamp(c['at'])}: {c['error']}")
         for m in self.rows(
                 "SELECT m.id, m.subject, m.status, m.created_at, m.queue_index, "
                 "(SELECT count(*) FROM plan p WHERE p.milestone_id = m.id) AS plans, "
@@ -3571,9 +3645,11 @@ def print_queued(queued):
 
 
 def main(argv=None):
+    if saved := os.environ.pop("PM_PYTHONPATH", None):     # the Nix wrapper set it aside (flake.nix)
+        os.environ["PYTHONPATH"] = saved
     ap = argparse.ArgumentParser(prog="pm", description=__doc__, epilog=EPILOG,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--version", action="version", version=f"pm {VERSION}, database schema {SCHEMA_VERSION}")
+    ap.add_argument("--version", action="version", version=f"{WHICH_PM}, database schema {SCHEMA_VERSION}")
     ap.add_argument("--root", help="the project's git repository (default: the one around the current directory)")
     sub = ap.add_subparsers(dest="cmd", required=True)
     for name, text in [("init", f"write {CONFIG_FILE} (if missing), AGENTS.md and CLAUDE.md (if neither exists) and commit them; the first command that changes the database writes it"),
