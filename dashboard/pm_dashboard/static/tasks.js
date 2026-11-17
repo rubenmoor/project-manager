@@ -32,7 +32,8 @@ export function Tasks({ d }) {
   const execs = filt(d.tasks.filter((t) => t.kind === "exec"))
     .sort((a, b) => (a.status !== "open") - (b.status !== "open") || qpos(a) - qpos(b) || b.id - a.id);
   const ms = [...d.milestones].sort((a, b) => a.queue_index - b.queue_index || a.id - b.id);
-  return html`<h1>Tasks</h1>
+  return html`<${AddButton} kind="exec" label="Add an executive intervention" />
+    <h1>Tasks</h1>
     <div class="sub">Every task. On top, the pending decisions that hold tasks back, the one that frees the most first.</div>
     <${Chips} value=${show} set=${setShow} options=${[["open", "open tasks"], ["closed", "closed"], ["all", "all"]]} />
     <h2>Blocked by decisions</h2>
@@ -41,7 +42,6 @@ export function Tasks({ d }) {
     <div class="sub">Tasks of yours outside every plan and milestone, queued as if at milestone queue index 0, by priority.</div>
     <div class="plan"><div class="tasks" style="border-top:1px solid var(--border);border-radius:8px">
       ${execs.length ? html`<${TaskRows} d=${d} tasks=${execs} />` : html`<div class="empty" style="padding:10px 12px">None.</div>`}</div></div>
-    <${AddButton} kind="exec" label="Add an executive intervention" />
     <h2>By milestone</h2>
     ${ms.map((m) => {
       const ts = filt(d.milestoneTasks(m));
