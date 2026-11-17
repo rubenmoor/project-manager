@@ -15,6 +15,7 @@
 9. **The human's:** milestone add/set/hold/resume, answering decisions, exec tasks, `pm run`. A worker raises a decision instead.
 10. **Commits:** outside `pm run` each command commits `tasks.sql`. A worker stages (`git add`), never commits or pushes.
 11. **Decision log first:** before a task or choice, `pm decision list --answered --grep <word>`; answers are binding until superseded; cite `decision 32: <subject>`.
+12. **Images:** `![](pm-images/<file>)` in Markdown is a file next to `tasks.sql`; look at it with the Read tool. Add one: `pm image add <file>` prints that Markdown.
 
 ## Commands
 
@@ -22,6 +23,7 @@
 # inspect
 pm status | pm queue | pm show <7|d32|p3|m1> | pm runs [task] | pm validate
 pm milestone list | pm plan list | pm decision list [--answered|--all] [--grep w …]
+pm image add <file|->
 # plans
 pm plan add <milestone> "<subject>" --intro "…" [--priority N] <<'EOF' … EOF
 pm plan edit <plan> [--subject …] [--body -] [--intro …] [--priority N]

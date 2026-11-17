@@ -4,7 +4,13 @@ import { ago, stamp, duration, seconds } from "/data.js";
 
 const escape = (s) => s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
 // Bodies are written by workers: raw HTML in them is shown as text, never run.
-marked.use({ gfm: true, breaks: false, renderer: { html: (h) => escape(typeof h === "string" ? h : h.text) } });
+// Images (pasted screenshots in pm-images/): click opens the full size.
+const image = (href, title, text) => {
+  if (href && typeof href === "object") ({ href, title, text } = href);
+  const img = `<img src="${escape(href || "")}" alt="${escape(text || "")}"${title ? ` title="${escape(title)}"` : ""} loading="lazy">`;
+  return /^(https?:|[\w.-]+\/)/.test(href || "") ? `<a class="md-img" href="${escape(href)}" target="_blank" rel="noopener">${img}</a>` : img;
+};
+marked.use({ gfm: true, breaks: false, renderer: { html: (h) => escape(typeof h === "string" ? h : h.text), image } });
 
 export function Markdown({ text, empty = "No body." }) {
   const out = useMemo(() => (text && text.trim() ? marked.parse(text) : ""), [text]);

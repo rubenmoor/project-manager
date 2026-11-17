@@ -20,6 +20,32 @@ export async function post(op) {
   return j;
 }
 
+// Pasted or dropped images: uploaded (pm stores and commits them in pm-images/), a Markdown image at the cursor.
+async function upload(file) {
+  const r = await fetch("api/image", { method: "POST", headers: { "Content-Type": file.type }, body: file });
+  const j = await r.json().catch(() => ({ error: `HTTP ${r.status}` }));
+  if (!r.ok || j.error) throw new Error(j.error || `HTTP ${r.status}`);
+  return j.path;
+}
+
+let uploads = 0;
+function insertImages(view, files, pos, fail) {
+  for (const file of files) {
+    const mark = `![uploading image ${++uploads}…]()`;
+    const before = view.state.doc.sliceString(Math.max(0, pos - 2), pos);
+    const text = (pos === 0 || before.endsWith("\n\n") || before === "\n" ? "" : before.endsWith("\n") ? "\n" : "\n\n") + mark + "\n";
+    view.dispatch({ changes: { from: pos, insert: text }, selection: { anchor: pos + text.length } });
+    pos += text.length;
+    const swap = (by) => {
+      const at = view.state.doc.toString().indexOf(mark);
+      if (at >= 0) view.dispatch({ changes: { from: at, to: at + mark.length + (by ? 0 : 1), insert: by } });
+    };
+    upload(file).then((path) => { swap(`![](${path})`); fail(null); },
+      (e) => { swap(""); fail(`image not added: ${e.message}`); });
+  }
+}
+const images = (list) => [...(list || [])].filter((f) => f.type.startsWith("image/"));
+
 const theme = EditorView.theme({
   "&": { background: "var(--surface)", color: "var(--ink)", fontSize: "13px", borderRadius: "8px" },
   "&.cm-focused": { outline: "none" },
@@ -49,6 +75,7 @@ export function CodeEditor({ value, onDone, onChange, autofocus = true, ph = "" 
   done.current = onDone;
   const change = useRef(onChange);
   change.current = onChange;
+  const [error, setError] = useState(null);
   useEffect(() => {
     const finish = (v) => { done.current && done.current(v.state.doc.toString()); return true; };
     const view = new EditorView({
@@ -60,7 +87,23 @@ export function CodeEditor({ value, onDone, onChange, autofocus = true, ph = "" 
           markdown({ base: markdownLanguage }), syntaxHighlighting(highlight), theme, placeholder(ph),
           keymap.of([{ key: "Escape", run: finish }, { key: "Mod-Enter", run: finish },
             ...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap, ...searchKeymap, indentWithTab]),
-          EditorView.domEventHandlers({ blur: (e, v) => { if (!box.current.contains(e.relatedTarget)) finish(v); } }),
+          EditorView.domEventHandlers({
+            blur: (e, v) => { if (!box.current.contains(e.relatedTarget)) finish(v); },
+            paste: (e, v) => {
+              const files = images(e.clipboardData && e.clipboardData.files);
+              if (!files.length) return false;
+              e.preventDefault();
+              insertImages(v, files, v.state.selection.main.head, setError);
+              return true;
+            },
+            drop: (e, v) => {
+              const files = images(e.dataTransfer && e.dataTransfer.files);
+              if (!files.length) return false;
+              e.preventDefault();
+              insertImages(v, files, v.posAtCoords({ x: e.clientX, y: e.clientY }) ?? v.state.selection.main.head, setError);
+              return true;
+            },
+          }),
           EditorView.updateListener.of((u) => u.docChanged && change.current && change.current(u.state.doc.toString())),
         ],
       }),
@@ -68,7 +111,8 @@ export function CodeEditor({ value, onDone, onChange, autofocus = true, ph = "" 
     if (autofocus) { view.focus(); view.dispatch({ selection: { anchor: view.state.doc.length } }); }
     return () => view.destroy();
   }, []);
-  return html`<div class="cm-wrap"><span class="md-badge">Markdown</span><div class="cm-box" ref=${box}></div></div>`;
+  return html`<div class="cm-wrap"><span class="md-badge">Markdown</span><div class="cm-box" ref=${box}></div>
+    ${error ? html`<span class="err">${error}</span>` : null}</div>`;
 }
 
 // Starts editing on Enter on the focused element, or a click (not on a link).
@@ -110,7 +154,7 @@ export function EditableBody({ text, save, disabled = false, empty = "No body.",
   const t = useEditTrigger(s.start, disabled || !save);
   if (s.editing) return html`<div class="editing">
     <${CodeEditor} value=${s.shown} onDone=${s.finish} ph=${ph} />
-    <div class="edit-hint">${s.error ? html`<span class="err">${s.error}</span>` : "Markdown supported · Esc or click outside: save · Ctrl-Z: undo"}</div></div>`;
+    <div class="edit-hint">${s.error ? html`<span class="err">${s.error}</span>` : "Markdown supported · paste or drop images · Esc or click outside: save · Ctrl-Z: undo"}</div></div>`;
   return html`<div class=${"card editable" + (disabled ? " locked" : "")} tabindex="0" ref=${t.ref} onKeyDown=${t.onKeyDown}
     onClick=${t.onClick} title=${disabled ? lockTitle : save ? "i: edit" : ""}><${Markdown} text=${s.shown} empty=${empty} /></div>`;
 }

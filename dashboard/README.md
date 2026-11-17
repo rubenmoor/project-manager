@@ -87,6 +87,7 @@ Text is edited in place, through pm's own methods; each change is a commit (`pm:
 - Priorities: click the number; empty clears it
 - Tasks: done or drop with a note; add milestones (with a queue index, default 0) and tasks (plans come from workers)
 - Pending decisions, on their page, as `pm decision answer|approve|irrelevant`: pick an option or write the answer (Markdown, edited like a body; Esc renders it), one-off, supersedes; Answer or Ctrl-Enter. Sign-offs: Approve; a plan or masterplan sign-off shows the plan editable in place (saved to the plan; Approve then approves the edited version) and "return with feedback…": a Markdown draft, Return closes it as returned and queues the plan's revision. Reject (any sign-off): a one-line optional reason, Enter or Submit, Esc cancels; archives what it approves (`pm decision reject`); a task-queue sign-off also lists its tasks, each with its own reject… "& next" (Ctrl-Shift-Enter): then the next pending decision in the Decisions list order, or the list when none is left. Irrelevant: a reason; drops the open tasks waiting for it. Drafts survive navigating away (session storage)
+- Images in every Markdown editor: paste (Ctrl-V) or drop a screenshot; stored by pm in `pm-images/<sha256[:12]>.<ext>` next to `tasks.sql` (PNG, JPEG, GIF, WebP; ≤ 5 MB), committed, inserted as `![](pm-images/…)`; shown inline, a click opens full size
 - After adding a milestone: add another, or start `pm run` in the terminal (the page says whether it runs)
 - Edits cascade as in pm: a changed milestone queues "revise the masterplan of milestone N: …"; a changed plan queues "create tasks for plan N: …" and "revise plan M: …" for each plan below it
 - Implemented milestones, done plans (no open task, nor in the plans below them) and closed tasks are read-only; pm refuses changes to them
@@ -104,7 +105,7 @@ Text is edited in place, through pm's own methods; each change is a commit (`pm:
 - Usage limits: the newest `rate_limit_event` in the worker logs (claude's stream-json); as of the last worker's API call, so stale between runs; usage outside pm counts in the % but not in the token totals
 - A task's commit: the one `pm run` made, `task <id>: <subject>`
 - Unreadable `tasks.sql` (mid-merge, hand edit): the error, plus the last state that could be read
-- Security: binds 127.0.0.1; checks Host (and Origin for writes); writes need a JSON body; CSP without inline scripts; HTML in Markdown is shown as text
+- Security: binds 127.0.0.1; checks Host (and Origin for writes); writes need a JSON body (images: an image body); CSP without inline scripts; HTML in Markdown is shown as text
 
 ## Code
 

@@ -19,13 +19,15 @@ at /p/<name>/, and a JSON API:
     POST api/run         {"op": "start" | "stop" | "kill"}: start `pm run`, stop it after its task(s), or stop it now
     POST api/edit        {"op": …}: add or change milestones, plans, tasks, resolve decisions, request an
                          executive summary, a resource use report or a custom report through pm (edit.py)
+    POST api/image       an image's bytes (pasted or dropped in a Markdown editor): stored, committed; {"path": …}
+    pm-images/<file>     the images in Markdown
 """
 import argparse, datetime, errno, json, mimetypes, os, pwd, signal, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote, urlsplit
 
-PM_MIN_VERSION = 103    # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
+PM_MIN_VERSION = 105    # the pm whose Project this version uses (log_ids, run_pid, run_crash, approve, milestone_hold,
                         # summary_request, exec tasks, open_summary, report_request, report_rows, report_ask, WORKTREE_NAME,
                         # task_requires, shown_queue, run_stopping, pm run --quiet, return_signoff, signoff_plan,
                         # GitError, run_crash()["stopped"], reject, rejected_text)
@@ -506,6 +508,8 @@ class Handler(BaseHTTPRequestHandler):
         if host not in self.allowed_hosts or self.headers.get("Origin") not in (f"http://{host}", f"https://{host}"):
             return self.send(403, {"error": "unknown host or origin"})
         w, path = self.split(self.path)
+        if path == "/api/image" and w:
+            return self.image(w)
         if path not in ("/api/edit", "/api/projects", "/api/run") or (path != "/api/projects") != bool(w) \
                 or not (self.headers.get("Content-Type") or "").startswith("application/json"):
             return self.send(404, {"error": "not found"})
@@ -547,6 +551,26 @@ class Handler(BaseHTTPRequestHandler):
             except edit.EditError as e:
                 return self.send(400, {"error": str(e)})
         self.send(200, result)
+
+    def image(self, w):
+        """POST /p/<name>/api/image, the image's bytes: stored and committed by pm; {"path": …} for Markdown."""
+        if not (self.headers.get("Content-Type") or "").startswith("image/"):
+            return self.send(415, {"error": "not an image"})
+        try:
+            n = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            n = -1
+        if not 0 < n <= pm.MAX_IMAGE_MB * 1024 * 1024:
+            return self.send(413 if n > 0 else 400, {"error": f"images up to {pm.MAX_IMAGE_MB} MB" if n > 0
+                                                     else "bad Content-Length"})
+        data = self.rfile.read(n)
+        if not w.project:
+            return self.send(400, {"error": w.state["error"]})
+        with self.write_lock:
+            try:
+                return self.send(200, {"path": w.project.image_add(data)})
+            except (pm.FormatError, OSError, subprocess.CalledProcessError) as e:
+                return self.send(400, {"error": str(e)})
 
     def do_GET(self):
         if self.headers.get("Host") not in self.allowed_hosts:  # DNS rebinding
@@ -590,6 +614,13 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send(400, {"error": "bad task id, offset or run"})
                 lines, end = read_log(w.project, tid, start, rid)
                 return self.send(200, {"task": tid, "lines": lines, "next": end})
+            if w.project and path.startswith(f"/{w.project.images}/"):
+                d = (w.project.root / w.project.images).resolve()
+                f = (w.project.root / path.lstrip("/")).resolve()
+                if f.parent != d or not f.is_file():
+                    return self.send(404, {"error": "not found"})
+                return self.send(200, f.read_bytes(), {"webp": "image/webp"}.get(f.suffix[1:]) or
+                                 mimetypes.guess_type(f.name)[0] or "application/octet-stream", cache=True)
             if path != "/":
                 return self.send(404, {"error": "not found"})
             path = "/index.html"

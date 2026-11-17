@@ -27,17 +27,21 @@ Works on the git repository around the current directory. `pm init` writes the s
 template is the file of that name next to this one), and commits it; the first command that changes the
 database writes it. pm commits its own changes to tasks.sql; workers commit them with their work. Nothing is pushed.
 """
-import argparse, collections, contextlib, datetime, fcntl, functools, json, os, queue, re, shlex, signal, sqlite3, \
+import argparse, collections, contextlib, datetime, fcntl, functools, hashlib, json, os, queue, re, shlex, signal, sqlite3, \
     subprocess, sys, threading, time, tomllib, traceback, zoneinfo
 from pathlib import Path
 
 
-VERSION = 104  # bump by one with every commit (AGENTS.md)
+VERSION = 105  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions"
 INSTRUCTION_TOPICS = ("model", "queue", "plans", "tasks", "decisions", "recipes", "human", "errors")
 GUARD = Path(__file__).parent / "guard.py"
+# Images in Markdown (pasted in the dashboard, `pm image add`): <database's folder>/pm-images/<sha256[:12]>.<ext>, tracked.
+IMAGES_DIR = "pm-images"
+IMAGE_TYPES = ((b"\x89PNG\r\n\x1a\n", "png"), (b"\xff\xd8\xff", "jpg"), (b"GIF87a", "gif"), (b"GIF89a", "gif"))
+MAX_IMAGE_MB = 5    # Claude's limit per image
 # In {settings}: `claude -p` ends with the turn, so a background job dies unwatched; long checks run in the foreground.
 # Loose objects (MB) that make pm pack them: each commit adds a full copy of the database; git's own `gc --auto` waits
 # for ~6700 objects, gigabytes at a few MB per copy.
@@ -781,6 +785,7 @@ class Project:
         self.config = config or tomllib.loads(CONFIG_TEMPLATE)
         self.db = self.config["database"]
         self.db_path = self.root / self.db
+        self.images = os.path.normpath(os.path.join(os.path.dirname(self.db), IMAGES_DIR))
         self.out = out
         self.stopping = False       # `pm run` stops after the current task
         self.idle = False           # `pm run` waits for tasks
@@ -988,7 +993,8 @@ class Project:
         """Commit the database file if it changed. Not in a worker, nor while one runs in the trunk: `pm run`
         commits the file with the task. In a work tree: never, the trunk commits it. Returns False if git
         failed."""
-        if self.base or os.environ.get("PM_WORKER") or not self.git("status", "--porcelain", "--", self.db).strip():
+        if self.base or os.environ.get("PM_WORKER") or not self.git("status", "--porcelain", "--", self.db,
+                                                                     self.images).strip():
             return True
         if running is ...:
             with self.connect() as db:
@@ -998,7 +1004,7 @@ class Project:
             return True
         try:
             self.add_db()
-            self.git("commit", "-q", "-m", f"pm: {message}", "--", self.db)
+            self.git("commit", "-q", "-m", f"pm: {message}", "--", self.db, *self.image_paths())
             if self.git("diff-tree", "--root", "--no-commit-id", "-r", "--name-only", "--diff-filter=D", "HEAD", "--",
                         self.db).strip():
                 self.git("reset", "-q", "--soft", "HEAD^")      # the file vanished in between: undo the deletion
@@ -1012,11 +1018,46 @@ class Project:
             return False
 
     def add_db(self):
-        """`git add` the database file; missing (git may be rewriting it), its deletion is unstaged and refused."""
-        self.git("add", "--", self.db)
+        """`git add` the database file and the images; missing (git may be rewriting it), its deletion is unstaged
+        and refused."""
+        self.git("add", "--", self.db, *self.image_paths())
         if self.git("diff", "--cached", "--name-only", "--diff-filter=D", "--", self.db).strip():
             self.git("reset", "-q", "--", self.db)
             raise subprocess.CalledProcessError(1, "git add", stderr=f"{self.db} is missing, git may be rewriting it")
+
+    def image_paths(self):
+        """[the images folder] if it exists, for git: tracked with the database."""
+        return [self.images] if (self.root / self.images).is_dir() else []
+
+    def image_add(self, data):
+        """Store an image (PNG, JPEG, GIF, WebP) in the images folder, named by its hash, and commit it like the
+        database; returns its path from the repository's root, for Markdown."""
+        ext = next((e for magic, e in IMAGE_TYPES if data.startswith(magic)), None)
+        if not ext and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+            ext = "webp"
+        if not ext:
+            raise FormatError("not a PNG, JPEG, GIF or WebP image")
+        if len(data) > MAX_IMAGE_MB * 1024 * 1024:
+            raise FormatError(f"the image has {len(data) / 1024 / 1024:.1f} MB, at most {MAX_IMAGE_MB} MB")
+        trunk = self.base or self
+        rel = f"{trunk.images}/{hashlib.sha256(data).hexdigest()[:12]}.{ext}"
+        path = trunk.root / rel
+        if not path.exists():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(f".{path.name}.tmp")
+            tmp.write_bytes(data)
+            os.replace(tmp, path)
+        trunk.git("add", "--", rel)
+        trunk.commit_db(f"image {rel}")
+        return rel
+
+    def images_line(self):
+        """For workers: where the images in Markdown are; "" if there are none."""
+        trunk = self.base or self
+        if not (trunk.root / trunk.images).is_dir():
+            return ""
+        return (f"\n\nImages in Markdown (`{trunk.images}/<file>`, often the human's screenshots) are files in "
+                f"{(trunk.root / trunk.images).resolve()}/: look at each one with the Read tool before you act on the text.")
 
     def rows(self, sql, *args):
         with self.connect() as db:
@@ -2371,10 +2412,13 @@ class Project:
                        f"{self.base.root}, and the other work trees. Stay in yours: pm commits what you stage here and "
                        "merges it into the trunk. pm's commands use the trunk's database; the copy "
                        f"of {self.db} here is stale.")
+        prompt += self.images_line()
         hook = {"type": "command", "command": shlex.join([sys.executable, str(GUARD)])}
         permissions = {"deny": [f"Read(/{p.resolve()})" for p in {self.db_path, self.root / self.db}]}
+        if self.images_line():
+            permissions["allow"] = [f"Read(/{((self.base or self).root / self.images).resolve()}/**)"]
         if self.web_granted(tid):
-            permissions["allow"] = WEB_TOOLS
+            permissions["allow"] = permissions.get("allow", []) + WEB_TOOLS
         settings = json.dumps({"hooks": {"PreToolUse": [{"matcher": "Bash", "hooks": [hook]}], "Stop": [{"hooks": [hook]}]},
                                "permissions": permissions, "env": WORKER_ENV})
         w = self.config["worker"]
@@ -2950,7 +2994,7 @@ class Project:
         env = os.environ | {"GIT_INDEX_FILE": str(index)}
         git = lambda *a: subprocess.run(["git", *a], cwd=self.root, env=env, capture_output=True, text=True,
                                         check=True).stdout.strip()
-        rest = ["--", ".", f":(exclude){self.db}"]
+        rest = ["--", ".", f":(exclude){self.db}", f":(exclude){self.images}"]
         try:
             git("read-tree", "HEAD")
             git("add", "-A", *rest)
@@ -2963,7 +3007,8 @@ class Project:
 
     def unstaged(self):
         """`git status` lines of changes not staged (untracked included), the database aside."""
-        return [l for l in self.git("status", "--porcelain").splitlines() if l[1] != " " and l[3:] != self.db]
+        return [l for l in self.git("status", "--porcelain").splitlines() if l[1] != " " and l[3:] != self.db
+                and not l[3:].startswith(self.images + "/")]
 
     def task_status(self, tid):
         with self.connect() as db:
@@ -3079,13 +3124,15 @@ class Project:
         if self.merging():
             with contextlib.suppress(subprocess.CalledProcessError):
                 self.git("merge", "--abort")
-        changed = lambda: [l[3:] for l in self.git("status", "--porcelain").splitlines() if l[3:] != self.db]
+        changed = lambda: [l[3:] for l in self.git("status", "--porcelain").splitlines()
+                           if l[3:] != self.db and not l[3:].startswith(self.images + "/")]
         if not (files := changed()):
             return None
         n = f"{len(files)} file{'s' if len(files) > 1 else ''}"
         try:
             with STASH_LOCK:
-                self.git("stash", "push", "-q", "--include-untracked", "-m", message, "--", ".", f":(exclude){self.db}")
+                self.git("stash", "push", "-q", "--include-untracked", "-m", message, "--", ".", f":(exclude){self.db}",
+                         f":(exclude){self.images}")
                 sha = self.git("rev-parse", "--short", "stash@{0}").strip()
                 if same := self.same_stash():
                     self.git("stash", "drop", "-q", "stash@{0}")
@@ -3936,6 +3983,10 @@ def main(argv=None):
     rp.add_parser("answer", help="in that task's worker: store the answer (Markdown, stdin); also `pm show c2`")
     rp.add_parser("show", help="the newest report, or one (also `pm show r2`)").add_argument("report", type=int, nargs="?")
     rp.add_parser("list", help="resource use (r2) and custom (c2) reports, newest first")
+    im = sub.add_parser("image", aliases=["images"], help=f"images for Markdown, in {IMAGES_DIR}/ next to the database"
+                        ).add_subparsers(dest="action", required=True)
+    im.add_parser("add", help=f"store an image (PNG, JPEG, GIF, WebP; at most {MAX_IMAGE_MB} MB; - reads stdin) and "
+                  "commit it; prints the Markdown that shows it").add_argument("file")
     tpd = sub.add_parser("task-pending-decision", help="the task waits until the decision is answered")
     tpd.add_argument("task", type=int)
     tpd.add_argument("decision", type=int)
@@ -3984,6 +4035,9 @@ def main(argv=None):
             return pm.run(once=args.once, dry_run=args.dry_run, quiet=args.quiet)
         elif args.cmd == "stop":
             pm.stop()
+        elif args.cmd in ("image", "images"):
+            data = sys.stdin.buffer.read() if args.file == "-" else Path(args.file).read_bytes()
+            print(f"![]({pm.image_add(data)})")
         elif args.cmd == "kill":
             pm.kill(args.task)
         elif args.cmd in ("milestone", "milestones"):
