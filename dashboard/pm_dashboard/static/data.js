@@ -13,7 +13,7 @@ export function index(state, showArchived = false) {
     state, milestones: t.milestone, plans: t.plan, tasks: t.task, decisions: t.decision, runs: t.run, summaries: t.summary || [],
     reports: t.resource_use_report || [], customs: t.custom_report || [],
     milestone: by(t.milestone), plan: by(all.plan), run: by(t.run), task: by(all.task), decision: by(t.decision), showArchived,
-    queue: state.queue, shown: state.shown_queue || state.queue, queuePos: new Map((state.shown_queue || state.queue).map((id, i) => [id, i])),
+    queue: state.queue, shown: state.shown_queue || state.queue,
     // A 'running' row whose pm run is gone (it crashed) is stale, not running. One per work tree: the trunk's
     // first, then by work tree.
     runningAll: state.pm_run == null ? [] : t.run.filter((r) => r.result === "running")
@@ -35,6 +35,10 @@ export function index(state, showArchived = false) {
     : d.trunkHeld && d.trunkHeld.id === x.id ? `waits: ${d.trunkDirty.length} uncommitted change(s) in the trunk` : null;
   d.runningOf = new Map(d.runningAll.map((r) => [r.task_id, r]));
   d.isRunning = (id) => d.runningOf.has(id);
+  // #0 running, #1 the next task to start
+  d.queuePos = new Map();
+  let n = 0;
+  for (const id of d.shown) d.queuePos.set(id, d.isRunning(id) ? 0 : ++n);
   // rows grouped by key(row): Map key → [value(row)]
   const group = (rows, key, value = (r) => r) => {
     const m = new Map();

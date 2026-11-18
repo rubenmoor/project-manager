@@ -178,8 +178,8 @@ function QueueTable({ d, ids }) {
     <tbody>${ids.map((id) => {
       const t = d.task.get(id), p = d.plan.get(t.plan_id), m = d.milestoneOfTask(t);
       const run = d.isRunning(id);
-      return html`<tr class=${d.queuePos.get(id) === 0 ? "head-row" : ""}>
-        <td class="r num muted">${d.queuePos.get(id) + 1}</td><td><${Prio} p=${d.prio(t)} /></td>
+      return html`<tr class=${d.queuePos.get(id) === 1 ? "head-row" : ""}>
+        <td class="r num muted">${d.queuePos.get(id)}</td><td><${Prio} p=${d.prio(t)} /></td>
         <td class="subject"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /> <${Worktree} name=${t.worktree} /> ${run ? html`<${Pill} status="running" />` : null}${d.unmet(t).length ? html` <span class=${`tag waits${d.stuck(t) ? " stuck" : ""}`} title="waits for prerequisite tasks">waits for ${d.unmet(t).map((x) => `t${x.id}${d.gone(x)}`).join(", ")}</span>` : null}</td>
         <td class="ink2">${p ? html`<a class="ink2" href=${`#/plan/${p.id}`}><${Named} kind="plan" r=${p} /></a>` : html`<a class="ink2" href="#/tasks">executive intervention</a>`}</td><td class="muted">${m ? html`<${Named} kind="milestone" r=${m} />` : null}</td></tr>`;
     })}</tbody></table></div>`;
@@ -234,7 +234,7 @@ export function TaskRows({ d, tasks }) {
       <td class="subject"><${TaskLink} t=${t} /> <${Kind} kind=${t.kind} /> <${Worktree} name=${t.worktree} /></td>
       <td style="width:90px"><${TaskPrio} d=${d} t=${t} /></td>
       <td style="width:170px">${run ? html`<${Pill} status="running" />` : html`<${Pill} status=${d.taskState(t)} />`}
-        ${pos != null ? html` <span class="muted num" title="position in the queue">#${pos + 1}</span>` : null}
+        ${pos ? html` <span class="muted num" title="position in the queue">#${pos}</span>` : null}
         ${why && typeof why !== "string" ? html` <span class="tag" title="waits for a pending decision">blocked</span>` : null}
         ${t.status === "open" && d.unmet(t).length ? html` <span class=${`tag waits${d.stuck(t) ? " stuck" : ""}`} title=${d.excluded(t) || ""}>waits for ${d.unmet(t).map((x) => `t${x.id}`).join(", ")}</span>` : null}</td></tr>`;
   })}</tbody></table>`;
@@ -448,7 +448,7 @@ export function Task({ d, id, query, embedded = false }) {
     <div class="row sub">${running ? html`<${Pill} status="running" />` : html`<${Pill} status=${d.taskState(t)} />`}<${Kind} kind=${t.kind} />
       <span>priority <${TaskPrio} d=${d} t=${t} /></span>
       ${running ? html`<span>· <${Elapsed} start=${d.runningOf.get(t.id).started_at} /></span>` : null}
-      ${pos != null && !running ? html`<span>· ${t.id === d.queue[0] ? "next in the queue" : `#${pos + 1} in the queue`}</span>` : null}
+      ${pos != null && !running ? html`<span>· ${pos === 1 ? "next in the queue" : `#${pos} in the queue`}</span>` : null}
       ${why && typeof why === "string" && !d.unmet(t).length ? html`<span>· not queued: ${why}</span>` : null}</div>
     <dl class="meta">
       <dt>created</dt><dd>${stamp(t.created_at)}${t.created_by_task != null ? html` by <a href=${`#/task/${t.created_by_task}`}>task ${t.created_by_task}</a>` : " by the human or pm"}</dd>

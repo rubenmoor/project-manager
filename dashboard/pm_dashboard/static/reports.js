@@ -20,7 +20,7 @@ function Request({ d, op, open, label, queued, writing }) {
   return html`<div class="row"><button class="btn primary" onClick=${go} disabled=${busy || !!t}>
       ${t ? (running ? writing : queued) : label}</button>
     ${t ? html`<span class="sub"><${TaskLink} t=${t} />${running ? html` · <a href=${`#/task/${t.id}?log`}>live log</a>`
-        : pos != null ? `, #${pos + 1} in the queue` : ", not in the queue"}</span>`
+        : pos != null ? `, #${pos} in the queue` : ", not in the queue"}</span>`
     : html`<span class="muted">queues an exec task at priority 10000</span>`}
     ${error ? html`<span class="err">${error}</span>` : null}</div>`;
 }
@@ -44,7 +44,7 @@ function Ask({ d }) {
     ${open.map(([c, t]) => {
       const running = d.isRunning(t.id), pos = d.queuePos.get(t.id);
       return html`<div class="sub"><${TaskLink} t=${t} />${running ? html` · <a href=${`#/task/${t.id}?log`}>answering…</a>`
-        : pos != null ? `, #${pos + 1} in the queue` : ", not in the queue"}</div>`;
+        : pos != null ? `, #${pos} in the queue` : ", not in the queue"}</div>`;
     })}</div>`;
 }
 
