@@ -32,7 +32,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, hashlib, j
 from pathlib import Path
 
 
-VERSION = 105  # bump by one with every commit (AGENTS.md)
+VERSION = 106  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions"
@@ -430,6 +430,8 @@ CLAUDE_FATAL = ("invalid api key", "please run /login", "oauth token has expired
 CLAUDE_PASSING = ("overloaded", "connection error", "timed out", "api error: 5", "api error: 429", "rate_limit_error")
 NETWORK_ERRORS = ("econnreset", "econnrefused", "etimedout", "eai_again", "enotfound", "socket hang up", "fetch failed")
 RETRY_MINUTES = (0, 1, 2, 5, 10, 20, 30, 60)
+INDEX_LOCKED = "index.lock': File exists"   # git: another git process holds the index
+INDEX_LOCK_SECONDS = 120    # merging a work tree into the trunk waits this long for it
 RESUME_FAILED = "resuming the session failed"   # a warm hand-off's failed resume: no failure of the task
 HANDOFF_CONTEXT = 80_000   # warm hand-off: resume a session only while its context is smaller than this (tokens)
 HANDOFF_MINUTES = 5         # … and its previous run ended at most this long ago (its cache_minutes, if known)
@@ -2693,24 +2695,50 @@ class Project:
             os.close(fd)
 
     def close_stale_run(self):
-        """Under the run lock, a 'running' run is one whose `pm run` died: it becomes failed and is committed; what it
-        left in its work tree is stashed for the task's next run."""
-        rs = self.rows("SELECT * FROM run WHERE result = 'running' ORDER BY id")
+        """Under the run lock, a 'running' run is one whose `pm run` died, or that lost its end (an older pm's aborted
+        merge reset the database): done if its task is closed and committed since the run started, else failed; what
+        a failed one left in its work tree is stashed for the task's next run. Committed."""
+        rs = self.rows("SELECT r.*, t.status FROM run r JOIN task t ON t.id = r.task_id WHERE r.result = 'running' "
+                       "ORDER BY r.id")
         if not rs:
             return
         crashed = self.crash and not self.crash["stopped"]
+        done = {r["id"]: c for r in rs if r["status"] != "open" and (c := self.task_commit(r))}
         with self.connect(write=True) as db:
             for r in rs:
-                db.execute("UPDATE run SET ended_at = ?, result = 'failed', reason = ? WHERE id = ?",
-                           (now(), f"pm run crashed: {self.crash['error']}" if crashed else "interrupted", r["id"]))
-        for r in rs:
+                if r["id"] in done:
+                    db.execute("UPDATE run SET ended_at = ?, result = 'done', reason = ? WHERE id = ?",
+                               (done[r["id"]][1], f"closed after the fact: task {r['status']}, committed in "
+                                                  f"{done[r['id']][0][:12]}", r["id"]))
+                else:
+                    db.execute("UPDATE run SET ended_at = ?, result = 'failed', reason = ? WHERE id = ?",
+                               (now(), f"pm run crashed: {self.crash['error']}" if crashed else "interrupted", r["id"]))
+        failed = [r for r in rs if r["id"] not in done]
+        for r in failed:
             if r["worktree"] and (path := self.worktree_path(r["worktree"])) in self.worktrees():
                 with contextlib.suppress(subprocess.CalledProcessError, OSError):
                     if stash := self.child(r["worktree"], path).stash_leftovers(
                             f"pm: task {r['task_id']} run {r['id']} failed"):
                         self.say(f"[{r['worktree']}] {stash}")
-        self.commit_db(", ".join(f"run {r['id']} (task {r['task_id']})" for r in rs)
-                       + (" crashed" if crashed else " interrupted"))
+        self.commit_db("; ".join(filter(None, (
+            ", ".join(f"run {r['id']} (task {r['task_id']})" for r in rs if r["id"] in done) + " done"
+            if done else "",
+            ", ".join(f"run {r['id']} (task {r['task_id']})" for r in failed) + (" crashed" if crashed else " interrupted")
+            if failed else ""))))
+
+    def task_commit(self, run):
+        """(sha, commit time) of the commit "task <id>: …" on the trunk or the run's work tree branch, made since the
+        run started (not in its base commit), or None."""
+        refs = ["HEAD"] + ([f"refs/heads/{WORKTREE_BRANCH}{run['worktree']}"] if run["worktree"] else [])
+        for ref in refs:
+            r = subprocess.run(["git", "log", "-1", "--format=%H %cI", f"--grep=^task {run['task_id']}: ", ref,
+                                *(["--not", run["base_commit"]] if run["base_commit"] else [])],
+                               cwd=self.root, capture_output=True, text=True)
+            if not r.returncode and r.stdout.strip():
+                sha, at = r.stdout.split()
+                at = datetime.datetime.fromisoformat(at).astimezone(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                return sha, at
+        return None
 
     # --- work trees --------------------------------------------------------------------------
 
@@ -2770,7 +2798,9 @@ class Project:
 
     def merge_worktrees(self):
         """While no task runs in the trunk and nothing is staged there: merge the work trees' branches that the trunk
-        lacks, one after another; one that conflicts gets a merge task."""
+        lacks, one after another; one that conflicts gets a merge task. A merge left in progress is aborted first."""
+        if self.merging() and not self.abort_merge(""):
+            return
         if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=self.root).returncode:
             if self.merge_errors.get("") != "staged":
                 self.merge_errors[""] = "staged"
@@ -2788,27 +2818,71 @@ class Project:
 
     def merge_worktree(self, name, sha):
         """Merge work tree name's branch (at sha) into the trunk, with the database. A conflict is aborted and queues
-        a merge task in the work tree; another failure is reported once and tried again later."""
+        a merge task in the work tree; git's index lock held by another process is waited for (INDEX_LOCK_SECONDS);
+        another failure is reported once and tried again later. An aborted merge keeps the database as it was."""
         ids = sorted({int(m[1]) for l in self.git("log", "--format=%s", f"HEAD..{sha}").splitlines()
                       if (m := re.match(r"task (\d+): ", l))})
         message = f"pm: merge work tree {name}" + (f": task {', '.join(map(str, ids))}" if ids else "")
-        try:
-            self.git("merge", "--no-ff", "--no-commit", sha)
-            self.add_db()
-            self.git("commit", "-q", "-m", message)
-        except subprocess.CalledProcessError as e:
-            conflict = self.merging() and self.git("diff", "--name-only", "--diff-filter=U").split()
-            if self.merging():
-                self.git("merge", "--abort")
-            if conflict:
-                self.queue_merge(name, conflict)
-            elif self.merge_errors.get(name) != (err := ((e.stdout or "") + (e.stderr or "")).strip()):
-                self.merge_errors[name] = err
-                self.say(f"[{name}] merging into the trunk failed; pm tries again later:\n  {err}")
-            return
+        deadline = time.monotonic() + INDEX_LOCK_SECONDS
+        while True:
+            self.wait_index_lock(deadline)
+            try:
+                self.git("merge", "--no-ff", "--no-commit", sha)
+                self.add_db()
+                self.git("commit", "-q", "-m", message)
+                break
+            except subprocess.CalledProcessError as e:
+                err = ((e.stdout or "") + (e.stderr or "")).strip()
+                conflict = self.merging() and self.git("diff", "--name-only", "--diff-filter=U").split()
+                if self.merging() and not self.abort_merge(name):
+                    return
+                if conflict:
+                    self.queue_merge(name, conflict)
+                    return
+                if INDEX_LOCKED in err and time.monotonic() < deadline:
+                    continue
+                if self.merge_errors.get(name) != err:
+                    self.merge_errors[name] = err
+                    self.say(f"[{name}] merging into the trunk failed; pm tries again later:\n  {err}")
+                return
         self.merge_errors.pop(name, None)
         self.gc()
         self.say(f"[{name}] merged into the trunk" + (f" (task {', '.join(map(str, ids))})" if ids else ""))
+
+    def wait_index_lock(self, deadline):
+        """Until git's index lock is gone (another git process holds it), at most until deadline (time.monotonic())."""
+        while (self.root / self.git("rev-parse", "--git-path", "index.lock").strip()).exists() \
+                and time.monotonic() < deadline:
+            time.sleep(1)
+
+    def abort_merge(self, name):
+        """`git merge --abort` in the trunk, the database kept: the abort resets a staged database to HEAD's, which
+        would lose what pm wrote since its last commit (a done run would be 'running' again). False if git failed
+        (said once): the merge stays in progress, merge_worktrees aborts it next time."""
+        deadline = time.monotonic() + INDEX_LOCK_SECONDS
+        with self.mutex, self.lock():
+            keep = self.db_path.read_bytes() if self.db_path.exists() else None
+            if images := self.image_paths():
+                with contextlib.suppress(subprocess.CalledProcessError):
+                    self.git("reset", "-q", "--", *images)     # new images stay, untracked
+            while True:
+                self.wait_index_lock(deadline)
+                try:
+                    self.git("merge", "--abort")
+                    break
+                except subprocess.CalledProcessError as e:
+                    if INDEX_LOCKED in (e.stderr or "") and time.monotonic() < deadline:
+                        time.sleep(1)
+                        continue
+                    if self.merge_errors.get(name) != (err := (e.stderr or "").strip()):
+                        self.merge_errors[name] = err
+                        self.say(f"[{name or 'trunk'}] aborting the merge into the trunk failed; pm tries again later:\n  {err}")
+                    return False
+            if keep is not None and (not self.db_path.exists() or self.db_path.read_bytes() != keep):
+                tmp = self.db_path.with_name(self.db_path.name + ".tmp")
+                tmp.write_bytes(keep)
+                os.replace(tmp, self.db_path)
+        return True
 
     def queue_merge(self, name, files):
         """A merge task in work tree name, in the plan of its last task, above it; commits the database."""
@@ -3698,7 +3772,7 @@ class Project:
 
     def status(self):
         for r in self.rows("SELECT * FROM run WHERE result = 'running'"):
-            gone = "" if self.run_pid() else "; its `pm run` is gone, the next one records it as failed"
+            gone = "" if self.run_pid() else "; its `pm run` is gone, the next one closes it (done if its task was closed and committed, else failed)"
             where = f" in work tree {r['worktree']}" if r["worktree"] else ""
             self.say(f"Running: task {r['task_id']}{where} (run {r['id']}, pid {r['pid']}) since {stamp(r['started_at'])}, "
                      f"{duration(seconds(r['started_at'], None))}{gone}")
