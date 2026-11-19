@@ -4,8 +4,8 @@
         that read or search the database file (PM_DB): reading it (`cat`, `grep`, `sed` … naming it), `grep -r`,
         `git grep` and `rg --no-ignore` without excluding it; rg and Claude Code's Grep skip it via .ignore, and the
         settings deny Read of it. It is megabytes of SQL; workers query it with pm.
-    Stop: once, keeps the worker going while its task (PM_TASK) is still open and waits for no decision, or while a
-        background task runs: `claude -p` ends with the turn, and nothing wakes it later."""
+    Stop: once, keeps the worker going while its task (PM_TASK) is still open, not reported done (verifying) and waits
+        for no decision, a verify run (PM_VERIFY) while it gave no verdict, or while a background task runs: `claude -p` ends with the turn, and nothing wakes it later."""
 import json, os, re, sys
 from pathlib import Path
 
@@ -47,10 +47,14 @@ def task_unfinished(tid):
     if not root:
         return None
     project = pm.Project(root, pm.load_config(root))
-    t = project.rows("SELECT status FROM task WHERE id = ?", tid)
+    t = project.rows("SELECT status, phase FROM task WHERE id = ?", tid)
+    if os.environ.get("PM_VERIFY"):
+        if t and t[0]["status"] == "open" and t[0]["phase"] == "verifying":
+            return f"task {tid} has no verdict yet"
+        return None
     waits = project.rows("SELECT 1 FROM task_decision td JOIN decision d ON d.id = td.decision_id "
                          "WHERE td.task_id = ? AND d.status = 'pending'", tid)
-    if t and t[0]["status"] == "open" and not waits:
+    if t and t[0]["status"] == "open" and t[0]["phase"] != "verifying" and not waits:
         return f"task {tid} is still open"
     return None
 
@@ -66,8 +70,11 @@ def stop(e):
     if tid.isdigit():
         try:
             if unfinished := task_unfinished(int(tid)):
-                why.append(f"{unfinished}. Finish it now: `pm task done {tid} \"…\"`, `pm task drop {tid} \"…\"`, or "
-                           f"make it pending on a decision; a long check runs in the foreground")
+                why.append(f"{unfinished}. " + (f"End the verify run now: `pm task accept {tid} \"…\"` or "
+                                                 f"`pm task reject {tid}` with the findings on stdin"
+                                                 if os.environ.get("PM_VERIFY") else
+                                                 f"Finish it now: `pm task done {tid} \"…\"`, `pm task drop {tid} \"…\"`, "
+                                                 "or make it pending on a decision; a long check runs in the foreground"))
         except Exception:  # noqa: BLE001 — never stop a worker over the hook's own failure
             pass
     if why:

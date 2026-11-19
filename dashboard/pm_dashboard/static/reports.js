@@ -68,6 +68,22 @@ function Report({ r }) {
       <tbody>${cats.map((c) => row(c))}${row({ name: "Total", ...T }, true)}</tbody></table></div></div>`;
 }
 
+// pm report tries: per model combination (worker/verifier), how many tries verified tasks needed.
+function Tries({ d }) {
+  if (!d.tries.length) return null;
+  return html`<div class="card" style="margin-top:12px"><b>Tries per model combination</b>
+    <div class="sub">Verified tasks that ended: accepted on which try, settled by you after the last try, or dropped
+      (<span class="mono">pm report tries</span>).</div>
+    ${d.tries.map((g) => html`<div style="margin-top:10px"><b class="mono">${g.models}</b>${" "}
+      <span class="muted">${g.tasks} task${g.tasks === 1 ? "" : "s"}, ${usd(g.cost)}${g.cost ? `, verify ${Math.round((100 * g.verify_cost) / g.cost)}%` : ""}</span>
+      <div class="tablewrap"><table><thead><tr><th>bucket</th><th></th><th class="r">tasks</th><th class="r">share</th>
+        <th class="r">cost</th><th class="r">verify</th></tr></thead><tbody>
+        ${g.buckets.filter((b) => b.tasks || !["4th+", "dropped"].includes(b.name)).map((b) => html`<tr><td>${b.name}</td>
+          <td style="width:40%"><div class="tries-bar" style=${`width:${Math.round(100 * b.share)}%`}></div></td>
+          <td class="r num">${b.tasks}</td><td class="r num muted">${Math.round(100 * b.share)}%</td>
+          <td class="r num">${usd(b.cost)}</td><td class="r num muted">${usd(b.verify_cost)}</td></tr>`)}</tbody></table></div></div>`)}</div>`;
+}
+
 // Newest first, of every kind; the buttons stay on top.
 export function Reports({ d }) {
   const all = [...d.summaries.map((s) => ({ kind: "summary", r: s, at: s.created_at })),
@@ -84,6 +100,7 @@ export function Reports({ d }) {
       <${Request} d=${d} op="report_request" open=${d.state.open_report}
         label="Write a resource use report" queued="Resource use report queued" writing="Writing a resource use report…" />
       <${Ask} d=${d} /></div>
+    <${Tries} d=${d} />
     ${!all.length ? html`<div class="empty">No report yet.</div>` : all.map(({ kind, r }) => html`<div style="margin-top:12px">
       ${kind === "summary" ? html`<div class="card">${head("executive summary", r)}<${Markdown} text=${r.body} /></div>`
         : kind === "custom" ? html`<div class="card">${head("custom report", { ...r, created_at: r.answered_at })}

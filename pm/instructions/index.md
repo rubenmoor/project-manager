@@ -28,10 +28,11 @@ pm image add <file|->
 pm plan add <milestone> "<subject>" --intro "…" [--priority N] <<'EOF' … EOF
 pm plan edit <plan> [--subject …] [--body -] [--intro …] [--priority N]
 # tasks
-pm task add <plan> "<subject>" --worktree <name> [--requires <task> …] [--kind plan] [--priority N] [--web] [--model opus] <<'EOF' … EOF
+pm task add <plan> "<subject>" --worktree <name> [--requires <task> …] [--kind plan] [--priority N] [--web] [--model opus] [--tries sonnet,opus] [--no-verify] <<'EOF' … EOF
 pm task set <task> [--subject …] [--body -] [--priority N|none] [--web|--no-web] [--model opus|none] [--worktree <name>]
 pm task requires <task> <prerequisite> … [--remove <id>] | pm task priority <task> <N|none>
-pm task done <task> "<YYYY-MM-DD, files>" | pm task drop <task> "<reason>" [--replaced-by <task>|--release]
+pm task done <task> "<YYYY-MM-DD, files>" [--evidence - <<'EOF' … EOF] | pm task drop <task> "<reason>" [--replaced-by <task>|--release]
+pm task accept <task> "<note>" | pm task reject <task> <<'EOF' <findings> EOF     # verify runs only (`pm instructions tasks`)
 # decisions
 pm decision add "<question>" --intro "…" [--body …] --option "<recommended>" --option … [--once]
 pm task-pending-decision <task> <decision>
@@ -41,7 +42,7 @@ pm decision consequences <decision> "<what changed>" | pm decision supersede <ne
 pm init | pm run [--once|--dry-run] | pm stop | pm kill <task> | pm task redo <task> | pm decide
 pm milestone add "<goal>" [--queue N] <<'EOF' … EOF | pm milestone set|hold|resume <milestone>
 pm decision answer <d> <option|"text"> [--once] [--supersedes <d>] | approve <d> [--edit] | return <d> "<feedback>" | reject <d> ["<why>"] | irrelevant <d> "<why>" | kind <d> rule|once
-pm task add --exec "<subject>" | pm summary request | pm report request | pm report ask "<question>"
+pm task add --exec "<subject>" | pm summary request | pm report request | pm report ask "<question>" | pm report tries
 ```
 
 ## Topics
@@ -51,7 +52,7 @@ pm task add --exec "<subject>" | pm summary request | pm report request | pm rep
 - `model`: milestones, plans, tasks, task kinds, decisions, sign-offs, the queue
 - `queue`: the tasks pm queues itself, priorities and their rules
 - `plans`: milestones and plans, with examples
-- `tasks`: tasks, dependencies, model, work trees, web access, follow-up tasks
+- `tasks`: tasks, dependencies, model, verification, work trees, web access, follow-up tasks
 - `decisions`: asking the human, iterative feedback, the decision log, your own choices, consequences
 - `recipes`: the mechanics of each kind of task: masterplan, split, revise, cleanup, summary, reports, finish
 - `human`: the human's commands and settings

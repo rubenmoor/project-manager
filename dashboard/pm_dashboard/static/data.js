@@ -11,7 +11,7 @@ export function index(state, showArchived = false) {
   const by = (rows) => new Map(rows.map((r) => [r.id, r]));
   const d = {
     state, milestones: t.milestone, plans: t.plan, tasks: t.task, decisions: t.decision, runs: t.run, summaries: t.summary || [],
-    reports: t.resource_use_report || [], customs: t.custom_report || [],
+    reports: t.resource_use_report || [], customs: t.custom_report || [], tries: state.tries || [],
     milestone: by(t.milestone), plan: by(all.plan), run: by(t.run), task: by(all.task), decision: by(t.decision), showArchived,
     queue: state.queue, shown: state.shown_queue || state.queue,
     // A 'running' row whose pm run is gone (it crashed) is stale, not running. One per work tree: the trunk's
@@ -51,6 +51,7 @@ export function index(state, showArchived = false) {
   d.plansOf = group(t.plan, (r) => r.milestone_id);
   d.tasksOf = group(t.task, (r) => r.plan_id);
   d.runsOf = group(t.run, (r) => r.task_id);
+  d.triesOf = group(t.task_try || [], (r) => r.task_id);
   d.decisionsOf = group(t.task_decision, (l) => l.task_id, (l) => d.decision.get(l.decision_id));
   d.tasksWaiting = group(t.task_decision, (l) => l.decision_id, (l) => d.task.get(l.task_id));
   // Prerequisite tasks (task_prerequisite_tasks): what a task requires, and the tasks that require it.

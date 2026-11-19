@@ -18,12 +18,16 @@ pm decision approve 4 [--edit]         # sign-offs only; --edit: a plan sign-off
 pm decision return 4 < feedback.md     # a plan sign-off: revised with the feedback, then asked again
 pm decision reject 4 ["<reason>"]      # a sign-off: archive what it approves (kept, hidden); --task 9: one task of the task queue
 pm plan list --archived                # archived plans and tasks, by rejected sign-off
+pm task accept 7 "<note>"              # a verifying task: accept it yourself (done, merged)
+pm task reject 7 < findings.md         # … or reject it: its worker reworks it
+pm decision answer 12 1                # "task 7: rejected after 3 tries": 1 one more try, 2 accept as is, 3 drop, or own text
+pm report tries [--since 2026-11-01] [--plan 2] [--milestone 1]   # tries per model combination, cost per bucket
 pm decision kind 3 rule                # rule: lasting, in the log; once: a one-off
 pm task add --exec "<subject>" [--priority N] < body.md
 pm summary request ; pm report request # queue an executive summary / resource use report; show, list
 pm report ask "<question>"             # queue a custom one-paragraph report
 ```
 
-Settings in `project-manager.toml`: `[models]` (the worker's model per task kind, `escalate` after a failure), `push_minutes` (`pm run` pushes the trunk's branch at most this often, default 60, 0: off).
+Settings in `project-manager.toml`: `[models]` (per kind a worker, or a table with `tries`, a worker per try, and `verify`, the verifier; `default`, `verify`, `ranking`; old `escalate`), `verify_prompt` (how to prove things in this project, for the verify run), `max_tries` (default 3, then a decision), `push_minutes` (`pm run` pushes the trunk's branch at most this often, default 60, 0: off).
 
 Record only answers the human gave.

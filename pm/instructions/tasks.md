@@ -15,9 +15,13 @@ EOF
 pm task add 2 "Untangle the cache invalidation" --model opus --worktree app <<'EOF'   # needs deep reasoning
 …
 EOF
-pm task set 6 [--subject …] [--body -] [--priority N|none] [--web|--no-web] [--model opus|none] [--worktree <name>]   # open, not running
+pm task set 6 [--subject …] [--body -] [--priority N|none] [--web|--no-web] [--model opus|none] [--tries sonnet,opus|none] [--verify-model opus|none] [--verify|--no-verify] [--worktree <name>]   # open, not running
 pm task priority 6 710          # none: back to the plan's
-pm task done 5 "2026-10-10, app/api/export.py, tests/test_export.py"
+pm task done 5 "2026-10-10, app/api/export.py, tests/test_export.py"   # a task that isn't verified
+pm task done 5 "2026-10-10, app/api/export.py" --evidence - <<'EOF'     # a verified task: then a verify run checks it
+exports a 3-row table: ran `pytest tests/test_export.py -k rows`, 1 passed
+an empty table gives the header only: ran `pytest -k empty`, 1 passed
+EOF
 pm task drop 6 "covered by task 5"
 ```
 
@@ -45,7 +49,19 @@ pm task drop 8 "decision 40: no export" --release              # what required 8
 
 A task fits one worker run: one change you can describe, check and commit.
 
-**Model:** pm picks the worker's model by task kind (`[models]` in the config: usually Sonnet for work, Opus for planning and investigations) and switches a task to Opus after a failed run. When splitting a plan, mark a work task that needs deep reasoning (subtle design, hard bugs, wide refactors) `--model opus`; leave the rest to pm.
+**Model:** pm picks the worker's model by task kind (`[models]` in the config: usually Sonnet for work, Opus for planning and investigations) and climbs a ladder per try (`tries`, e.g. Sonnet, then Opus) after a rejected try or a failed run. By default leave all of it to the config. When splitting a plan:
+- `--model opus`: a work task that needs deep reasoning (subtle design, hard bugs, wide refactors); every try
+- `--tries sonnet,opus`: a ladder of its own, e.g. a task that a cheap first try may well solve
+- `--no-verify` (with `--model sonnet`): a fixed recipe whose evidence is a script's exit code; `--verify-model` only for a reason
+
+### Verification
+
+A task of a verified kind (`pm show <task>`: `models: sonnet → opus, verified by opus`) is done only once an independent verify run accepts it.
+
+- **Worker:** infer the acceptance criteria from the subject and body, in the context of the plan and milestone: what the requester would check to call it done, including cases the body only implies; prove each one (command, test, screenshot), fix and repeat until all pass; then `pm task done <task> "<note>" --evidence -`, one line per criterion: the criterion, what you ran, what it showed. Missing or vague evidence fails the task straight away
+- **Verify run** (a fresh session, `PM_VERIFY=1`): infers the criteria itself before reading the evidence, re-runs or spot-checks the proofs, compares with the task, not the claims; read-only (a changed tracked file fails the run and is discarded); ends with `pm task accept <task> "<note>"` or `pm task reject <task> <<'EOF' <what fails, how to check it> EOF`; work beyond the task's spec: a follow-up task, not a rejection
+- **Rework:** the worker's session resumes with the findings (a fresh session when the try's model differs, with the findings and the diff so far); `pm show <task>` lists every try with evidence and findings
+- After `max_tries` rejected tries: a decision for the human (one more try, accept as is, drop; drop reverts the task's commits in its work tree)
 
 **Work trees:** `pm task add` needs `--worktree <name>`, one of the work trees your prompt lists with what belongs in each; pick it by what the task is about, not by your own task's. A work tree runs one task at a time, in parallel with the other work trees; pm merges it into the trunk after each task. **Priority orders tasks only within one work tree:** a task that must wait for another requires it (`--requires`), in whichever work tree. In a work tree, stay in it; pm's commands still use the trunk's database.
 

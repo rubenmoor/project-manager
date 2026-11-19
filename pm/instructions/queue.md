@@ -14,6 +14,8 @@ pm adds these tasks itself; their bodies are the prompts of the same name in pro
 | `pm report request` | "write a resource use report" (`exec`, priority 10000) | none |
 | `pm report ask "<question>"` | "answer: <question>" (`exec`, priority 10000), a custom report | none |
 
+Not a task, but a run: a verified task reported done gets a verify run (run kind `verify`, `[models] verify`) as its work tree's next run, before any other task there; a rejected one gets its next try the same way. After `max_tries` rejected tries pm adds the decision "task N: rejected after K tries" (one more try, accept as is, drop).
+
 A priority change queues nothing. When done, pm checks: `plan` and `masterplan` tasks added or changed a plan (`revise` may leave it as it is), `split` left its plan with tasks; otherwise the task fails.
 
 `pm queue` shows a priority only when it isn't 0:
@@ -23,6 +25,7 @@ Queue (3):
    +1000  task 1: write the masterplan of milestone 1: CSV export
    +1000  task 3: create tasks for plan 2: Backend endpoint
     +700  task 4: stream one table as CSV
+     +700  task 5: escape newlines in CSV cells [app] (reworking, try 2)
 ```
 
 ## Priorities

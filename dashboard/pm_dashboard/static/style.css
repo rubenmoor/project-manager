@@ -143,6 +143,8 @@ h3 { font-size: 14px; margin: 16px 0 6px; font-weight: 600; }
 .pill.done .dot, .pill.answered .dot, .pill.implemented .dot { background: var(--good); }
 .pill.dropped .dot, .pill.irrelevant .dot, .pill.archived .dot { background: var(--dropped); }
 .pill.rejected .dot { background: var(--critical); }
+.pill.accepted .dot { background: var(--good); }
+.pill.verifying .dot { background: var(--accent); }
 .pill.failed .dot { background: var(--critical); }
 .pill.blocked .dot, .pill.on-hold .dot, .pill.returned .dot { background: var(--warning); }
 .pill.limit .dot { background: var(--serious); }
@@ -329,6 +331,9 @@ select.small { width: auto; }
 .tl-item.blocked .tl-pos { color: var(--decision); }
 .tag.waits { background: var(--decision); color: #fff; }
 .tag.waits.stuck { background: var(--critical); }
+.tag.phase { background: var(--accent-wash); color: var(--accent); }
+.tries-bar { height: 10px; border-radius: 3px; background: var(--accent); min-width: 1px; }
+.card.try pre { white-space: pre-wrap; }
 .tl-toggle { display: flex; gap: 6px; align-items: center; padding: 8px 4px; color: var(--ink-2); font-size: 12px; cursor: pointer; white-space: nowrap; }
 .tl-pos { color: var(--muted); font-size: 12px; width: 32px; flex: none; }
 .tl-subject { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

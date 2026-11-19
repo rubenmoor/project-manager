@@ -32,7 +32,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, hashlib, j
 from pathlib import Path
 
 
-VERSION = 113  # bump by one with every commit (AGENTS.md)
+VERSION = 114  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions"
@@ -98,7 +98,7 @@ SIGNOFF_INTROS = {
 IN_LOG = ("status = 'answered' AND signoff IS NULL AND kind = 'rule' AND id NOT IN (SELECT superseded_id FROM "
           "decision_supersedes s JOIN decision n ON n.id = s.decision_id WHERE s.note = '' AND n.status = 'answered')")
 
-SCHEMA_VERSION = 32
+SCHEMA_VERSION = 33
 WHICH_PM = f"pm {VERSION}, {__file__}"     # a stale PYTHONPATH can load another pm than the one installed
 # A change to SCHEMA raises SCHEMA_VERSION and adds MIGRATIONS[old version]: SQL (or a function of the connection)
 # run on a database of that version, after which the rows are copied into SCHEMA by column name (Project.migrate).
@@ -129,7 +129,7 @@ def trunk_kinds(con):
 
 
 MIGRATIONS = {12: "", 13: "", 14: revise_kind, 15: "", 16: "", 17: "", 18: drop_summary_kind, 19: exec_kind,
-              20: "", 21: "", 22: "", 23: "", 24: "", 25: "", 26: trunk_kinds, 27: "", 28: "", 29: "", 30: "", 31: ""}
+              20: "", 21: "", 22: "", 23: "", 24: "", 25: "", 26: trunk_kinds, 27: "", 28: "", 29: "", 30: "", 31: "", 32: ""}
 # Timestamps: UTC, "2026-10-11T16:30:00Z". created_by_task: the task whose worker created the row; NULL: the human or pm.
 SCHEMA = """
 CREATE TABLE milestone (
@@ -170,6 +170,12 @@ CREATE TABLE task (
     web             INTEGER NOT NULL DEFAULT 0 CHECK (web IN (0, 1)),  -- 1: its worker gets WebSearch and WebFetch
     model           TEXT CHECK (model IS NULL OR trim(model) <> ''),  -- claude --model; NULL: [models] in the config
     worktree        TEXT CHECK (worktree GLOB '[a-z0-9]*' AND worktree NOT GLOB '*[^a-z0-9-]*'),  -- [worktrees]; NULL: the trunk
+    phase           TEXT NOT NULL DEFAULT 'implementing' CHECK (phase IN ('implementing', 'verifying', 'reworking')),  -- while open
+    tries           TEXT CHECK (tries IS NULL OR json_type(tries) = 'array'),  -- worker per try (`--tries`); NULL: [models]
+    verify_model    TEXT CHECK (verify_model IS NULL OR json_type(verify_model) = 'array'),  -- verifier per try; NULL: [models]
+    verify          INTEGER CHECK (verify IN (0, 1)),      -- `--verify` / `--no-verify`; NULL: [models]
+    extra_tries     INTEGER NOT NULL DEFAULT 0,            -- the human's "one more try" answers, beyond max_tries
+    revert          TEXT,                                  -- dropped unaccepted: 'pending', then the revert's commit or 'task <id>'
     CONSTRAINT "an open task needs a body" CHECK (status <> 'open' OR trim(body) <> ''),
     CONSTRAINT "retired_at is set exactly when done or dropped" CHECK ((status = 'open') = (retired_at IS NULL)),
     CONSTRAINT "an exec task has no plan, every other task has one" CHECK ((kind = 'exec') = (plan_id IS NULL)),
@@ -229,7 +235,25 @@ CREATE TABLE run (                                         -- one worker run of 
     context_tokens        INTEGER,                         -- the session's context at the run's last turn
     cache_minutes         INTEGER,                         -- its prompt cache's lifetime: 60 (1 h writes) or 5
     pid                   INTEGER,                         -- the `pm run` process
+    kind                  TEXT NOT NULL DEFAULT 'work' CHECK (kind IN ('work', 'verify')),
+    try                   INTEGER,                         -- the try of a verified task it belongs to
+    asked_model           TEXT,                            -- the --model pm passed, e.g. sonnet
     CONSTRAINT "ended_at is set exactly when not running" CHECK ((result = 'running') = (ended_at IS NULL))
+) STRICT;
+
+CREATE TABLE task_try (                                    -- a try of a verified task: the worker's `pm task done`
+    id         INTEGER PRIMARY KEY,
+    task_id    INTEGER NOT NULL REFERENCES task (id),
+    try        INTEGER NOT NULL CHECK (try >= 1),
+    note       TEXT NOT NULL DEFAULT '',                   -- the worker's done note
+    evidence   TEXT NOT NULL CHECK (trim(evidence) <> ''), -- per inferred criterion: what was run, what it showed
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ', 'now')),
+    verdict    TEXT CHECK (verdict IN ('accepted', 'rejected')),  -- NULL: not verified yet
+    findings   TEXT,                                       -- rejected: what fails, how to check it; accepted: the note
+    verify_run INTEGER REFERENCES run (id),                -- NULL: by the human
+    decided_at TEXT,
+    UNIQUE (task_id, try),
+    CONSTRAINT "decided_at is set exactly with a verdict" CHECK ((verdict IS NULL) = (decided_at IS NULL))
 ) STRICT;
 
 CREATE TABLE task_decision (                               -- the task waits while the decision is pending
@@ -299,6 +323,7 @@ CREATE INDEX task_decision_decision ON task_decision (decision_id);
 CREATE INDEX task_prerequisite ON task_prerequisite_tasks (prerequisite_id);
 CREATE INDEX decision_superseded ON decision_supersedes (superseded_id);
 CREATE INDEX run_task ON run (task_id);
+CREATE INDEX task_try_task ON task_try (task_id);
 CREATE UNIQUE INDEX run_running ON run (coalesce(worktree, '')) WHERE result = 'running';  -- at most one per work tree
 
 CREATE VIEW queue AS
@@ -323,9 +348,33 @@ what you learned of the code still holds, what you were told about task {prev} n
 for task {prev} apply to task {id} now: do task {id} and nothing else.
 
 {show}
-Look up the decision log first for what task {id} touches (`pm decision list --answered --grep <word>`). Finish with \
-`pm task done {id} "<YYYY-MM-DD, files>"` or `pm task drop {id} "<reason>"`, or make it wait for a decision or a \
-prerequisite task; stage, don't commit."""
+Look up the decision log first for what task {id} touches (`pm decision list --answered --grep <word>`). {finish} \
+or `pm task drop {id} "<reason>"`, or make it wait for a decision or a prerequisite task; stage, don't commit."""
+
+
+VERIFY_PROMPT = (INSTRUCTIONS / "worker-verify.md").read_text(encoding="utf-8")
+VERIFY_DIFF_CHARS = 60_000   # the diff in the verify and fresh rework prompts, cut beyond this
+FINISH = 'Finish with `pm task done {id} "<YYYY-MM-DD, files>"`'
+FINISH_VERIFIED = """An independent verify run checks task {id} once you report it done. Before that: infer its acceptance \
+criteria from its subject and body, read in the context of its plan and milestone (what its requester would check to \
+call it done, including cases the body only implies); prove each one (a command, a test, a screenshot), fix and repeat \
+until all pass. Then finish with `pm task done {id} "<YYYY-MM-DD, files>" --evidence - <<'EOF'`, one line per \
+criterion: the criterion, what you ran, what it showed (`EOF` ends it)"""
+REWORK_PROMPT = """The verify run rejected try {prev} of task {id}; this is try {next}. Its findings:
+
+{findings}
+
+Fix every finding, check the criteria again (yours and the ones the findings add), then report done again with new \
+evidence: `pm task done {id} "<YYYY-MM-DD, files>" --evidence -`. Stage, don't commit."""
+REWORK_FRESH = """
+# Try {next}
+
+Task {id} was worked before and the verify run rejected it; this is try {next}. The findings of each rejected try \
+are listed above. The work so far is committed in this checkout (`{diff}`, below, possibly cut short): build on it, \
+fix every finding, then report done again with new evidence.
+
+{diff_text}
+"""
 
 
 # --- Claude's usage limit: the message and when it resets ---------------------------------------
@@ -439,6 +488,11 @@ OBSOLETE_SETTINGS = {"warm_handoff": f"warm_handoff is gone: a session is resume
                                      f"{HANDOFF_CONTEXT // 1000}k tokens; remove it"}
 # A task that fails again after this many investigations stops `pm run`: else a fix that doesn't fix loops.
 MAX_INVESTIGATIONS = 3
+MODEL_RANKING = ["haiku", "sonnet", "opus", "fable"]   # weakest first; [models] ranking overrides it
+VERIFIABLE_KINDS = ("work", "plan", "investigate", "merge")   # the kinds that run in a work tree
+PHASES = ("implementing", "verifying", "reworking")
+TRIES_SUBJECT = "task {}: rejected after {} tries"
+TRIES_OPTIONS = ["one more try", "accept as is", "drop"]
 RECHECK_SECONDS = 30    # `pm run` with tasks running: how often it looks at git again (uncommitted changes, merges)
 IDLE_POLL_SECONDS = 3   # `pm run` with an empty queue: how often it looks at tasks.sql
 
@@ -613,9 +667,12 @@ def load_config(root):
     if not isinstance(models, dict):
         errors.append("models must be a table")
     else:
-        errors += [f"models: unknown key {k!r}" for k in models.keys() - {"default", "escalate", *TASK_KINDS}]
-        errors += [f"models.{k} must be a string" for k, v in models.items() if not isinstance(v, str)]
+        errors += models_errors(models)
         config["models"] = defaults["models"] | models
+    if not isinstance(config["max_tries"], int) or isinstance(config["max_tries"], bool) or config["max_tries"] < 1:
+        errors.append("max_tries must be an integer >= 1")
+    if not isinstance(config["verify_prompt"], str):
+        errors.append("verify_prompt must be a string")
     if not isinstance(config["database"], str) or not config["database"].strip():
         errors.append("database must be a file name")
     w = config["worker"]
@@ -651,6 +708,59 @@ def load_config(root):
     return config
 
 
+def model_list(v):
+    """A model or a list of them as a list."""
+    return [v] if isinstance(v, str) else list(v)
+
+
+def is_models(v):
+    return isinstance(v, str) or isinstance(v, list) and bool(v) and all(isinstance(x, str) and x.strip() for x in v)
+
+
+def models_errors(models):
+    """What is wrong with a [models] table."""
+    out = [f"models: unknown key {k!r}" for k in models.keys() - {"default", "escalate", "verify", "ranking", *TASK_KINDS}]
+    out += [f"models.{k} must be a string" for k in ("default", "escalate", "verify")
+            if k in models and not isinstance(models[k], str)]
+    if "ranking" in models and not (isinstance(models["ranking"], list) and all(isinstance(x, str) for x in models["ranking"])):
+        out.append("models.ranking must be a list of model names, weakest first")
+    for k in TASK_KINDS:
+        v = models.get(k)
+        if v is None or isinstance(v, str):
+            continue
+        if not isinstance(v, dict):
+            out.append(f"models.{k} must be a model (string) or a table with tries and verify")
+            continue
+        out += [f"models.{k}: unknown key {x!r}" for x in v.keys() - {"tries", "verify"}]
+        if "tries" in v and not is_models(v["tries"]):
+            out.append(f"models.{k}.tries must be a model or a non-empty list of models")
+        if "verify" in v and v["verify"] is not False and not is_models(v["verify"]):
+            out.append(f"models.{k}.verify must be a model, a non-empty list of models, or false")
+        if v.get("verify", False) is not False and k not in VERIFIABLE_KINDS:
+            out.append(f"models.{k}: {k} tasks run in the trunk and aren't verified; verify works for "
+                       + ", ".join(VERIFIABLE_KINDS))
+    return out
+
+
+def rank(models, name):
+    """The model's strength by [models] ranking (or MODEL_RANKING), or None for an unknown name."""
+    order = models.get("ranking") or MODEL_RANKING
+    name = (name or "").lower()
+    hits = [i for i, x in enumerate(order) if x.lower() in name]
+    return hits[-1] if hits else None
+
+
+def pick(ladder, n):
+    """Rung n (from 0) of a ladder; its last rung repeats."""
+    return ladder[min(n, len(ladder) - 1)] if ladder else ""
+
+
+def ladder_text(xs):
+    """sonnet → opus; consecutive duplicates once."""
+    out = [x for i, x in enumerate(xs) if i == 0 or xs[i - 1] != x]
+    return " → ".join(x or "claude default" for x in out)
+
+
 def primary_key(con, table):
     info = con.execute(f"PRAGMA table_info({table})").fetchall()
     return [c[1] for c in sorted(info, key=lambda c: c[5]) if c[5]]
@@ -674,7 +784,7 @@ def dump(con):
     return "\n".join(out).rstrip() + "\n"
 
 
-SHRINKS = {"task_prerequisite_tasks"}     # the only tables a write may remove rows from
+SHRINKS = {"task_prerequisite_tasks", "task_try"}     # the only tables a write may remove rows from
 
 
 def table_counts(con):
@@ -1313,12 +1423,17 @@ class Project:
                            (answer, now(), kind or d["kind"], did))
                 for old in supersedes:
                     self.link_supersede(db, did, old)
+                self.tries_answered(db, d, answer)
                 return
             db.execute("UPDATE decision SET status = 'irrelevant', reason = ?, closed_at = ? WHERE id = ?",
                        (irrelevant, now(), did))
+            dropped = [r[0] for r in db.execute("SELECT task_id FROM task_decision td JOIN task t ON t.id = td.task_id "
+                                                "WHERE td.decision_id = ? AND t.status = 'open'", (did,))]
             db.execute("UPDATE task SET status = 'dropped', note = ?, retired_at = ? WHERE status = 'open' "
                        "AND id IN (SELECT task_id FROM task_decision WHERE decision_id = ?)",
                        (f"decision {did} irrelevant", now(), did))
+            for tid in dropped:
+                self.mark_revert(db, tid)
 
     def decisions(self, answered=False, everything=False, grep=None):
         """`pm decision list`: every pending decision with what it blocks, its context and options. answered: the
@@ -1932,6 +2047,78 @@ class Project:
         return "".join(f"{r['ref']:>5}  {stamp(r['at'])}  {r['text'].splitlines()[0][:90]}\n"
                        for r in rows) or "No report yet.\n"
 
+    TRY_BUCKETS = ("1st try", "2nd try", "3rd try", "4th+", "human", "dropped")
+
+    def tries_data(self, since=None, plan=None, milestone=None):
+        """`pm report tries`: the verified tasks that ended (or wait for the human), grouped by the models their runs
+        used ("sonnet→opus/opus"), with per bucket (TRY_BUCKETS) the tasks, their cost and the verify runs' share.
+        [{"models", "tasks", "cost", "verify_cost", "buckets": [{"name", "tasks", "share", "cost", "verify_cost",
+        "ids"}]}], the largest group first."""
+        where, args = ["EXISTS (SELECT 1 FROM task_try x WHERE x.task_id = t.id)"], []
+        if since:
+            where.append("(SELECT min(created_at) FROM task_try x WHERE x.task_id = t.id) >= ?")
+            args.append(since)
+        if plan is not None:
+            where.append("t.plan_id = ?")
+            args.append(plan)
+        if milestone is not None:
+            where.append("p.milestone_id = ?")
+            args.append(milestone)
+        tasks = self.rows("SELECT t.* FROM task t LEFT JOIN plan p ON p.id = t.plan_id WHERE " + " AND ".join(where)
+                          + " ORDER BY t.id", *args)
+        groups = {}
+        for t in tasks:
+            tid = t["id"]
+            tries = self.rows("SELECT * FROM task_try WHERE task_id = ? ORDER BY try", tid)
+            runs = self.rows("SELECT kind, coalesce(asked_model, model, '') AS m, coalesce(cost_usd, 0) AS c FROM run "
+                             "WHERE task_id = ? ORDER BY id", tid)
+            human = self.rows("SELECT status, answer FROM decision WHERE subject LIKE ? ORDER BY id DESC LIMIT 1",
+                              TRIES_SUBJECT.format(tid, "%"))
+            accepted = next((x["try"] for x in tries if x["verdict"] == "accepted"), None)
+            if t["status"] == "dropped":
+                bucket = 5
+            elif human and (human[0]["status"] == "pending" or human[0]["answer"] == TRIES_OPTIONS[1]) \
+                    or t["status"] == "done" and accepted is None:
+                bucket = 4
+            elif t["status"] == "done":
+                bucket = min(accepted, 4) - 1
+            else:
+                continue
+            key = "/".join(ladder_text([r["m"] for r in runs if r["kind"] == k]).replace(" → ", "→") or "?"
+                           for k in ("work", "verify"))
+            g = groups.setdefault(key, {"models": key, "tasks": 0, "cost": 0.0, "verify_cost": 0.0, "buckets": [
+                {"name": n, "tasks": 0, "share": 0.0, "cost": 0.0, "verify_cost": 0.0, "ids": []} for n in self.TRY_BUCKETS]})
+            b = g["buckets"][bucket]
+            cost, vcost = sum(r["c"] for r in runs), sum(r["c"] for r in runs if r["kind"] == "verify")
+            for x in (g, b):
+                x["tasks"] += 1
+                x["cost"] += cost
+                x["verify_cost"] += vcost
+            b["ids"].append(tid)
+        for g in groups.values():
+            for b in g["buckets"]:
+                b["share"] = b["tasks"] / g["tasks"]
+        return sorted(groups.values(), key=lambda g: (-g["tasks"], g["models"]))
+
+    def tries_report(self, since=None, plan=None, milestone=None):
+        """The text of `pm report tries`: a histogram per model combination."""
+        groups = self.tries_data(since, plan, milestone)
+        if not groups:
+            return "No verified task has ended yet.\n"
+        out = []
+        for g in groups:
+            share = f", verify {g['verify_cost'] / g['cost']:.0%}" if g["cost"] else ""
+            out.append(f"{g['models']} ({g['tasks']} task{'s' if g['tasks'] != 1 else ''}, ${g['cost']:.2f}{share})")
+            for b in g["buckets"]:
+                if not b["tasks"] and b["name"] in ("4th+", "dropped"):
+                    continue
+                bar = "█" * round(b["share"] * 20) if b["tasks"] else ""
+                note = "   (decision after max_tries)" if b["name"] == "human" and b["tasks"] else ""
+                out.append(f"  {b['name']:<9} {bar:<20} {b['tasks']:>3} {b['share']:>4.0%}  ${b['cost']:>6.2f}"
+                           f"  (verify ${b['verify_cost']:.2f}){note}")
+            out.append("")
+        return "\n".join(out)
+
     # --- edit commands -----------------------------------------------------------------------
 
     def edit(self, name, template=""):
@@ -2201,7 +2388,8 @@ class Project:
             queued = [self.queue_plan_tasks(db, pid)] + [self.queue_revision(db, c, pid) for c in self.child_plans(db, pid)]
             return [q for q in queued if q]
 
-    def task_add(self, pid, subject, body, prio=None, kind="work", web=False, model=None, worktree=None, requires=()):
+    def task_add(self, pid, subject, body, prio=None, kind="work", web=False, model=None, worktree=None, requires=(),
+                 tries=None, verify_model=None, verify=None):
         """A new task; a plan-writing one gets planning_priority unless prio is given. kind exec: the human's, pid None,
         no work tree; any other: a work tree of [worktrees]. requires: it waits until these tasks are done."""
         if prio is None and kind in PLANNING_KINDS:
@@ -2216,8 +2404,9 @@ class Project:
             if kind != "exec":
                 self.check_plan_open(db, pid)
             tid = db.execute("INSERT INTO task (plan_id, subject, kind, priority, body, created_by_task, web, model, "
-                             "worktree) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                             (pid, subject, kind, prio, body.strip(), creator(), int(web), model, worktree)).lastrowid
+                             "worktree, tries, verify_model, verify) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                             (pid, subject, kind, prio, body.strip(), creator(), int(web), model, worktree, tries,
+                              verify_model, verify)).lastrowid
             for r in requires:
                 self.link_prerequisite(db, tid, r)
             return tid
@@ -2256,6 +2445,8 @@ class Project:
                                (v, v, now(), tid))
                 else:
                     db.execute(f"UPDATE task SET {k} = ? WHERE id = ?", (v, tid))
+            if fields.get("status") == "dropped":
+                self.mark_revert(db, tid)
             if fields.get("subject") is not None:
                 self.rename_refs(db, "task", tid, t["subject"], fields["subject"])
             if (new is not None or release) and fields.get("status") != "dropped":
@@ -2272,6 +2463,172 @@ class Project:
             if release:
                 db.execute("DELETE FROM task_prerequisite_tasks WHERE prerequisite_id = ? AND task_id IN "
                            "(SELECT id FROM task WHERE status = 'open')", (tid,))
+
+    # --- verification ------------------------------------------------------------------------
+
+    def task_done(self, tid, note, evidence=None):
+        """`pm task done`. A verified task's worker: needs evidence; the task goes to verifying (a new try), not done.
+        The human: done, or verifying with evidence. Returns "done" or "verifying"."""
+        with self.connect() as db:
+            t = self.get(db, "task", tid)
+            verified = self.models_of(t)["verify"] is not None
+        if t["status"] == "open" and t["phase"] == "verifying":
+            raise FormatError(f"task {tid} is reported done and waits for its verify run: `pm task accept|reject {tid}`")
+        if os.environ.get("PM_VERIFY") and creator() == tid:
+            raise FormatError(f"a verify run ends with `pm task accept {tid} \"<note>\"` or `pm task reject {tid}`")
+        if not verified or creator() is None and evidence is None:
+            self.task_set(tid, status="done", note=note)
+            return "done"
+        if not (evidence or "").strip():
+            raise FormatError(f"task {tid} is verified: `pm task done {tid} \"<note>\" --evidence - <<'EOF'`, one line "
+                              "per acceptance criterion you inferred: the criterion, what you ran, what it showed")
+        self.task_set(tid)     # the checks: open, not someone else's running task
+        with self.connect(write=True) as db:
+            n = self.try_number(db, tid)
+            db.execute("INSERT INTO task_try (task_id, try, note, evidence) VALUES (?, ?, ?, ?)",
+                       (tid, n, note, evidence.strip()))
+            db.execute("UPDATE task SET phase = 'verifying' WHERE id = ?", (tid,))
+        return "verifying"
+
+    def task_verdict(self, tid, accept, text):
+        """`pm task accept|reject`: by the task's verify run or the human. Accept: done. Reject: reworking; after
+        max_tries (plus the human's extra tries) a decision for the human. Returns a line for the commit message."""
+        c = creator()
+        if c is not None and not (c == tid and os.environ.get("PM_VERIFY")):
+            raise FormatError(f"only task {tid}'s verify run (or the human) accepts or rejects it")
+        if not (text or "").strip():
+            raise FormatError("the note is empty" if accept else "the findings are empty: what fails, how to check it")
+        with self.connect(write=True) as db:
+            t = self.get(db, "task", tid)
+            if t["status"] != "open" or t["phase"] != "verifying":
+                raise FormatError(f"task {tid} is {t['status'] if t['status'] != 'open' else t['phase']}: nothing to verify")
+            x = db.execute("SELECT * FROM task_try WHERE task_id = ? AND verdict IS NULL ORDER BY try DESC LIMIT 1",
+                           (tid,)).fetchone()
+            if not x:
+                raise FormatError(f"task {tid} has no try to verify")
+            rid = db.execute("SELECT id FROM run WHERE task_id = ? AND result = 'running' AND kind = 'verify'",
+                             (tid,)).fetchone() if c else None
+            db.execute("UPDATE task_try SET verdict = ?, findings = ?, verify_run = ?, decided_at = ? WHERE id = ?",
+                       ("accepted" if accept else "rejected", text.strip(), rid and rid[0], now(), x["id"]))
+            if accept:
+                db.execute("UPDATE task SET status = 'done', note = ?, retired_at = ? WHERE id = ?",
+                           (x["note"] or text.strip(), now(), tid))
+                return f"task {tid} accepted (try {x['try']})"
+            db.execute("UPDATE task SET phase = 'reworking' WHERE id = ?", (tid,))
+            if x["try"] < self.config["max_tries"] + t["extra_tries"]:
+                return f"task {tid} rejected (try {x['try']}), reworking"
+            did = self.tries_decision(db, t, x["try"])
+            return f"task {tid} rejected (try {x['try']}): decision {did}"
+
+    def tries_decision(self, db, t, n):
+        """After the last allowed try is rejected: the human's decision, which task t waits for."""
+        tries = db.execute("SELECT * FROM task_try WHERE task_id = ? ORDER BY try", (t["id"],)).fetchall()
+        body = "\n\n".join(f"## Try {x['try']} ({x['verdict'] or 'to verify'})\n\n" + (x["findings"] or "") for x in tries)
+        body = (f"`{ref('task', t['id'], t['subject'])}` was rejected by its verify run {n} times. The findings of every try "
+                f"follow; `pm show {t['id']}` has the evidence. Own text: one more try, with your text as more findings.\n\n"
+                + body)
+        did = db.execute("INSERT INTO decision (subject, options, body, intro, kind, created_by_task) VALUES (?, ?, ?, ?, "
+                         "'once', ?)", (TRIES_SUBJECT.format(t["id"], n), json.dumps(TRIES_OPTIONS), body,
+                                        "A piece of work was checked independently several times and failed the check "
+                                        "each time. Should it get another attempt, be taken as it is, or be dropped?",
+                                        creator())).lastrowid
+        self.block(db, t["id"], did)
+        return did
+
+    def tries_answered(self, db, d, answer):
+        """The human answered a decision after max_tries (TRIES_SUBJECT): one more try (own text: with it as more
+        findings), accept as is, or drop (its work reverted in its work tree)."""
+        m = re.fullmatch(TRIES_SUBJECT.format(r"(\d+)", r"\d+"), d["subject"])
+        if not m or d["created_by_task"] is not None and d["created_by_task"] != int(m[1]):
+            return
+        tid = int(m[1])
+        t = self.get(db, "task", tid)
+        if t["status"] != "open":
+            return
+        x = db.execute("SELECT * FROM task_try WHERE task_id = ? ORDER BY try DESC LIMIT 1", (tid,)).fetchone()
+        if answer == TRIES_OPTIONS[1]:
+            db.execute("UPDATE task SET status = 'done', note = ?, retired_at = ? WHERE id = ?",
+                       ((x["note"] if x else "") + f" (accepted as is: decision {d['id']})", now(), tid))
+        elif answer == TRIES_OPTIONS[2]:
+            db.execute("UPDATE task SET status = 'dropped', note = ?, retired_at = ? WHERE id = ?",
+                       (f"rejected after {x['try'] if x else '?'} tries, dropped: decision {d['id']}", now(), tid))
+            self.mark_revert(db, tid)
+        else:
+            db.execute("UPDATE task SET extra_tries = extra_tries + 1 WHERE id = ?", (tid,))
+            if answer != TRIES_OPTIONS[0] and x:
+                db.execute("UPDATE task_try SET findings = findings || ? WHERE id = ?",
+                           (f"\n\nThe owner adds (decision {d['id']}):\n{answer}", x["id"]))
+
+    def mark_revert(self, db, tid):
+        """A dropped task with tries never accepted: its commits are reverted in its work tree (revert_dropped)."""
+        t = self.get(db, "task", tid)
+        if t["status"] == "dropped" and t["worktree"] and t["revert"] is None and db.execute(
+                "SELECT 1 FROM task_try WHERE task_id = ?", (tid,)).fetchone() and not db.execute(
+                "SELECT 1 FROM task_try WHERE task_id = ? AND verdict = 'accepted'", (tid,)).fetchone():
+            db.execute("UPDATE task SET revert = 'pending' WHERE id = ?", (tid,))
+
+    def held_trees(self):
+        """Work trees whose branch isn't merged into the trunk: a task there is verifying or reworking, or a dropped
+        one's work waits to be reverted."""
+        return {r["worktree"] for r in self.rows(
+            "SELECT DISTINCT worktree FROM task WHERE worktree IS NOT NULL AND (status = 'open' AND phase <> "
+            "'implementing' OR status = 'dropped' AND revert = 'pending')")}
+
+    def revert_dropped(self, child):
+        """In work tree child (no task running there): revert the commits of its dropped, never accepted tasks. A
+        revert that conflicts is aborted; a task in that work tree undoes them instead. Returns lines to say."""
+        out = []
+        pending = self.rows("SELECT id, subject, plan_id FROM task WHERE worktree = ? AND status = 'dropped' "
+                            "AND revert = 'pending' ORDER BY id", child.worktree)
+        if pending and (stash := child.stash_leftovers(f"pm: work tree {child.worktree} left before a revert")):
+            out.append(f"[{child.worktree}] {stash}")
+        for t in pending:
+            shas = child.git("log", "--format=%H", f"--grep=^task {t['id']}: ", "HEAD", "--not", self.head()).split()
+            if not shas:
+                result = "nothing to revert"
+            else:
+                try:
+                    child.git("revert", "--no-edit", *shas)
+                    result = child.head()
+                    out.append(f"[{child.worktree}] reverted task {t['id']}'s {len(shas)} commit(s)")
+                except subprocess.CalledProcessError:
+                    with contextlib.suppress(subprocess.CalledProcessError):
+                        child.git("revert", "--abort")
+                    with self.connect(write=True) as db:
+                        nid = db.execute(
+                            "INSERT INTO task (plan_id, subject, kind, body, worktree) VALUES (?, ?, 'work', ?, ?)",
+                            (t["plan_id"], f"undo the work of task {t['id']}: {t['subject']}",
+                             f"Task {t['id']} was dropped after its tries were rejected; `git revert` of its commits "
+                             f"({', '.join(x[:10] for x in shas)}) conflicts with later work in this work tree. Undo "
+                             f"what task {t['id']} changed, keep the later tasks' work, and stage the result.",
+                             child.worktree)).lastrowid
+                    result = f"task {nid}"
+                    out.append(f"[{child.worktree}] reverting task {t['id']} conflicts: task {nid} undoes it")
+            with self.connect(write=True) as db:
+                db.execute("UPDATE task SET revert = ? WHERE id = ?", (result, t["id"]))
+        if out:
+            self.commit_db("; ".join(out))
+        return out
+
+    def revert_idle(self, running):
+        """revert_dropped in each work tree that runs no task."""
+        for r in self.rows("SELECT DISTINCT worktree FROM task WHERE status = 'dropped' AND revert = 'pending' "
+                           "AND worktree IS NOT NULL"):
+            name = r["worktree"]
+            if name in running or name not in self.config["worktrees"] or name in self.broken_trees:
+                continue
+            try:
+                for line in self.revert_dropped(self.child(name, self.worktree_ensure(name))):
+                    self.say(line)
+            except (subprocess.CalledProcessError, FormatError) as e:
+                self.broken_trees[name] = f"reverting a dropped task failed: {e}"
+                self.say(f"[{name}] reverting a dropped task failed: {e}")
+
+    def tree_state(self):
+        """What a verify run must leave unchanged: HEAD, the index and tracked files, the database aside."""
+        st = [l for l in self.git("status", "--porcelain", "--untracked-files=no").splitlines()
+              if l[3:] != self.db and not l[3:].startswith(self.images + "/")]
+        return self.head(), tuple(st), self.git("diff", "HEAD", "--", ".", f":(exclude){self.db}", f":(exclude){self.images}")
 
     def task_pending_decision(self, tid, did):
         with self.connect(write=True) as db:
@@ -2339,8 +2696,8 @@ class Project:
             f"{m['id']:4d}  {m['queue_index']:5d}  {m['status']:<11}  {str(m['closed']) + '/' + str(m['n']):<7}  {m['subject']}"
             for m in rows]) + "\n"
 
-    def show(self, tid):
-        """The task with its plan and milestone: the context a worker gets."""
+    def show(self, tid, evidence=True):
+        """The task with its plan and milestone: the context a worker gets. evidence: with the tries' evidence."""
         with self.connect() as db:
             t = self.get(db, "task", tid)
             p = m = None
@@ -2354,6 +2711,8 @@ class Project:
             ds = db.execute("SELECT d.* FROM task_decision td JOIN decision d ON d.id = td.decision_id "
                             "WHERE td.task_id = ? ORDER BY d.id", (tid,)).fetchall()
             runs = db.execute("SELECT * FROM run WHERE task_id = ? ORDER BY id", (tid,)).fetchall()
+            tries = db.execute("SELECT * FROM task_try WHERE task_id = ? ORDER BY try", (tid,)).fetchall()
+            try_now = self.try_number(db, tid)
             requires = db.execute("SELECT t.id, t.status, t.subject FROM task_prerequisite_tasks r JOIN task t "
                                   "ON t.id = r.prerequisite_id WHERE r.task_id = ? ORDER BY t.id", (tid,)).fetchall()
             required_by = db.execute("SELECT t.id, t.status, t.subject FROM task_prerequisite_tasks r JOIN task t "
@@ -2377,6 +2736,7 @@ class Project:
                     + (" ← this task" if x["id"] == tid else "") for x in siblings] + [""]
         retired = f", retired {stamp(t['retired_at'])}" if t["retired_at"] else ""
         web = (", web access" if self.web_granted(tid) else ", web: needs sign-off") if t["web"] else ""
+        ms = self.models_of(t)
         if t["status"] == "open" and self.picks_model():
             model, why = self.model_for(tid)
             web += f", model {model or 'claude default'}" + ("" if why == "set" else f" ({why})")
@@ -2384,11 +2744,27 @@ class Project:
             web += f", model {t['model']}"
         if t["worktree"]:
             web += f", work tree {t['worktree']}"
-        out += [f"# Task {tid}: {t['subject']} ({t['status']}, kind {t['kind']}, priority {prio}{web}, "
+        phase = f"{t['phase']}, try {try_now}, " if t["status"] == "open" and (ms["verify"] or tries) else ""
+        out += [f"# Task {tid}: {t['subject']} ({t['status']}, {phase}kind {t['kind']}, priority {prio}{web}, "
                 f"created {stamp(t['created_at'])}{retired}{by(t)})", ""]
+        if self.picks_model() and t["kind"] in VERIFIABLE_KINDS:
+            out.append(self.models_line(t))
         if t["note"]:
             out.append(f"note: {t['note']}")
         out += [t["body"], ""]
+        for x in tries:
+            verdict = {"accepted": "accepted", "rejected": "rejected"}.get(x["verdict"], "to verify")
+            out += [f"Try {x['try']} ({verdict}, reported {stamp(x['created_at'])}"
+                    + (f", decided {stamp(x['decided_at'])}" if x["decided_at"] else "") + ")"
+                    + (f": {x['note']}" if x["note"] else "")]
+            if evidence:
+                out += ["  Evidence:"] + ["    " + l for l in x["evidence"].splitlines()]
+            if x["verdict"] == "rejected":
+                out += ["  Findings:"] + ["    " + l for l in (x["findings"] or "").splitlines()]
+            elif x["verdict"] == "accepted" and x["findings"]:
+                out.append(f"  Verifier: {x['findings']}")
+        if tries:
+            out.append("")
         for title, xs in (("Requires (runs once they are done)", requires), ("Required by", required_by)):
             if xs:
                 out += [f"{title}:"] + [f"  task {x['id']} [{x['status']}] {x['subject']}" for x in xs] + [""]
@@ -2407,8 +2783,9 @@ class Project:
     @staticmethod
     def run_line(r):
         tokens = sum(r[k] or 0 for k in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_creation_tokens"))
-        parts = [f"run {r['id']}", stamp(r["started_at"]), duration(seconds(r["started_at"], r["ended_at"])),
-                 r["result"]]
+        parts = [f"run {r['id']}" + (" (verify)" if r["kind"] == "verify" else "")
+                 + (f", try {r['try']}" if r["try"] else ""), stamp(r["started_at"]),
+                 duration(seconds(r["started_at"], r["ended_at"])), r["result"]]
         if r["turns"] is not None:
             parts.append(f"{r['turns']} turns")
         if tokens:
@@ -2435,24 +2812,35 @@ class Project:
     def priority_prompts(self):
         return [text for k in PRIORITY_KEYS if (text := self.prompt(k))]
 
-    def worker_command(self, tid, handoff=None):
+    def worker_command(self, tid, handoff=None, verify=False):
         """(command, prompt): the prompt goes to the worker's stdin; None if the command holds it ("{prompt}").
-        handoff (self.handoff): resume that run's Claude session."""
-        show = "\n".join([self.show(tid), self.earlier_failure(tid)]).rstrip() + "\n"
-        if handoff:
-            prompt = HANDOFF_PROMPT.format(prev=handoff["task_id"], id=tid, show=show)
+        handoff (self.handoff, self.rework_resume): resume that run's Claude session. verify: the verify run's."""
+        with self.connect() as db:
+            t = self.get(db, "task", tid)
+            kind, verified, n = t["kind"], self.models_of(t)["verify"] is not None, self.try_number(db, tid)
+        finish = (FINISH_VERIFIED if verified else FINISH).format(id=tid)
+        if verify:
+            prompt = self.verify_prompt(tid, n)
+        elif handoff and handoff.get("rework"):
+            prompt = REWORK_PROMPT.format(id=tid, prev=n - 1, next=n, findings=handoff["findings"])
         else:
-            with self.connect() as db:
-                kind = self.get(db, "task", tid)["kind"]
-            planning = (WORKER_PLANNING.format(priorities="\n\n".join(self.priority_prompts())).rstrip() + "\n\n"
-                        if kind in WORKER_PLANNING_KINDS else "")
-            prompt = WORKER_PROMPT.format(id=tid, db=self.db, show=show, intro_rule=INTRO_RULE, planning=planning,
-                                          worktrees=self.worktree_lines()).rstrip()
+            show = "\n".join([self.show(tid), self.earlier_failure(tid)]).rstrip() + "\n"
+            if handoff:
+                prompt = HANDOFF_PROMPT.format(prev=handoff["task_id"], id=tid, show=show, finish=finish)
+            else:
+                planning = (WORKER_PLANNING.format(priorities="\n\n".join(self.priority_prompts())).rstrip() + "\n\n"
+                            if kind in WORKER_PLANNING_KINDS else "")
+                prompt = WORKER_PROMPT.format(id=tid, db=self.db, show=show, intro_rule=INTRO_RULE, planning=planning,
+                                              worktrees=self.worktree_lines(), finish=finish).rstrip()
+                if verified and n > 1:
+                    base, text = self.task_diff(tid)
+                    prompt += REWORK_FRESH.format(id=tid, next=n, diff=f"git diff {base[:12]} HEAD", diff_text=text)
         if self.base and not handoff:
             prompt += (f"\n\nYou work in work tree {self.worktree}: {self.root}, on the branch "
                        f"{WORKTREE_BRANCH}{self.worktree}; other tasks run at the same time in the trunk, "
-                       f"{self.base.root}, and the other work trees. Stay in yours: pm commits what you stage here and "
-                       "merges it into the trunk. pm's commands use the trunk's database; the copy "
+                       f"{self.base.root}, and the other work trees. Stay in yours"
+                       + (": you change nothing here." if verify else ": pm commits what you stage here and "
+                          "merges it into the trunk.") + f" pm's commands use the trunk's database; the copy "
                        f"of {self.db} here is stale.")
         prompt += self.images_line()
         hook = {"type": "command", "command": shlex.join([sys.executable, str(GUARD)])}
@@ -2467,9 +2855,58 @@ class Project:
         cmd = [a.replace("{prompt}", prompt).replace("{settings}", settings) for a in w]
         if handoff:
             cmd[1:1] = ["--resume", handoff["session_id"]]
-        if self.picks_model() and (model := self.model_for(tid)[0]):
+        if self.picks_model() and (model := self.model_for(tid, verify)[0]):
             cmd[1:1] = ["--model", model]
         return cmd, None if any("{prompt}" in a for a in w) else prompt
+
+    def task_diff(self, tid):
+        """(base commit, diff text) of the task's work: from its first run's base_commit to HEAD, the database aside,
+        cut beyond VERIFY_DIFF_CHARS."""
+        r = self.rows("SELECT base_commit FROM run WHERE task_id = ? AND base_commit IS NOT NULL ORDER BY id LIMIT 1", tid)
+        base = r[0]["base_commit"] if r else self.head()
+        try:
+            text = self.git("diff", base, "HEAD", "--", ".", f":(exclude){self.db}", f":(exclude){self.images}")
+        except subprocess.CalledProcessError as e:
+            text = f"(git diff failed: {e})"
+        if len(text) > VERIFY_DIFF_CHARS:
+            text = text[:VERIFY_DIFF_CHARS] + f"\n… cut: {len(text)} characters in all; run the command for the rest\n"
+        return base, text.rstrip() or "(no changes)"
+
+    def verify_prompt(self, tid, n):
+        """The verify run's prompt for try n of task tid."""
+        with self.connect() as db:
+            t = self.get(db, "task", tid)
+            tries = db.execute("SELECT * FROM task_try WHERE task_id = ? ORDER BY try", (tid,)).fetchall()
+        cur = next((x for x in tries if x["try"] == n), None)
+        earlier = [x for x in tries if x["verdict"] == "rejected"]
+        base, text = self.task_diff(tid)
+        extra = self.config["verify_prompt"].strip()
+        return VERIFY_PROMPT.format(
+            id=tid, n=n, show=self.show(tid, evidence=False).rstrip() + "\n", worktree=t["worktree"] or "<name>",
+            db=self.db, diff=f"git diff {base[:12]} HEAD", diff_text=text,
+            verify_prompt=f"\n# This project's checks\n\n{extra}\n" if extra else "",
+            earlier=("\n# Earlier rejected tries\n\nCheck that these findings are fixed too:\n\n" + "\n\n".join(
+                f"Try {x['try']}:\n{x['findings']}" for x in earlier) + "\n") if earlier else "",
+            evidence=(cur["evidence"] if cur else "(none: the task has no try to verify; reject it)")
+            + (f"\n\nThe worker's note: {cur['note']}" if cur and cur["note"] else "")).rstrip()
+
+    def rework_resume(self, tid):
+        """A rejected task: the session of its last worker run to resume with the findings, as a handoff dict with
+        "rework", "findings" (or None: a fresh session), if the model stays the same."""
+        w = self.config["worker"]
+        with self.connect() as db:
+            t = self.get(db, "task", tid)
+            if t["phase"] != "reworking":
+                return None
+            last = db.execute("SELECT * FROM task_try WHERE task_id = ? AND verdict = 'rejected' ORDER BY try DESC LIMIT 1",
+                              (tid,)).fetchone()
+            r = db.execute("SELECT * FROM run WHERE task_id = ? AND kind = 'work' AND session_id IS NOT NULL "
+                           "ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
+        if not (last and r) or Path(w[0]).name != "claude" or "stream-json" not in w:
+            return None
+        if self.picks_model() and (r["asked_model"] or "") != self.model_for(tid)[0]:
+            return None
+        return dict(r) | {"rework": True, "findings": last["findings"]}
 
     def worktree_lines(self):
         """For workers: the work trees and what belongs in each."""
@@ -2483,21 +2920,89 @@ class Project:
         w = self.config["worker"]
         return Path(w[0]).name == "claude" and not any(a == "--model" or a.startswith("--model=") for a in w)
 
-    def model_for(self, tid):
-        """(model, why) for task tid's next run: its own ("set"), "escalate" after a failed run or an investigation
-        ("escalated"), its kind's or the default ("kind"); model "": claude's own default."""
-        models = self.config["models"]
+    def models_of(self, t):
+        """The effective models of task row t: {"tries": worker ladder, "verify": verifier ladder or None (not
+        verified), "why": "set" (its own) or "kind"}."""
+        m = self.config["models"]
+        k = m.get(t["kind"])
+        table = k if isinstance(k, dict) else {}
+        why = "set"
+        if t["model"]:
+            tries = [t["model"]]
+        elif t["tries"]:
+            tries = json.loads(t["tries"])
+        elif table.get("tries"):
+            tries, why = model_list(table["tries"]), "kind"
+        else:
+            base = k if isinstance(k, str) else m["default"]
+            tries, why = [base] + ([m["escalate"]] if m.get("escalate") and m["escalate"] != base else []), "kind"
+        verified = bool(t["verify"]) if t["verify"] is not None else table.get("verify", False) is not False
+        if t["kind"] not in VERIFIABLE_KINDS:
+            verified = False
+        verify = None
+        if verified:
+            verify = (json.loads(t["verify_model"]) if t["verify_model"] else
+                      model_list(table["verify"]) if table.get("verify") else [m.get("verify") or "opus"])
+        return {"tries": tries, "verify": verify, "why": why}
+
+    def verified(self, tid):
+        with self.connect() as db:
+            return self.models_of(self.get(db, "task", tid))["verify"] is not None
+
+    @staticmethod
+    def try_number(db, tid):
+        """The task's current try: 1 + its rejected tries."""
+        return 1 + db.execute("SELECT count(*) FROM task_try WHERE task_id = ? AND verdict = 'rejected'", (tid,)).fetchone()[0]
+
+    def rung(self, db, tid):
+        """The worker ladder's rung (from 0) of task tid's next run: its rejected tries plus its failed worker runs
+        and investigations."""
+        failed = db.execute(
+            "SELECT (SELECT count(*) FROM run WHERE task_id = ? AND kind = 'work' AND result = 'failed' "
+            "AND coalesce(reason, '') NOT LIKE ?) + (SELECT count(*) FROM task WHERE kind = 'investigate' AND subject LIKE ?)",
+            (tid, RESUME_FAILED + "%", INVESTIGATE_SUBJECT.format(f"task {tid}: ") + "%")).fetchone()[0]
+        return self.try_number(db, tid) - 1 + failed
+
+    def model_for(self, tid, verify=False):
+        """(model, why) for task tid's next run: its own ("set"), a later rung of the ladder ("escalated"), its kind's
+        or the default ("kind"); verify: the verifier of its current try ("verify"). model "": claude's own default."""
         with self.connect() as db:
             t = self.get(db, "task", tid)
-            if t["model"]:
-                return t["model"], "set"
-            failed = db.execute(
-                "SELECT 1 FROM run WHERE task_id = ? AND result = 'failed' AND coalesce(reason, '') NOT LIKE ? "
-                "UNION ALL SELECT 1 FROM task WHERE kind = 'investigate' AND subject LIKE ?",
-                (tid, RESUME_FAILED + "%", INVESTIGATE_SUBJECT.format(f"task {tid}: ") + "%")).fetchone()
-        if failed and models.get("escalate"):
-            return models["escalate"], "escalated"
-        return models.get(t["kind"], models["default"]), "kind"
+            ms = self.models_of(t)
+            if verify:
+                return pick(ms["verify"] or [""], self.try_number(db, tid) - 1), "verify"
+            n = self.rung(db, tid)
+        return pick(ms["tries"], n), "escalated" if n and len(ms["tries"]) > 1 and ms["why"] == "kind" else ms["why"]
+
+    def models_line(self, t):
+        """models: sonnet → opus, verified by opus (kind work)"""
+        ms = self.models_of(t)
+        own = [x for x, k in (("model", "model"), ("tries", "tries"), ("verify", "verify"), ("verify_model", "verify_model"))
+               if t[k] is not None]
+        line = f"models: {ladder_text(ms['tries'])}" + (f", verified by {ladder_text(ms['verify'])}" if ms["verify"]
+                                                        else ", not verified")
+        return line + (f" (task's own {', '.join(own)})" if own else f" (kind {t['kind']})")
+
+    def model_warnings(self):
+        """`pm validate`: verifiers weaker than the worker of the same try, in the config and in open tasks."""
+        m, out = self.config["models"], []
+
+        def check(what, tries, verify):
+            for i in range(max(len(tries), len(verify))):
+                w, v = pick(tries, i), pick(verify, i)
+                if (a := rank(m, w)) is not None and (b := rank(m, v)) is not None and b < a:
+                    out.append(f"{what}: try {i + 1}'s verifier {v} is weaker than its worker {w}")
+                    return
+
+        for k in VERIFIABLE_KINDS:
+            t = {"kind": k, "model": None, "tries": None, "verify": None, "verify_model": None}
+            if (ms := self.models_of(t))["verify"]:
+                check(f"[models] {k}", ms["tries"], ms["verify"])
+        for t in self.rows("SELECT * FROM task WHERE status = 'open' AND (model IS NOT NULL OR tries IS NOT NULL "
+                           "OR verify_model IS NOT NULL OR verify IS NOT NULL)"):
+            if (ms := self.models_of(t))["verify"]:
+                check(f"task {t['id']}", ms["tries"], ms["verify"])
+        return out
 
     def handoff(self, tid):
         """Warm hand-off: the latest run, if task tid can resume its Claude session (run row with task_id,
@@ -2510,14 +3015,15 @@ class Project:
         with self.connect() as db:
             t = self.get(db, "task", tid)
             r = db.execute("SELECT r.*, t.plan_id, t.kind, t.status FROM run r JOIN task t ON t.id = r.task_id "
-                           "WHERE coalesce(r.worktree, '') = coalesce(?, '') ORDER BY r.id DESC LIMIT 1",
+                           "WHERE coalesce(r.worktree, '') = coalesce(?, '') AND r.kind = 'work' ORDER BY r.id DESC LIMIT 1",
                            (t["worktree"],)).fetchone()
             if not (r and t["kind"] == r["kind"] == "work" and t["plan_id"] == r["plan_id"] and r["result"] == "done"
                     and r["status"] == "done" and r["session_id"] and r["task_id"] != tid
                     and r["context_tokens"] is not None and r["context_tokens"] < HANDOFF_CONTEXT
                     and seconds(r["ended_at"], None) < (r["cache_minutes"] or HANDOFF_MINUTES) * 60):
                 return None
-        if self.picks_model() and self.model_for(tid)[0] != self.model_for(r["task_id"])[0]:
+        prev = r["asked_model"] if r["asked_model"] is not None else self.model_for(r["task_id"])[0]
+        if self.picks_model() and self.model_for(tid)[0] != prev:
             return None
         return dict(r)
 
@@ -2538,14 +3044,14 @@ class Project:
         """log_dir; relative: inside the git dir, so never tracked."""
         return self.git_dir / self.config["log_dir"]
 
-    def run_worker(self, cmd, prompt, log, tid, info):
+    def run_worker(self, cmd, prompt, log, tid, info, verify=False):
         """Run the worker in its own session, writing its output to the log and a readable form of it to the
         terminal. Returns the exit code; `info` gets what its JSON output (`--output-format stream-json`) says about
         the run (model, tokens, cost, the last tool call) and the last lines shown. Interrupted (Ctrl-C, SIGTERM,
         SIGHUP): `pm run` sends the worker's process group SIGTERM (self.procs)."""
         log.parent.mkdir(parents=True, exist_ok=True)
         info["shown"] = shown_lines = collections.deque(maxlen=15)
-        env = os.environ | {"PM_WORKER": "1", "PM_TASK": str(tid), "PM_DB": self.db}
+        env = os.environ | {"PM_WORKER": "1", "PM_TASK": str(tid), "PM_DB": self.db} | ({"PM_VERIFY": "1"} if verify else {})
         if self.base:
             env["PM_ROOT"] = str(self.base.root)
         procs = self.top.procs
@@ -2662,12 +3168,15 @@ class Project:
         except subprocess.CalledProcessError:
             return None
 
-    def start_run(self, tid, continues=None):
+    def start_run(self, tid, continues=None, verify=False):
         """The run row of the task now running (result 'running'); returns its id."""
+        asked = self.model_for(tid, verify)[0] if self.picks_model() else None
         with self.connect(write=True) as db:
-            return db.execute("INSERT INTO run (task_id, started_at, result, base_commit, pid, continues_run, worktree) "
-                              "VALUES (?, ?, 'running', ?, ?, ?, ?)",
-                              (tid, now(), self.head(), os.getpid(), continues, self.worktree)).lastrowid
+            n = self.try_number(db, tid) if verify or self.models_of(self.get(db, "task", tid))["verify"] else None
+            return db.execute("INSERT INTO run (task_id, started_at, result, base_commit, pid, continues_run, worktree, "
+                              "kind, try, asked_model) VALUES (?, ?, 'running', ?, ?, ?, ?, ?, ?, ?)",
+                              (tid, now(), self.head(), os.getpid(), continues, self.worktree,
+                               "verify" if verify else "work", n, asked)).lastrowid
 
     def record_run(self, rid, code, info, result, reason=None):
         cols = ("model", "session_id", "turns", "input_tokens", "output_tokens", "cache_read_tokens",
@@ -2847,7 +3356,10 @@ class Project:
                 self.say("The trunk has staged changes: work trees are merged once they are committed or unstaged.")
             return
         self.merge_errors.pop("", None)
+        held = self.held_trees()
         for name in self.config["worktrees"]:
+            if name in held:
+                continue
             branch = WORKTREE_BRANCH + name
             sha = subprocess.run(["git", "rev-parse", "-q", "--verify", f"refs/heads/{branch}"], cwd=self.root,
                                  capture_output=True, text=True).stdout.strip()
@@ -2963,18 +3475,19 @@ class Project:
         "error": one that stops the run (the database, git, Claude needs the human). Claude's passing errors (network,
         overload, a limit without a reset time): the same task again, now, then after RETRY_MINUTES."""
         self.top.kills.discard(tid)
-        handoff = self.handoff(tid)
-        cmd, prompt = self.worker_command(tid, handoff)
+        verify, handoff = self.next_run(tid)
+        cmd, prompt = self.worker_command(tid, handoff, verify)
         before = self.planning_snapshot()
+        tree = self.tree_state() if verify else None
         attempt = 0
         while True:
-            started, rid = now(), self.start_run(tid, handoff and handoff["id"])
+            started, rid = now(), self.start_run(tid, handoff and handoff["id"], verify)
             log = self.run_log(tid, rid)
             self.say(f"\n== task {tid}, run {rid} (log: {log})"
                      + (f", continues run {handoff['id']} (task {handoff['task_id']})" if handoff else ""))
             info = {}
             try:
-                code = self.run_worker(cmd, prompt, log, tid, info)
+                code = self.run_worker(cmd, prompt, log, tid, info, verify)
             except OSError as e:
                 return "error", self.failed(tid, rid, f"the worker command can't start: {e}", None, info, started)[1]
             if tid in self.top.kills:
@@ -3033,6 +3546,8 @@ class Project:
             if stash := self.stash_leftovers(f"pm: task {tid} run {rid} failed"):
                 msg += "\n" + stash
             return "error", msg
+        if verify:
+            return self.verify_result(tid, rid, code, info, started, log, tree)
         left = self.unstaged()
         if code != 0 and (left or self.task_status(tid) == "open"):
             return self.failed(tid, rid, exit_text(code), code, info, started, log)
@@ -3045,6 +3560,10 @@ class Project:
         if t["status"] != "open":
             result = "done", t["status"] + (f": {t['note']}" if t["note"] else "") + (
                 f" ({exit_text(code)} after closing it, everything staged)" if code else "")
+        elif t["phase"] == "verifying":
+            with self.connect() as db:
+                n = self.try_number(db, tid)
+            result = "verifying", f"try {n} reported done, a verify run checks it"
         elif blocked or unmet:
             result = "blocked", "waits for " + "; ".join(
                 ([f"decision(s) {', '.join(blocked)}"] if blocked else []) + ([f"task(s) {', '.join(map(str, unmet))}"] if unmet else []))
@@ -3055,7 +3574,7 @@ class Project:
                                   if info.get("last_text") else ""))
         if t["status"] == "done" and (missing := self.planning_missing(t, before)):
             return self.failed(tid, rid, f"task {tid} is done, but it {missing}", code, info, started, log)
-        self.record_run(rid, code, info, result[0])
+        self.record_run(rid, code, info, "done" if result[0] == "verifying" else result[0])
         try:
             self.commit_task(tid, t["subject"], result[1])
         except subprocess.CalledProcessError as e:
@@ -3068,6 +3587,45 @@ class Project:
                 return "error", f"committed task {tid}; the worker left changes that are not staged, {note}"
             result = result[0], f"{result[1]}; {note}"
         return result
+
+    def verify_result(self, tid, rid, code, info, started, log, tree):
+        """After a verify run: failed if it changed tracked files (they are stashed away) or ended without a verdict;
+        else recorded, the database committed. Returns ("done" | "rejected" | "failed", message)."""
+        if self.tree_state() != tree:
+            return self.failed(tid, rid, "the verify run changed tracked files or the index; they are discarded "
+                               "(stashed)", code, info, started, log, cause="a verify run is read-only")
+        with self.connect() as db:
+            t = self.get(db, "task", tid)
+            x = db.execute("SELECT * FROM task_try WHERE task_id = ? ORDER BY try DESC LIMIT 1", (tid,)).fetchone()
+            waits = [r[0] for r in db.execute("SELECT d.id FROM task_decision td JOIN decision d ON d.id = "
+                                              "td.decision_id WHERE td.task_id = ? AND d.status = 'pending'", (tid,))]
+        if not (x and x["verify_run"] == rid and x["verdict"]):
+            return self.failed(tid, rid, "the verify run ended without `pm task accept|reject`" + (
+                f", {exit_text(code)}" if code else ""), code, info, started, log)
+        if x["verdict"] == "accepted":
+            result = "done", f"accepted, try {x['try']}: {x['findings']}"
+        else:
+            result = "rejected", f"try {x['try']} rejected" + (
+                f", waits for decision {', '.join(map(str, waits))}" if waits else ", reworking") + ": " + (
+                x["findings"] or "").strip().splitlines()[0][:200]
+        self.record_run(rid, code, info, "done")
+        try:
+            self.commit_task(tid, t["subject"], result[1])
+        except subprocess.CalledProcessError as e:
+            return "error", f"git commit failed:\n{(e.stdout or '') + (e.stderr or '')}".rstrip()
+        if t["status"] == "done" and (dropped := self.drop_task_stashes(tid)):
+            self.say(f"dropped the stash(es) of task {tid}'s earlier runs: {', '.join(dropped)}")
+        return result
+
+    def next_run(self, tid):
+        """(verify, handoff) of task tid's next run: a verify run (fresh), a rework (its worker's session resumed, if
+        it can be), or a first try (warm hand-off, if it can be)."""
+        with self.connect() as db:
+            t = self.get(db, "task", tid)
+            fresh = not db.execute("SELECT 1 FROM task_try WHERE task_id = ?", (tid,)).fetchone()
+        if t["phase"] == "verifying":
+            return True, None
+        return False, self.rework_resume(tid) if t["phase"] == "reworking" else self.handoff(tid) if fresh else None
 
     def put_aside_leftovers(self, tid, rid, status, left):
         """Changes a worker left unstaged after a task it closed or that waits for a decision. Waiting: stashed for
@@ -3162,9 +3720,24 @@ class Project:
         if stash := self.stash_leftovers(f"pm: task {tid} run {rid} failed"):
             lines.append(stash)
         with self.connect(write=True) as db:
-            if self.get(db, "task", tid)["status"] == "done":
+            t = self.get(db, "task", tid)
+            work_run = self.get(db, "run", rid)["kind"] == "work"
+            if t["status"] == "done" and work_run:
                 db.execute("UPDATE task SET status = 'open', note = NULL, retired_at = NULL WHERE id = ?", (tid,))
                 lines.append(f"task {tid} was marked done in this run; reopened, so its work isn't lost")
+            elif not work_run and db.execute("SELECT 1 FROM task_try WHERE verify_run = ?", (rid,)).fetchone():
+                db.execute("UPDATE task_try SET verdict = NULL, findings = NULL, verify_run = NULL, decided_at = NULL "
+                           "WHERE verify_run = ?", (rid,))
+                db.execute("UPDATE task SET status = 'open', phase = 'verifying', note = NULL, retired_at = NULL "
+                           "WHERE id = ?", (tid,))
+                db.execute("DELETE FROM task_decision WHERE task_id = ? AND decision_id IN (SELECT id FROM decision "
+                           "WHERE status = 'pending' AND subject LIKE ?)", (tid, TRIES_SUBJECT.format(tid, "%")))
+                lines.append(f"the verdict of this failed verify run is undone; task {tid} is verified again")
+            elif t["status"] == "open" and t["phase"] == "verifying" and work_run:
+                db.execute("DELETE FROM task_try WHERE task_id = ? AND verdict IS NULL", (tid,))
+                db.execute("UPDATE task SET phase = CASE WHEN EXISTS (SELECT 1 FROM task_try WHERE task_id = ?) "
+                           "THEN 'reworking' ELSE 'implementing' END WHERE id = ?", (tid, tid))
+                lines.append(f"task {tid} was reported done in this run; that try is undone, the task runs again")
         if log:
             lines.append(f"log: {log}")
         summary = "\n".join(lines)
@@ -3422,7 +3995,8 @@ class Project:
             elif level := self.needs_signoff(q[0][1]):
                 self.say(f"task {q[0][1]} needs a sign-off ({level}); `pm run` would request it")
             else:
-                cmd, prompt = self.worker_command(q[0][1], self.handoff(q[0][1]))
+                verify, handoff = self.next_run(q[0][1])
+                cmd, prompt = self.worker_command(q[0][1], handoff, verify)
                 self.say(shlex.join(cmd) + ("" if prompt is None else f"\n\nstdin:\n{prompt}"))
             return 0
         self.finished, self.merge_errors, self.said = queue.Queue(), {}, set()
@@ -3454,6 +4028,7 @@ class Project:
                     continue
                 self.say("\nStopped. `pm run` continues with the same task(s).")
                 return 130
+            self.revert_idle(running)
             if "" not in running:
                 self.merge_worktrees()
                 self.close_and_commit()
@@ -3552,9 +4127,14 @@ class Project:
         for tid, dropped in self.stuck().items():
             self.say_once(f"task {tid} waits for dropped or archived task(s) {', '.join(map(str, dropped))}: `pm task redo <id>`, "
                           f"`pm task requires {tid} --remove <id>` or `pm task drop {tid}`")
-        for _, tid, _, kind, index, tree in q:
-            if index != q[0][4] or len(running) >= limit:
+        focus = {r["id"] for r in self.rows("SELECT id FROM task WHERE status = 'open' AND phase <> 'implementing' "
+                                            "AND worktree IS NOT NULL")} & {r[1] for r in q}
+        base = q[0][4] if q else 0
+        for _, tid, _, kind, index, tree in [r for r in q if r[1] in focus] + [r for r in q if r[1] not in focus]:
+            if len(running) >= limit:
                 break
+            if index != base and tid not in focus:
+                continue
             tree = tree or ""
             if tree in seen:
                 continue
@@ -3594,7 +4174,7 @@ class Project:
             else:
                 try:
                     project = self.child(tree, self.worktree_ensure(tree))
-                    if kind != "merge" and not self.update_worktree(project, tid):
+                    if kind != "merge" and tid not in focus and not self.update_worktree(project, tid):
                         continue
                 except (subprocess.CalledProcessError, FormatError) as e:
                     self.broken_trees[tree] = str(e).strip()
@@ -3686,7 +4266,14 @@ class Project:
             self.say(f"\n{at}task {tid} {message}")
         elif result == "failed":
             self.say(f"\n{at}task {tid} failed: {message}")
-            if self.task_kind(tid) == "exec":
+            with self.connect() as db:
+                n = self.try_number(db, tid)
+                last = db.execute("SELECT kind FROM run WHERE task_id = ? ORDER BY id DESC LIMIT 1", (tid,)).fetchone()
+                failed = db.execute("SELECT count(*) FROM run WHERE task_id = ? AND kind = 'verify' AND try = ? "
+                                    "AND result = 'failed'", (tid, n)).fetchone()[0]
+            if last and last[0] == "verify" and failed % 2:
+                self.say(f"{at}task {tid}'s verify run failed; it runs once more before an investigation")
+            elif self.task_kind(tid) == "exec":
                 self.task_set(tid, status="dropped", note="failed: " + message.splitlines()[0][:200], dependents="keep")
                 self.drop_task_stashes(tid)
                 self.commit_db(f"task {tid} failed: dropped")
@@ -3814,7 +4401,8 @@ class Project:
         for r in self.rows("SELECT * FROM run WHERE result = 'running'"):
             gone = "" if self.run_pid() else "; its `pm run` is gone, the next one closes it (done if its task was closed and committed, else failed)"
             where = f" in work tree {r['worktree']}" if r["worktree"] else ""
-            self.say(f"Running: task {r['task_id']}{where} (run {r['id']}, pid {r['pid']}) since {stamp(r['started_at'])}, "
+            what = f", verify run, try {r['try']}" if r["kind"] == "verify" else f", try {r['try']}" if r["try"] else ""
+            self.say(f"Running: task {r['task_id']}{where} (run {r['id']}{what}, pid {r['pid']}) since {stamp(r['started_at'])}, "
                      f"{duration(seconds(r['started_at'], None))}{gone}")
         if (c := self.run_crash()) and not self.run_pid():
             self.say(f"`pm run` (pid {c['pid']}) {'stopped' if c['stopped'] else 'crashed'} at {stamp(c['at'])}: {c['error']}")
@@ -3868,11 +4456,20 @@ class Project:
                                           for prio, pid, subject in self.plans()]
         print("\n".join(lines), file=file or self.out, flush=True)
 
+    def phases(self):
+        """{task id: "verifying, try 2"} for the open tasks past their first implementing try or verifying."""
+        return {r["id"]: f"{r['phase']}, try {r['n']}" for r in self.rows(
+            "SELECT t.id, t.phase, 1 + (SELECT count(*) FROM task_try x WHERE x.task_id = t.id AND x.verdict = 'rejected') "
+            "AS n FROM task t WHERE t.status = 'open' AND (t.phase <> 'implementing' "
+            "OR EXISTS (SELECT 1 FROM task_try x WHERE x.task_id = t.id))")}
+
     def print_queue(self, limit=None):
         q = self.shown_queue()
+        phases = self.phases()
         self.say(f"\nQueue ({len(q)}):")
         for prio, tid, subject, kind, _, tree, unmet in q[:limit]:
             subject += ("" if kind == "work" else f" ({kind})") + (f" [{tree}]" if tree else "") + (
+                f" ({phases[tid]})" if tid in phases else "") + (
                 f", waits for task {', '.join(map(str, unmet))}" if unmet else "")
             self.say(f"  {prio:+6d}  task {tid}: {subject}" if prio else f"          task {tid}: {subject}")
         if limit and len(q) > limit:
@@ -3909,6 +4506,21 @@ def model_arg(v):
     if not v:
         raise argparse.ArgumentTypeError("empty model")
     return None if v == "none" else v
+
+
+TRIES_HELP = "worker per try, e.g. sonnet,opus: a ladder whose last rung repeats; default: by kind ([models])"
+VERIFY_MODEL_HELP = "verifier per try, e.g. opus or sonnet,opus; default: by kind ([models])"
+VERIFY_HELP = "--no-verify: no verify run (e.g. evidence is a script's exit code); --verify: verified; default: by kind"
+
+
+def models_arg(v):
+    """sonnet,opus as JSON ["sonnet", "opus"]; none: None."""
+    if v.strip() == "none":
+        return None
+    xs = [x.strip() for x in v.split(",")]
+    if not all(xs):
+        raise argparse.ArgumentTypeError("models, comma-separated, e.g. sonnet,opus")
+    return json.dumps(xs)
 
 
 def print_queued(queued):
@@ -3991,6 +4603,9 @@ def main(argv=None):
     a.add_argument("--kind", choices=("work", "plan"), default="work", help="plan: the task writes a plan")
     a.add_argument("--web", action="store_true", help="its worker gets WebSearch and WebFetch (sign-off: web)")
     a.add_argument("--model", type=model_arg, help=MODEL_HELP)
+    a.add_argument("--tries", type=models_arg, help=TRIES_HELP)
+    a.add_argument("--verify-model", type=models_arg, help=VERIFY_MODEL_HELP)
+    a.add_argument("--verify", action=argparse.BooleanOptionalAction, default=None, help=VERIFY_HELP)
     a.add_argument("--worktree", type=worktree_arg, help="required, but not with --exec: " + WORKTREE_HELP)
     a.add_argument("--requires", type=int, action="append", default=[], metavar="TASK",
                    help="repeat; it runs only once these tasks are done, whatever the priorities")
@@ -3998,6 +4613,18 @@ def main(argv=None):
         x = t.add_parser(verb)
         x.add_argument("task", type=int)
         x.add_argument("note", help=text)
+        if verb == "done":
+            x.add_argument("--evidence", type=text_arg, help="required for a verified task's worker; - reads stdin: one "
+                           "line per inferred acceptance criterion: the criterion, what was run, what it showed. The "
+                           "task then waits for its verify run")
+    x = t.add_parser("accept", help="in a verify run (or the human): the task passes; it is done and merged")
+    x.add_argument("task", type=int)
+    x.add_argument("note", help="one line: what was checked")
+    x = t.add_parser("reject", help="in a verify run (or the human): the task fails; its worker continues with the "
+                     "findings (stdin)")
+    x.add_argument("task", type=int)
+    x.add_argument("findings", nargs="?", default="-", type=text_arg, help="what fails and how to check it; - "
+                   "(default) reads stdin")
     x.add_argument("--replaced-by", type=int, metavar="TASK", help="this open task takes over what it requires and "
                    "the tasks that require it")
     x.add_argument("--release", action="store_true", help="the open tasks that require it no longer do; without this "
@@ -4018,6 +4645,10 @@ def main(argv=None):
     ts.add_argument("--web", action=argparse.BooleanOptionalAction, default=argparse.SUPPRESS,
                     help="its worker gets WebSearch and WebFetch (sign-off: web)")
     ts.add_argument("--model", type=model_arg, default=argparse.SUPPRESS, help=MODEL_HELP + "; none: by kind again")
+    ts.add_argument("--tries", type=models_arg, default=argparse.SUPPRESS, help=TRIES_HELP + "; none: by kind again")
+    ts.add_argument("--verify-model", type=models_arg, default=argparse.SUPPRESS, help=VERIFY_MODEL_HELP
+                    + "; none: by kind again")
+    ts.add_argument("--verify", action=argparse.BooleanOptionalAction, default=argparse.SUPPRESS, help=VERIFY_HELP)
     ts.add_argument("--worktree", type=worktree_arg, default=argparse.SUPPRESS, help=WORKTREE_HELP)
     tp = t.add_parser("priority", help="integer, or none for the plan's")
     tp.add_argument("task", type=int)
@@ -4099,6 +4730,11 @@ def main(argv=None):
     rp.add_parser("answer", help="in that task's worker: store the answer (Markdown, stdin); also `pm show c2`")
     rp.add_parser("show", help="the newest report, or one (also `pm show r2`)").add_argument("report", type=int, nargs="?")
     rp.add_parser("list", help="resource use (r2) and custom (c2) reports, newest first")
+    rt = rp.add_parser("tries", help="verified tasks: how many tries they needed, per model combination (worker/"
+                       "verifier), with tasks and cost per bucket; no Claude call")
+    rt.add_argument("--since", help="only tasks first reported done on or after this date, e.g. 2026-11-01")
+    rt.add_argument("--plan", type=int)
+    rt.add_argument("--milestone", type=int)
     im = sub.add_parser("image", aliases=["images"], help=f"images for Markdown, in {IMAGES_DIR}/ next to the database"
                         ).add_subparsers(dest="action", required=True)
     im.add_parser("add", help=f"store an image (PNG, JPEG, GIF, WebP; at most {MAX_IMAGE_MB} MB; - reads stdin) and "
@@ -4132,6 +4768,8 @@ def main(argv=None):
         if args.cmd == "validate":
             errors = pm.validate()
             print("\n".join(errors) if errors else f"{pm.db} is valid")
+            for w in pm.model_warnings():
+                print(f"warning: {w}")
             return 1 if errors else 0
         if args.cmd != "run" and (errors := pm.validate()):
             print("the database has errors (`pm validate`):\n  " + "\n  ".join(errors))
@@ -4210,13 +4848,20 @@ def main(argv=None):
                 if not (entry := pm.subject_and_body("task", subject)):
                     print("pm: aborted, no task added")
                     return 1
-                tid = pm.task_add(plan, *entry, args.priority, kind, args.web, args.model, args.worktree, args.requires)
+                tid = pm.task_add(plan, *entry, args.priority, kind, args.web, args.model, args.worktree, args.requires,
+                                  args.tries, args.verify_model, None if args.verify is None else int(args.verify))
                 print(tid)
                 msg = f"task {tid} added: {entry[0]}"
             elif args.action == "redo":
                 tid = pm.task_redo(args.task)
                 print(tid)
                 msg = f"task {tid}: task {args.task} again"
+            elif args.action == "done":
+                phase = pm.task_done(args.task, args.note, args.evidence)
+                msg = f"task {args.task} done" if phase == "done" else f"task {args.task} reported done, to verify"
+            elif args.action in ("accept", "reject"):
+                msg = pm.task_verdict(args.task, args.action == "accept",
+                                      args.note if args.action == "accept" else args.findings)
             elif args.action in ("done", "drop"):
                 new, release = getattr(args, "replaced_by", None), getattr(args, "release", False)
                 pm.task_set(args.task, status="done" if args.action == "done" else "dropped", note=args.note,
@@ -4237,10 +4882,16 @@ def main(argv=None):
                     fields["web"] = int(args.web)
                 if "model" in args:
                     fields["model"] = args.model
+                for k in ("tries", "verify_model"):
+                    if k in args:
+                        fields[k] = args.__dict__[k]
+                if "verify" in args:
+                    fields["verify"] = int(args.verify)
                 if "worktree" in args:
                     fields["worktree"] = args.worktree
                 if not fields:
-                    raise FormatError("nothing to change: --subject, --body, --priority, --web, --model or --worktree")
+                    raise FormatError("nothing to change: --subject, --body, --priority, --web, --model, --tries, "
+                                      "--verify-model, --verify or --worktree")
                 if fields.get("subject") == "":
                     raise FormatError("the subject can't be empty")
                 pm.task_set(args.task, **fields)
@@ -4335,6 +4986,8 @@ def main(argv=None):
                 cid = pm.report_answer(sys.stdin.read())
                 print(cid)
                 msg = f"custom report {cid} answered"
+            elif args.action == "tries":
+                print(pm.tries_report(args.since, args.plan, args.milestone), end="")
             elif args.action == "show":
                 print(pm.report_show(args.report), end="")
             else:

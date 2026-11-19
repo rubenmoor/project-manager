@@ -165,6 +165,8 @@ sees where time and tokens went. Change nothing in the project; stage nothing.
    criteria that decides which tasks belong in it. Start from scratch; don't look at earlier reports.
 3. Second pass: apply the criteria and put every task in exactly one category; a task that spans several goes
    where most of its work went.
+`pm report tries` shows how many tries verified tasks needed per model combination, with their cost; cite it where
+it explains where the effort went.
 
 Store it: write report.json, `{"categories": [{"name": "…", "criteria": "…", "tasks": [3, 7]}]}`, then
 `pm report add < report.json` (it refuses a report that misses a done task or has one twice), delete notes.md and
@@ -180,7 +182,8 @@ The owner of this project asks:
 
 Answer in one paragraph for a busy person who doesn't read code, tasks or plans: plain, good English in full
 sentences, pleasant to read, no jargon, like an executive summary. Find out what you need first: the milestones
-(`pm milestone list`, `pm show m<id>`), the code, `git log`, `pm show <id>`, the reports (`pm report list`). Leave out
+(`pm milestone list`, `pm show m<id>`), the code, `git log`, `pm show <id>`, the reports (`pm report list`; how many
+tries verified tasks needed per model: `pm report tries`). Leave out
 how the work is managed (decisions, tasks, plans, runs, pm itself) unless the question is about it; never ids or file
 names. If the question asks for something to be done, don't do it: say in the paragraph what it would take.
 Change nothing in the project; stage nothing.
@@ -236,18 +239,44 @@ another's result must require it (`pm task add … --requires <task id>`, `pm ta
 id>`); pm runs it only once that one is done, and its work is merged into the trunk.
 '''
 
-# Claude model per task kind, passed as `claude --model`. A task's own model (`pm task add|set --model`) comes first;
-# then "escalate", for a task with a failed run or an investigation; then its kind; then "default". "": claude's own
-# default. Only when the worker is claude and its command has no --model of its own. A warm hand-off continues a
-# session only when the model stays the same. Keys left out keep pm's defaults below.
+# Verification: a task of a verified kind ([models] below) that its worker reports done (`pm task done … --evidence -`)
+# is checked by a separate Claude call in a fresh session, the verify run. It infers the task's acceptance criteria,
+# checks the worker's evidence and re-runs or spot-checks it, changes no tracked file, and accepts the task (then it is
+# done and merged into the trunk) or rejects it with findings: the worker continues with them, the next try.
+# verify_prompt: appended to the verify run's prompt: how to prove things in this project (checks, test commands,
+# what a screenshot must show). Empty: nothing.
+verify_prompt = '''
+'''
+
+# After this many rejected tries pm asks the human (one more try, accept as is, drop); the task waits.
+max_tries = 3
+
+# Claude model per task kind, passed as `claude --model`. Only when the worker is claude and its command has no
+# --model of its own. "": claude's own default. Keys left out keep pm's defaults below.
+#   default    the worker of every kind not listed
+#   verify     the verifier of a verified kind whose table names none
+#   <kind> = "<model>"   short form: the worker of every try; the kind isn't verified
+#   [models.<kind>]      table form: tries = worker per try, a ladder whose last rung repeats ("sonnet" or
+#                        ["sonnet", "opus"]); verify = verifier, also per try, or false: not verified
+#   escalate   old: a short-form kind's ladder is [<its model>, escalate]
+#   ranking    model names weakest first (default haiku, sonnet, opus, fable): `pm validate` warns of a verifier
+#              weaker than its try's worker
+# A task's own settings come first: `pm task add|set --model` (every try), `--tries`, `--verify-model`,
+# `--verify` / `--no-verify`. The next try's rung: rejections plus failed runs (and investigations) so far. A warm
+# hand-off continues a session only when the model stays the same.
 [models]
 default = "sonnet"
+verify = "opus"
 masterplan = "opus"
 plan = "opus"
 split = "opus"
 revise = "opus"
 investigate = "opus"
 escalate = "opus"
+
+[models.work]
+tries = ["sonnet", "opus"]
+verify = "opus"
 
 # The work trees pm's workers run in, name = what belongs there (one line; workers read it to pick one for each task
 # they add). At least one; `pm task add` needs `--worktree <name>` (or `--exec`). Names: lowercase letters, digits, -.

@@ -312,7 +312,7 @@ function RunsTable({ d, runs, showTask = false }) {
     <thead><tr><th>run</th>${showTask ? html`<th>task</th>` : null}<th>started</th><th class="r">duration</th><th>result</th>
       <th class="r">turns</th><th class="r">tokens</th><th class="r">cost</th><th title="warm hand-off: runs that worked one Claude session, one after the other">session</th><th>model</th><th>commit</th></tr></thead>
     <tbody>${[...runs].reverse().map((r) => html`<tr>
-      <td class="num muted">${r.id}</td>
+      <td class="num muted">${r.id}${r.kind === "verify" ? html` <span class="tag phase" title="verify run">verify</span>` : null}${r.try ? html` <span class="muted" title="try">#${r.try}</span>` : null}</td>
       ${showTask ? html`<td><${TaskLink} t=${d.task.get(r.task_id)} /></td>` : null}
       <td class="num">${stamp(r.started_at)}</td>
       <td class="r"><${Elapsed} start=${r.started_at} end=${r.ended_at || (d.stale === r && d.crash ? d.crash.at : null)} /></td>
@@ -396,9 +396,10 @@ function Commit({ d, t }) {
 function ModelPick({ d, t, disabled }) {
   const [error, setError] = useState(null);
   const [pick, why] = t.model_pick || [t.model, "set"];
-  const auto = why === "set" ? null : `${pick || "claude default"} (${why === "kind" ? `by kind` : "escalated after a failure"})`;
+  const auto = why === "set" ? null : `${pick || "claude default"} (${why === "kind" ? `by kind` : why === "verify" ? "verify run" : "escalated after a failure or rejection"})`;
   if (t.status !== "open" || disabled) return html`<span>${t.model || auto}</span>`;
-  const kindPick = (d.state.models || {})[t.kind] ?? (d.state.models || {}).default;
+  let kindPick = (d.state.models || {})[t.kind] ?? (d.state.models || {}).default;
+  if (kindPick && typeof kindPick === "object") kindPick = [].concat(kindPick.tries || (d.state.models || {}).default)[0];
   const names = [...new Set(["sonnet", "opus", ...(t.model ? [t.model] : [])])];
   const change = async (v) => {
     try { await post({ op: "task_edit", id: t.id, model: v || null }); setError(null); } catch (e) { setError(e.message); }
@@ -448,6 +449,7 @@ export function Task({ d, id, query, embedded = false }) {
     <div class="row sub">${running ? html`<${Pill} status="running" />` : html`<${Pill} status=${d.taskState(t)} />`}<${Kind} kind=${t.kind} />
       <span>priority <${TaskPrio} d=${d} t=${t} /></span>
       ${running ? html`<span>· <${Elapsed} start=${d.runningOf.get(t.id).started_at} /></span>` : null}
+      ${t.phase_line ? html`<span class="tag phase" title="independent verification">${t.phase_line}</span>` : null}
       ${pos != null && !running ? html`<span>· ${pos === 1 ? "next in the queue" : `#${pos} in the queue`}</span>` : null}
       ${why && typeof why === "string" && !d.unmet(t).length ? html`<span>· not queued: ${why}</span>` : null}</div>
     <dl class="meta">
@@ -456,6 +458,7 @@ export function Task({ d, id, query, embedded = false }) {
       ${t.note ? html`<dt>note</dt><dd>${t.note}</dd>` : null}
       ${t.kind !== "exec" ? html`<dt>work tree</dt><dd><${WorktreePick} d=${d} t=${t} disabled=${running} /></dd>` : null}
       ${t.model_pick || t.model ? html`<dt>model</dt><dd><${ModelPick} d=${d} t=${t} disabled=${running} /></dd>` : null}
+      ${t.models_line ? html`<dt>tries</dt><dd class="muted">${t.models_line.replace(/^models: /, "")}</dd>` : null}
       ${runs.length ? html`<dt>runs</dt><dd>${runs.length}, ${duration(runs.reduce((s, r) => s + seconds(r.started_at, r.ended_at), 0))}, ${usd(d.cost(runs))}</dd>` : null}
     </dl>
     ${running ? html`<div class="banner warn row"><span class="grow">A worker is on this task: it can't be changed until the run ends.</span><${KillTask} t=${t} /></div>` : null}
@@ -470,6 +473,7 @@ export function Task({ d, id, query, embedded = false }) {
     ${t.status === "dropped" ? html`<${RedoTask} t=${t} />` : null}
     ${decs.length ? html`<h2>Decisions</h2><ul>${decs.map((x) => html`<li><a href=${`#/decision/${x.id}`}>${x.subject}</a> <${Pill} status=${x.status} />
       ${x.signoff ? html` <span class="tag signoff">sign-off: ${x.signoff}</span>` : null}</li>`)}</ul>` : null}
+    <${Tries} d=${d} t=${t} />
     <${Prerequisites} d=${d} t=${t} running=${running} />
     ${created.length && t.status === "open" ? html`<h2>Created by this task</h2><ul>${created.map(([k, r]) => html`<li>${k} ${k === "decision" ? html`<a href=${`#/${k}/${r.id}`}>${r.subject}</a>` : html`<${NamedLink} kind=${k} r=${r} />`}</li>`)}</ul>` : null}
     ${t.status !== "open" ? html`<${Commit} d=${d} t=${t} />` : null}
@@ -478,6 +482,19 @@ export function Task({ d, id, query, embedded = false }) {
     ${runs.length ? html`<h2>Worker log${running ? " (live)" : fail ? ` (failed run ${fail.id})` : ""}</h2><${Log} d=${d} t=${t} live=${running} reveal=${query === "log"} />` : null}
     <h2>Body</h2>
     <${EditableBody} text=${t.body} draft=${`task:${t.id}:body`} save=${t.status === "open" ? saveTask(t.id, "body") : null} disabled=${running} />`;
+}
+
+// The tries of a verified task: the worker's evidence, the verifier's verdict and findings.
+function Tries({ d, t }) {
+  const tries = d.triesOf.get(t.id) || [];
+  if (!tries.length) return null;
+  return html`<h2>Tries (${tries.length})</h2>${tries.map((x) => html`<div class="card try" style="margin-bottom:8px">
+    <div class="row"><b>Try ${x.try}</b> <${Pill} status=${x.verdict || "verifying"} />
+      <span class="muted">reported ${stamp(x.created_at)}${x.decided_at ? ` · decided ${stamp(x.decided_at)}` : ""}</span></div>
+    ${x.note ? html`<div class="sub">${x.note}</div>` : null}
+    <details><summary>Evidence</summary><pre>${x.evidence}</pre></details>
+    ${x.verdict === "rejected" ? html`<div><b>Findings</b><${Markdown} text=${x.findings || ""} /></div>`
+      : x.findings ? html`<div class="sub">Verifier: ${x.findings}</div>` : null}</div>`)}`;
 }
 
 // What the task requires (strict: it runs only once they are done) and what requires it; an open task's links edit here.

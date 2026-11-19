@@ -42,7 +42,7 @@ from pm_dashboard import edit
 
 STATIC = Path(__file__).parent / "static"
 TABLES = ("milestone", "plan", "task", "decision", "task_decision", "task_prerequisite_tasks", "decision_supersedes", "run", "summary",
-          "resource_use_report", "custom_report")
+          "resource_use_report", "custom_report", "task_try")
 POLL = 0.5
 DIRTY_POLL = 5
 CSP = ("default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; "
@@ -273,7 +273,13 @@ def read_state(project, last_good=None):
         for t in tables["task"]:
             t["effective_priority"] = t["priority"] if t["priority"] is not None else plan_prio.get(t["plan_id"]) or 0
             if picks and t["status"] == "open":
-                t["model_pick"] = project.model_for(t["id"])    # [model, "set" | "escalated" | "kind"]
+                t["model_pick"] = project.model_for(t["id"], t["phase"] == "verifying")  # [model, "set" | "escalated" | "kind" | "verify"]
+            if picks and t["kind"] in pm.VERIFIABLE_KINDS:
+                t["models_line"] = project.models_line(t)
+        phases = project.phases()
+        for t in tables["task"]:
+            if t["id"] in phases:
+                t["phase_line"] = phases[t["id"]]               # "verifying, try 2"
         for d in tables["decision"]:
             d["options"] = json.loads(d["options"])
             d["in_log"] = d["id"] in in_log
@@ -292,11 +298,12 @@ def read_state(project, last_good=None):
             r["categories"] = project.report_rows(r["id"])
         errors = project.validate()
         holds = project.planning_holds(project.queue())
+        tries = project.tries_data()
     except pm.FormatError as e:
         return base | {"error": str(e), "error_title": error_title(project, e), "last_good": last_good}
     return base | {"tables": tables, "queue": queue, "shown_queue": shown_queue, "head_signoff": head_signoff, "done_plans": done_plans,
                    "errors": errors, "open_summary": open_summary,
-                   "open_report": open_report, "holds": holds}
+                   "open_report": open_report, "holds": holds, "tries": tries}
 
 
 def usage(projects):
