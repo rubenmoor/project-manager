@@ -15,9 +15,20 @@ export function loadDraft(k) { try { const s = localStorage.getItem(DRAFT + k); 
 export function saveDraft(k, v) {
   try { v == null || v === "" ? localStorage.removeItem(DRAFT + k) : localStorage.setItem(DRAFT + k, JSON.stringify({ v, t: Date.now() })); } catch {}
 }
-try {
-  for (const k of Object.keys(localStorage)) if (k.startsWith("pm-draft:") && !(JSON.parse(localStorage.getItem(k)).t > Date.now() - 30 * 864e5)) localStorage.removeItem(k);
-} catch {}
+// Upload placeholders in drafts: replaced when the upload ends, wherever the text is now; left over from a closed page: removed.
+const MARK = /!\[uploading image [^\]]*…\]\(\)\n?/g;
+function swapDrafts(f) {
+  try {
+    for (const k of Object.keys(localStorage)) {
+      if (!k.startsWith("pm-draft:")) continue;
+      const s = localStorage.getItem(k), d = JSON.parse(s);
+      const v = JSON.stringify(d.v, (_, x) => typeof x === "string" ? f(x) : x);
+      if (!(d.t > Date.now() - 30 * 864e5)) localStorage.removeItem(k);
+      else if (v !== JSON.stringify(d.v)) localStorage.setItem(k, JSON.stringify({ v: JSON.parse(v), t: d.t }));
+    }
+  } catch {}
+}
+swapDrafts((x) => x.replace(MARK, ""));
 
 // A string state kept as a draft under `k`.
 export function useKept(k, init = "") {
@@ -46,16 +57,20 @@ async function upload(file) {
 }
 
 let uploads = 0;
+const views = new Set();
 function insertImages(view, files, pos, fail) {
   for (const file of files) {
-    const mark = `![uploading image ${++uploads}…]()`;
+    const mark = `![uploading image ${Date.now().toString(36)}-${++uploads}…]()`;
     const before = view.state.doc.sliceString(Math.max(0, pos - 2), pos);
     const text = (pos === 0 || before.endsWith("\n\n") || before === "\n" ? "" : before.endsWith("\n") ? "\n" : "\n\n") + mark + "\n";
     view.dispatch({ changes: { from: pos, insert: text }, selection: { anchor: pos + text.length } });
     pos += text.length;
     const swap = (by) => {
-      const at = view.state.doc.toString().indexOf(mark);
-      if (at >= 0) view.dispatch({ changes: { from: at, to: at + mark.length + (by ? 0 : 1), insert: by } });
+      for (const v of views) {
+        const at = v.state.doc.toString().indexOf(mark);
+        if (at >= 0) v.dispatch({ changes: { from: at, to: at + mark.length + (by ? 0 : 1), insert: by } });
+      }
+      swapDrafts((x) => x.split(by ? mark : mark + "\n").join(by).split(mark).join(by));
     };
     upload(file).then((path) => { swap(`![](${path})`); fail(null); },
       (e) => { swap(""); fail(`image not added: ${e.message}`); });
@@ -121,12 +136,15 @@ export function CodeEditor({ value, onDone, onChange, autofocus = true, ph = "" 
               return true;
             },
           }),
-          EditorView.updateListener.of((u) => u.docChanged && change.current && change.current(u.state.doc.toString())),
+          EditorView.updateListener.of((u) => {
+            if (u.docChanged && change.current) try { change.current(u.state.doc.toString()); } catch (e) { console.error(e); }
+          }),
         ],
       }),
     });
+    views.add(view);
     if (autofocus) { view.focus(); view.dispatch({ selection: { anchor: view.state.doc.length } }); }
-    return () => view.destroy();
+    return () => { views.delete(view); view.destroy(); };
   }, []);
   return html`<div class="cm-wrap"><span class="md-badge">Markdown</span><div class="cm-box" ref=${box}></div>
     ${error ? html`<span class="err">${error}</span>` : null}</div>`;
