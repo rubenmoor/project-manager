@@ -302,6 +302,7 @@ select.small { width: auto; }
 .btn.big { font-size: 15px; padding: 10px 22px; border-radius: 8px; }
 .grow { flex: 1; }
 .addform { margin-top: 8px; }
+.addform .add-body { margin-top: 10px; min-height: 120px; }
 
 /* welcome */
 .welcome { min-height: calc(100vh - 140px); display: grid; place-items: center; }

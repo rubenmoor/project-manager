@@ -1,7 +1,7 @@
 // Adding milestones, plans and tasks; the welcome screen of a project without milestones.
 import { html, useState, useRef } from "/vendor/preact-htm.js";
-import { CodeEditor, post, autofocus, loadDraft, saveDraft } from "/editor.js";
-import { NamedLink } from "/ui.js";
+import { CodeEditor, post, autofocus, loadDraft, saveDraft, useEditTrigger } from "/editor.js";
+import { NamedLink, Markdown } from "/ui.js";
 
 const WHAT = {
   milestone: { title: "New milestone", ph: "Users can export their data as CSV", body: "", bodyPh: "A description, and a few constraints as bullet points",
@@ -31,6 +31,11 @@ export function AddForm({ kind, parent, onClose, worktrees = {} }) {
     const v = { subject, prio, queue, taskKind, tree, body: body.current, ...x };
     saveDraft(dk, v.subject.trim() || v.body.trim() || v.prio.trim() || v.queue.trim() ? v : null);
   };
+  const [editing, setEditing] = useState(!body.current.trim());
+  const [touched, setTouched] = useState(false);
+  const t = useEditTrigger(() => { setTouched(true); setEditing(true); }, false);
+  // rendered a moment later: a click on a button below still lands
+  const done = (v) => { body.current = v; keep({}); if (v.trim()) setTimeout(() => setEditing(false), 200); };
   const on = (set, f) => (e) => { set(e.target.value); keep({ [f]: e.target.value }); };
   const submit = async () => {
     if (busy) return;
@@ -64,7 +69,10 @@ export function AddForm({ kind, parent, onClose, worktrees = {} }) {
     <div class="section-head"><b>${w.title}</b>${onClose ? html`<button class="iconbtn" onClick=${onClose}>cancel</button>` : null}</div>
     ${w.hint ? html`<div class="sub" style="margin:4px 0 10px">${w.hint}</div>` : null}
     <input class="line-edit h1" placeholder=${w.ph} value=${subject} onInput=${on(setSubject, "subject")} ref=${autofocus} />
-    <div class="cm-frame"><${CodeEditor} value=${body.current} autofocus=${false} onChange=${(v) => { body.current = v; keep({}); }} ph=${w.bodyPh || "Body (Markdown)"} /></div>
+    ${editing ? html`<div class="cm-frame"><${CodeEditor} value=${body.current} autofocus=${touched} onDone=${done}
+        onChange=${(v) => { body.current = v; keep({}); }} ph=${w.bodyPh || "Body (Markdown)"} /></div>`
+      : html`<div class="card editable add-body" tabindex="0" ref=${t.ref} onKeyDown=${t.onKeyDown} onClick=${t.onClick} title="i: edit">
+        <${Markdown} text=${body.current} /></div>`}
     <div class="row" style="margin-top:10px">
       ${kind === "milestone" ? html`<label class="sub" title="tasks of milestones with a lower queue index are worked first">queue index
         <input class="small" value=${queue} placeholder="0" onInput=${on(setQueue, "queue")} /></label>` : null}
@@ -79,7 +87,7 @@ export function AddForm({ kind, parent, onClose, worktrees = {} }) {
       ${error ? html`<span class="err">${error}</span>` : null}
       <button class="btn primary" onClick=${submit} disabled=${busy}>Add ${kind === "exec" ? "exec task" : kind}</button>
     </div>
-    <div class="edit-hint">Markdown supported · Ctrl-Enter: add</div>
+    <div class="edit-hint">Markdown supported · paste or drop images · Esc or click outside: rendered · Ctrl-Enter: add</div>
   </div>`;
 }
 
