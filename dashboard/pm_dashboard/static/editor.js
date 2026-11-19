@@ -76,7 +76,7 @@ function insertImages(view, files, pos, fail) {
       (e) => { swap(""); fail(`image not added: ${e.message}`); });
   }
 }
-const images = (list) => [...(list || [])].filter((f) => f.type.startsWith("image/"));
+const images = (list) => [...(list || [])].filter((f) => f.type.startsWith("image/") && f.size > 0);
 
 const theme = EditorView.theme({
   "&": { background: "var(--surface)", color: "var(--ink)", fontSize: "13px", borderRadius: "8px" },
@@ -122,7 +122,7 @@ export function CodeEditor({ value, onDone, onChange, autofocus = true, ph = "" 
           EditorView.domEventHandlers({
             blur: (e, v) => { if (!box.current.contains(e.relatedTarget)) finish(v); },
             paste: (e, v) => {
-              const files = images(e.clipboardData && e.clipboardData.files);
+              const files = images(e.clipboardData && e.clipboardData.files).slice(0, 1);   // one image, maybe in several formats
               if (!files.length) return false;
               e.preventDefault();
               insertImages(v, files, v.state.selection.main.head, setError);

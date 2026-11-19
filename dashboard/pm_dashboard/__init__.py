@@ -552,18 +552,40 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(400, {"error": str(e)})
         self.send(200, result)
 
+    def read_chunked(self, limit):
+        """A chunked request body; None once it exceeds `limit` bytes."""
+        data = b""
+        while True:
+            n = int(self.rfile.readline().split(b";")[0].strip() or b"0", 16)
+            if not n:
+                while self.rfile.readline().strip():
+                    pass
+                return data
+            data += self.rfile.read(n)
+            self.rfile.readline()
+            if len(data) > limit:
+                self.close_connection = True
+                return None
+
     def image(self, w):
         """POST /p/<name>/api/image, the image's bytes: stored and committed by pm; {"path": …} for Markdown."""
         if not (self.headers.get("Content-Type") or "").startswith("image/"):
             return self.send(415, {"error": "not an image"})
-        try:
-            n = int(self.headers.get("Content-Length") or 0)
-        except ValueError:
-            n = -1
-        if not 0 < n <= pm.MAX_IMAGE_MB * 1024 * 1024:
-            return self.send(413 if n > 0 else 400, {"error": f"images up to {pm.MAX_IMAGE_MB} MB" if n > 0
-                                                     else "bad Content-Length"})
-        data = self.rfile.read(n)
+        limit = pm.MAX_IMAGE_MB * 1024 * 1024
+        if "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():    # e.g. behind a proxy
+            data = self.read_chunked(limit)
+            if data is None:
+                return self.send(413, {"error": f"images up to {pm.MAX_IMAGE_MB} MB"})
+        else:
+            try:
+                n = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                n = -1
+            if n > limit:
+                return self.send(413, {"error": f"images up to {pm.MAX_IMAGE_MB} MB"})
+            data = self.rfile.read(n) if n > 0 else b""
+        if not data:
+            return self.send(400, {"error": "the image is empty"})
         if not w.project:
             return self.send(400, {"error": w.state["error"]})
         with self.write_lock:
