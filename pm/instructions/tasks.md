@@ -37,6 +37,8 @@ pm task drop 6 "split into tasks 11 and 12" --replaced-by 12   # 12 takes over w
 - Refused: a cycle, a dropped prerequisite, a closed task
 - Prerequisite fails: it stays open (investigated), its dependents wait
 - Prerequisite dropped: its dependents wait for good; drop it with `--replaced-by`, or `pm task requires <dependent> --remove <it>`; `pm task redo` moves the links to the new task
+- Dropping a task: handle every open task that requires it, right then: `--replaced-by` for a replacement, else release them (`--remove`) or drop them too; a decision that made the task pointless often makes its dependents pointless too: check the whole chain
+- Never make a replacement require the task it replaces
 - `pm show <task>` lists what it requires and what requires it
 
 A task fits one worker run: one change you can describe, check and commit.
