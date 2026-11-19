@@ -32,7 +32,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, hashlib, j
 from pathlib import Path
 
 
-VERSION = 112  # bump by one with every commit (AGENTS.md)
+VERSION = 113  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions"
@@ -1125,6 +1125,34 @@ class Project:
         return [r[0] for r in db.execute("SELECT q.id FROM task_prerequisite_tasks r JOIN task q ON q.id = r.prerequisite_id "
                                          "WHERE r.task_id = ? AND q.status <> 'done' ORDER BY q.id", (tid,))]
 
+    @staticmethod
+    def chain_below(db, tid):
+        """[(task id, subject, [what it requires of the chain])]: the open tasks that require task tid, directly or
+        further down, nearest first."""
+        seen, out, todo = {tid}, {}, [tid]
+        while todo:
+            x = todo.pop(0)
+            for r in db.execute("SELECT t.id, t.subject FROM task_prerequisite_tasks r JOIN task t ON t.id = r.task_id "
+                                "WHERE r.prerequisite_id = ? AND t.status = 'open' ORDER BY t.id", (x,)):
+                out.setdefault(r["id"], (r["subject"], []))[1].append(x)
+                if r["id"] not in seen:
+                    seen.add(r["id"])
+                    todo.append(r["id"])
+        return [(k, subj, via) for k, (subj, via) in out.items()]
+
+    @staticmethod
+    def drop_refusal(tid, chain):
+        direct = [k for k, _, via in chain if tid in via]
+        lines = [f"task {tid}: open tasks require it; say what happens to them:"]
+        lines += [f"  task {k}: {subj} (requires {', '.join(map(str, via))})" for k, subj, via in chain]
+        lines += [f"- a task replaces it: pm task drop {tid} \"<reason>\" --replaced-by <task>   (they wait for that task)",
+                  f"- they don't need it: pm task drop {tid} \"<reason>\" --release   (task{'s' * (len(direct) > 1)} "
+                  f"{', '.join(map(str, direct))} no longer wait{'s' * (len(direct) == 1)} for it)",
+                  f"- pointless too: drop them first, end of the chain first (pm task drop {chain[-1][0]} \"<reason>\", …)",
+                  f"If a decision made task {tid} pointless, check each of them: keep it, rewrite it (pm task set <task> "
+                  "--body -), drop it, or raise a decision and make it pending (pm task-pending-decision <task> <d>)."]
+        return "\n".join(lines)
+
     def stuck(self):
         """{open task id: [its dropped or archived prerequisite tasks]}: they wait for good unless the links change."""
         out = {}
@@ -2204,8 +2232,10 @@ class Project:
     def task_set(self, tid, **fields):
         """Set fields of an open task (status, note, priority, subject, body, web, model, worktree); a value None clears
         it. A running task: only its own worker changes it, and not its subject, body or work tree. replaced_by (with
-        status dropped): that open task takes over its prerequisite links."""
-        new = fields.pop("replaced_by", None)
+        status dropped): that open task takes over its prerequisite links; release: the open tasks that require it no
+        longer do. Dropping a task that open tasks require needs one of them, unless dependents="keep" (pm's own)."""
+        new, release = fields.pop("replaced_by", None), fields.pop("release", False)
+        keep = fields.pop("dependents", None) == "keep"
         with self.connect(write=True) as db:
             if (t := self.get(db, "task", tid))["status"] != "open":
                 raise FormatError(f"task {tid} is {t['status']}; a closed task can't be changed")
@@ -2228,10 +2258,20 @@ class Project:
                     db.execute(f"UPDATE task SET {k} = ? WHERE id = ?", (v, tid))
             if fields.get("subject") is not None:
                 self.rename_refs(db, "task", tid, t["subject"], fields["subject"])
+            if (new is not None or release) and fields.get("status") != "dropped":
+                raise FormatError("--replaced-by and --release go with dropping a task")
+            if new is not None and release:
+                raise FormatError("--replaced-by or --release, not both")
+            if fields.get("status") == "dropped" and new is None and not release and not keep \
+                    and (chain := self.chain_below(db, tid)):
+                raise FormatError(self.drop_refusal(tid, chain))
             if new is not None:
-                if fields.get("status") != "dropped" or new == tid or self.get(db, "task", new)["status"] != "open":
+                if new == tid or self.get(db, "task", new)["status"] != "open":
                     raise FormatError(f"--replaced-by: an open task other than {tid}, when dropping it")
                 self.move_prerequisites(db, tid, new)
+            if release:
+                db.execute("DELETE FROM task_prerequisite_tasks WHERE prerequisite_id = ? AND task_id IN "
+                           "(SELECT id FROM task WHERE status = 'open')", (tid,))
 
     def task_pending_decision(self, tid, did):
         with self.connect(write=True) as db:
@@ -3647,7 +3687,7 @@ class Project:
         elif result == "failed":
             self.say(f"\n{at}task {tid} failed: {message}")
             if self.task_kind(tid) == "exec":
-                self.task_set(tid, status="dropped", note="failed: " + message.splitlines()[0][:200])
+                self.task_set(tid, status="dropped", note="failed: " + message.splitlines()[0][:200], dependents="keep")
                 self.drop_task_stashes(tid)
                 self.commit_db(f"task {tid} failed: dropped")
                 self.say(f"task {tid} has no plan to investigate in: dropped")
@@ -3960,6 +4000,8 @@ def main(argv=None):
         x.add_argument("note", help=text)
     x.add_argument("--replaced-by", type=int, metavar="TASK", help="this open task takes over what it requires and "
                    "the tasks that require it")
+    x.add_argument("--release", action="store_true", help="the open tasks that require it no longer do; without this "
+                   "or --replaced-by, a task that open tasks require can't be dropped")
     tr = t.add_parser("requires", help="the task runs only once these tasks are done, whatever the priorities; "
                       "open tasks; a running one only by its own worker, whose run then ends blocked")
     tr.add_argument("task", type=int)
@@ -4176,10 +4218,11 @@ def main(argv=None):
                 print(tid)
                 msg = f"task {tid}: task {args.task} again"
             elif args.action in ("done", "drop"):
-                new = getattr(args, "replaced_by", None)
+                new, release = getattr(args, "replaced_by", None), getattr(args, "release", False)
                 pm.task_set(args.task, status="done" if args.action == "done" else "dropped", note=args.note,
-                            **({"replaced_by": new} if new is not None else {}))
-                msg = f"task {args.task} {args.action}" + (f", replaced by task {new}" if new is not None else "")
+                            **({"replaced_by": new} if new is not None else {}), **({"release": True} if release else {}))
+                msg = f"task {args.task} {args.action}" + (f", replaced by task {new}" if new is not None else "") \
+                    + (", its dependents released" if release else "")
             elif args.action == "requires":
                 if not args.prerequisites and not args.remove:
                     raise FormatError("name the tasks it requires, or --remove <task>")

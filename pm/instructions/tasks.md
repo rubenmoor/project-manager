@@ -32,12 +32,14 @@ EOF
 pm task requires 9 5 7          # an open task; a running one only by its own worker
 pm task requires 9 --remove 7
 pm task drop 6 "split into tasks 11 and 12" --replaced-by 12   # 12 takes over what 6 required and what required 6
+pm task drop 8 "decision 40: no export" --release              # what required 8 no longer does
 ```
 
 - Refused: a cycle, a dropped prerequisite, a closed task
 - Prerequisite fails: it stays open (investigated), its dependents wait
-- Prerequisite dropped: its dependents wait for good; drop it with `--replaced-by`, or `pm task requires <dependent> --remove <it>`; `pm task redo` moves the links to the new task
-- Dropping a task: handle every open task that requires it, right then: `--replaced-by` for a replacement, else release them (`--remove`) or drop them too; a decision that made the task pointless often makes its dependents pointless too: check the whole chain
+- Dropping a task that open tasks require: refused, with the chain below it, unless `--replaced-by <task>` (they wait for it instead) or `--release` (they stop waiting); pointless too: drop them first, end of the chain first
+- A decision that made the task pointless often makes the whole chain below it pointless: check each task, keep, rewrite (`pm task set --body -`), drop, or raise a decision and make it pending
+- Still stuck (`pm kill`, a drop by hand in the past): `pm status` warns; `pm task redo`, `pm task requires <dependent> --remove <it>` or drop the dependent
 - Never make a replacement require the task it replaces
 - `pm show <task>` lists what it requires and what requires it
 

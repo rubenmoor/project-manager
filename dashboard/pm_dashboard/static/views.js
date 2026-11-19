@@ -466,7 +466,7 @@ export function Task({ d, id, query, embedded = false }) {
     ${why && typeof why !== "string" ? html`<div class="banner warn">Waits for ${why.map((x, i) => html`${i ? ", " : ""}<a href=${`#/decision/${x.id}`}>decision ${x.id}: ${x.subject}</a>`)}.</div>` : null}
     ${t.status === "open" && d.unmet(t).length ? html`<div class=${`banner ${d.stuck(t) ? "error" : "warn"}`}>Waits for ${d.unmet(t).map((x, i) => html`${i ? ", " : ""}<a href=${`#/task/${x.id}`}>task ${x.id}: ${x.subject}</a> (${x.status})`)}${d.stuck(t)
       ? html`. A dropped task never gets done: re-schedule it, or remove it below.` : "."}</div>` : null}
-    ${t.status === "open" && !running ? html`<${CloseTask} t=${t} />` : null}
+    ${t.status === "open" && !running ? html`<${CloseTask} d=${d} t=${t} />` : null}
     ${t.status === "dropped" ? html`<${RedoTask} t=${t} />` : null}
     ${decs.length ? html`<h2>Decisions</h2><ul>${decs.map((x) => html`<li><a href=${`#/decision/${x.id}`}>${x.subject}</a> <${Pill} status=${x.status} />
       ${x.signoff ? html` <span class="tag signoff">sign-off: ${x.signoff}</span>` : null}</li>`)}</ul>` : null}
@@ -534,25 +534,50 @@ function RedoTask({ t }) {
     title="a new open task like this one, with what its runs left">Re-schedule</button>${error ? html`<span class="err">${error}</span>` : null}</div>`;
 }
 
-function CloseTask({ t }) {
+// The open tasks that require task t, directly or further down, nearest first.
+function chainBelow(d, t) {
+  const seen = new Set([t.id]), out = [], todo = [t];
+  while (todo.length) {
+    const x = todo.shift();
+    for (const y of d.requiredBy.get(x.id) || []) {
+      if (y.status !== "open" || seen.has(y.id)) continue;
+      seen.add(y.id); out.push(y); todo.push(y);
+    }
+  }
+  return out;
+}
+
+function CloseTask({ d, t }) {
   const [kept, setKept] = useKept(`task:${t.id}:close`, null);
   const [mode, setMode0] = useState(kept ? kept.mode : null);
   const [note, setNote0] = useState(kept ? kept.note : "");
-  const setMode = (m) => { setMode0(m); if (!m) setKept(null); };
+  const [how, setHow] = useState(null);
+  const [by, setBy] = useState("");
+  const setMode = (m) => { setMode0(m); setHow(null); if (!m) setKept(null); };
   const setNote = (n) => { setNote0(n); setKept(n ? { mode, note: n } : null); };
   const [error, setError] = useState(null);
   const today = new Date().toISOString().slice(0, 10);
+  const chain = mode === "dropped" ? chainBelow(d, t) : [];
+  const ready = !chain.length || how === "release" || (how === "replace" && /^\d+$/.test(by.trim()));
   const go = async () => {
-    try { await post({ op: "task_close", id: t.id, status: mode, note }); setMode(null); setError(null); }
+    if (!ready) return setError("say what happens to the tasks that require it");
+    const extra = !chain.length ? {} : how === "release" ? { release: true } : { replaced_by: Number(by.trim()) };
+    try { await post({ op: "task_close", id: t.id, status: mode, note, ...extra }); setMode(null); setError(null); }
     catch (e) { setError(e.message); }
   };
   if (!mode) return html`<div class="row" style="margin-top:10px">
     <button class="btn" onClick=${() => { setMode("done"); setNote0(`${today}, `); }}>Done…</button>
     <button class="btn" onClick=${() => { setMode("dropped"); setNote0(""); }}>Drop…</button></div>`;
-  return html`<div class="row" style="margin-top:10px">
+  const deps = chain.length ? html`<div style="margin-top:10px">
+    <div class="sub">Open tasks require it, directly or further down. If what made it pointless makes them pointless too, drop them first, end of the chain first.</div>
+    <ul>${chain.map((x) => html`<li><${TaskLink} t=${x} /> <span class="muted">requires ${(d.requires.get(x.id) || []).filter((y) => y.id === t.id || chain.includes(y)).map((y) => `t${y.id}`).join(", ")}</span></li>`)}</ul>
+    <div class="row"><label><input type="radio" name=${`how-${t.id}`} checked=${how === "replace"} onChange=${() => setHow("replace")} /> they wait for task </label>
+      <input class="note-input" style="flex:0 0 90px" value=${by} placeholder="task id" onFocus=${() => setHow("replace")} onInput=${(e) => setBy(e.target.value)} /> instead</div>
+    <div class="row"><label><input type="radio" name=${`how-${t.id}`} checked=${how === "release"} onChange=${() => setHow("release")} /> they no longer wait for it</label></div></div>` : null;
+  return html`${deps}<div class="row" style="margin-top:10px">
     <input class="note-input" ref=${autofocus} value=${note} placeholder=${mode === "done" ? "date, files" : "why it is dropped"}
       onInput=${(e) => setNote(e.target.value)} onKeyDown=${(e) => { if (e.key === "Enter") go(); if (e.key === "Escape") setMode(null); }} />
-    <button class="btn primary" onClick=${go}>${mode === "done" ? "Mark done" : "Drop"}</button>
+    <button class="btn primary" onClick=${go} disabled=${!ready}>${mode === "done" ? "Mark done" : "Drop"}</button>
     <button class="iconbtn" onClick=${() => setMode(null)}>cancel</button>
     ${error ? html`<span class="err">${error}</span>` : null}</div>`;
 }

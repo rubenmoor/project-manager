@@ -31,7 +31,7 @@ pm plan edit <plan> [--subject …] [--body -] [--intro …] [--priority N]
 pm task add <plan> "<subject>" --worktree <name> [--requires <task> …] [--kind plan] [--priority N] [--web] [--model opus] <<'EOF' … EOF
 pm task set <task> [--subject …] [--body -] [--priority N|none] [--web|--no-web] [--model opus|none] [--worktree <name>]
 pm task requires <task> <prerequisite> … [--remove <id>] | pm task priority <task> <N|none>
-pm task done <task> "<YYYY-MM-DD, files>" | pm task drop <task> "<reason>" [--replaced-by <task>]
+pm task done <task> "<YYYY-MM-DD, files>" | pm task drop <task> "<reason>" [--replaced-by <task>|--release]
 # decisions
 pm decision add "<question>" --intro "…" [--body …] --option "<recommended>" --option … [--once]
 pm task-pending-decision <task> <decision>

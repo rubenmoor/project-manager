@@ -54,8 +54,8 @@ done and dropped ones stay as they are (pm refuses to change them): drop the ope
 tasks for what the plan asks beyond them. A task that writes a plan gets `--kind plan`. A task that needs another
 task's result (in this plan or another, in any work tree) requires it: `pm task add … --requires <task id>`, or
 `pm task requires <task id> <prerequisite id>` for an existing one; priority is only a hint and orders nothing across
-work trees. When you drop an open task that others require and add one in its place, drop it with
-`--replaced-by <new task id>`.
+work trees. When you drop an open task that others require, say what happens to them: `--replaced-by <new task id>`
+when a task takes its place, `--release` when they don't need it, or drop them first when they are pointless too.
 '''
 
 # The task a changed milestone queues in its masterplan (pm refuses the change once every plan of the milestone is

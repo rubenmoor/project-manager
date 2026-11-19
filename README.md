@@ -59,7 +59,7 @@ Questions you can't answer yet don't need to block the milestone: workers turn t
 
 **Dependencies.** Priority is a hint for what goes first; a strict order is a prerequisite task (`task_prerequisite_tasks`), declared by workers or you.
 
-- `pm task add … --requires <task>` (repeat), `pm task requires <task> <prerequisite>… [--remove <task>]`; refused: cycles, dropped prerequisites, closed tasks; a running task only by its own worker, whose run then ends `blocked`
+- `pm task add … --requires <task>` (repeat), `pm task requires <task> <prerequisite>… [--remove <task>]`; refused: cycles, dropped prerequisites, closed tasks; `pm task drop` of a task open tasks require: refused (listing the chain below it) unless `--replaced-by <task>` or `--release` (not for pm's own drops or `pm kill`); a running task only by its own worker, whose run then ends `blocked`
 - Met: the prerequisite is done; from another work tree, also merged into the trunk (its `task N: …` commit in HEAD)
 - Failed prerequisite: stays open, investigated; dependents wait. A failed task requires its investigation; fix tasks are added as prerequisites
 - Dropped prerequisite: dependents wait for good, listed by `pm run` and `pm status`; `pm task drop <task> <reason> --replaced-by <task>` and `pm task redo` move the links to the new task

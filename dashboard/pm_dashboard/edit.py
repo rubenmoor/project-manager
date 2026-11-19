@@ -102,8 +102,15 @@ def apply(project, op):
         status = op.get("status")
         if status not in ("done", "dropped"):
             raise EditError("status must be done or dropped")
-        project.task_set(int(op["id"]), status=status, note=text(op.get("note"), "the note"))
-        return f"task {op['id']} {'done' if status == 'done' else 'drop'}", None
+        extra = {}
+        if op.get("replaced_by") is not None:
+            extra["replaced_by"] = int(op["replaced_by"])
+        if op.get("release"):
+            extra["release"] = True
+        project.task_set(int(op["id"]), status=status, note=text(op.get("note"), "the note"), **extra)
+        return f"task {op['id']} {'done' if status == 'done' else 'drop'}" + (
+            f", replaced by task {extra['replaced_by']}" if "replaced_by" in extra else
+            ", its dependents released" if extra else ""), None
     if kind == "task_requires":
         add, remove = [int(x) for x in op.get("add") or []], [int(x) for x in op.get("remove") or []]
         project.task_requires(int(op["id"]), add, remove)
