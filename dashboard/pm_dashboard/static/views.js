@@ -1,7 +1,7 @@
 import { html, useState, useEffect, useRef, useLayoutEffect } from "/vendor/preact-htm.js";
 import { Markdown, InlineMd, Pill, Kind, Worktree, Prio, TaskLink, Id, Ref, Named, NamedLink, Titled, Time, Elapsed, Tile, Progress, Bars, Fold } from "/ui.js";
 import { usd, tokens, stamp, duration, seconds, day } from "/data.js";
-import { EditableBody, EditableLine, PrioEdit, post, autofocus } from "/editor.js";
+import { EditableBody, EditableLine, PrioEdit, post, autofocus, useKept } from "/editor.js";
 import { AddButton, Welcome } from "/add.js";
 import { TaskDiff, useCommit } from "/diff.js";
 import { Affected } from "/affected.js";
@@ -21,9 +21,9 @@ function TaskPrio({ d, t }) {
 }
 
 // The plain-English intro on top; the technical body right below it, hidden behind a button unless there's no intro.
-function Intro({ intro, saveIntro, children }) {
+function Intro({ intro, saveIntro, draft, children }) {
   const [open, setOpen] = useState(!intro);
-  return html`${intro || saveIntro ? html`<div class="intro">${saveIntro ? html`<${EditableBody} text=${intro} save=${saveIntro} empty="No intro." ph="Intro: plain English for an outsider" />`
+  return html`${intro || saveIntro ? html`<div class="intro">${saveIntro ? html`<${EditableBody} text=${intro} save=${saveIntro} draft=${draft} empty="No intro." ph="Intro: plain English for an outsider" />`
       : html`<div class="card"><${Markdown} text=${intro} /></div>`}</div>` : null}
     ${intro && children ? html`<button class="iconbtn details-btn" onClick=${() => setOpen(!open)}>${open ? "Hide details" : "Show details"}</button>` : null}
     ${open ? html`<div class="details-body">${children}</div>` : null}`;
@@ -256,7 +256,7 @@ export function Milestone({ d, id }) {
   const filt = (ts) => ts.filter((t) => (show === "all" || (show === "open" ? t.status === "open" : t.status !== "open"))
     && (kind === "all" || t.kind === kind));
   return html`<div class="crumbs"><a href="#/milestones">Milestones</a></div>
-    <${Titled} kind="milestone" id=${m.id}><${EditableLine} text=${m.subject} save=${mDone ? null : saveMilestone(m.id, "subject")} /></${Titled}>
+    <${Titled} kind="milestone" id=${m.id}><${EditableLine} text=${m.subject} draft=${`milestone:${m.id}:subject`} save=${mDone ? null : saveMilestone(m.id, "subject")} /></${Titled}>
     <div class="row sub"><${Pill} status=${m.status} /><span title="tasks of lower queue indexes are worked first">queue index
       <${PrioEdit} what="queue index" value=${m.queue_index} effective=${0} from="" save=${m.status === "implemented" ? null : saveMilestone(m.id, "queue_index")} /></span>
       <span>created ${stamp(m.created_at)}</span>
@@ -264,7 +264,7 @@ export function Milestone({ d, id }) {
       ${m.status !== "implemented" ? html`<${HoldButton} m=${m} />` : null}</div>
     ${d.held(m) ? html`<div class="hold-note">On hold: its plans and tasks stay out of the queue until it is resumed.</div>` : null}
     <${Progress} ...${counts(tasks)} />
-    <div style="margin-top:12px"><${EditableBody} text=${m.body} save=${mDone ? null : saveMilestone(m.id, "body")} /></div>
+    <div style="margin-top:12px"><${EditableBody} text=${m.body} draft=${`milestone:${m.id}:body`} save=${mDone ? null : saveMilestone(m.id, "body")} /></div>
     <div class="sub" style="margin-top:4px">${mDone ? "Done: it can't be changed; add a new milestone instead."
       : 'A new subject or body queues "revise the masterplan".'}</div>
     <div class="section-head"><h2>Plans</h2></div>
@@ -289,14 +289,14 @@ export function Plan({ d, id }) {
   const gone = p.archived_by_decision != null;
   const tasks = gone ? d.state.tables.task.filter((x) => x.plan_id === p.id) : d.tasksOf.get(p.id) || [];
   return html`<div class="crumbs"><a href="#/milestones">Milestones</a> › <${NamedLink} kind="milestone" r=${m} /></div>
-    <${Titled} kind="plan" id=${p.id}><${EditableLine} text=${p.subject} save=${planSave(d, p.id, "subject")} /></${Titled}>
+    <${Titled} kind="plan" id=${p.id}><${EditableLine} text=${p.subject} draft=${`plan:${p.id}:subject`} save=${planSave(d, p.id, "subject")} /></${Titled}>
     <div class="row sub">${d.held(m) && !d.planDone.has(p.id) && !gone ? html`<${Pill} status="on-hold" />` : null}<span>priority <${PrioEdit} value=${p.priority} effective=${0} from="none"
       save=${planSave(d, p.id, "priority")} /></span>
       <span>· created ${stamp(p.created_at)}</span>${p.created_by_task != null ? html`<span>· by <a href=${`#/task/${p.created_by_task}`}>task ${p.created_by_task}</a></span>` : null}</div>
     ${gone ? html`<div class="hold-note"><${Pill} status="archived" /> Its sign-off was rejected in <a href=${`#/decision/${p.archived_by_decision}`}>decision ${p.archived_by_decision}</a>${d.decision.get(p.archived_by_decision)?.reason ? `: ${d.decision.get(p.archived_by_decision).reason}` : ""}. Kept, hidden from the lists; it can't be changed.</div>`
       : d.held(m) && !d.planDone.has(p.id) ? html`<div class="hold-note">On hold with <a href=${`#/milestone/${m.id}`}>milestone ${m.id}</a>: its tasks stay out of the queue.</div>` : null}
-    <${Intro} key=${p.id} intro=${p.intro} saveIntro=${planSave(d, p.id, "intro")}>
-      <${EditableBody} text=${p.body} save=${planSave(d, p.id, "body")} />
+    <${Intro} key=${p.id} intro=${p.intro} draft=${`plan:${p.id}:intro`} saveIntro=${planSave(d, p.id, "intro")}>
+      <${EditableBody} text=${p.body} draft=${`plan:${p.id}:body`} save=${planSave(d, p.id, "body")} />
       <div class="sub" style="margin-top:4px">${d.planDone.has(p.id)
         ? "Done: no open task, nor in the plans below it. It can't be changed; add a new plan instead."
         : html`A new subject or body queues "create tasks for plan ${p.id}: ${p.subject}" again and the revision of the plans below it.`}</div></${Intro}>
@@ -444,7 +444,7 @@ export function Task({ d, id, query, embedded = false }) {
   const fail = t.status === "open" && last && last.result === "failed" ? last : null;
   return html`<div class="crumbs row"><span class="grow">${p ? html`<a href="#/milestones">Milestones</a> › <${NamedLink} kind="milestone" r=${m} /> › <${NamedLink} kind="plan" r=${p} />` : html`<a href="#/tasks">Tasks</a> › executive intervention`}</span>
       ${embedded ? html`<a class="btn" href=${`#/task/${t.id}`}>Task page →</a>` : null}</div>
-    <${Titled} kind="task" id=${t.id}><${EditableLine} text=${t.subject} save=${t.status === "open" ? saveTask(t.id, "subject") : null} disabled=${running} /></${Titled}>
+    <${Titled} kind="task" id=${t.id}><${EditableLine} text=${t.subject} draft=${`task:${t.id}:subject`} save=${t.status === "open" ? saveTask(t.id, "subject") : null} disabled=${running} /></${Titled}>
     <div class="row sub">${running ? html`<${Pill} status="running" />` : html`<${Pill} status=${d.taskState(t)} />`}<${Kind} kind=${t.kind} />
       <span>priority <${TaskPrio} d=${d} t=${t} /></span>
       ${running ? html`<span>· <${Elapsed} start=${d.runningOf.get(t.id).started_at} /></span>` : null}
@@ -477,7 +477,7 @@ export function Task({ d, id, query, embedded = false }) {
     <${RunsTable} d=${d} runs=${runs} />
     ${runs.length ? html`<h2>Worker log${running ? " (live)" : fail ? ` (failed run ${fail.id})` : ""}</h2><${Log} d=${d} t=${t} live=${running} reveal=${query === "log"} />` : null}
     <h2>Body</h2>
-    <${EditableBody} text=${t.body} save=${t.status === "open" ? saveTask(t.id, "body") : null} disabled=${running} />`;
+    <${EditableBody} text=${t.body} draft=${`task:${t.id}:body`} save=${t.status === "open" ? saveTask(t.id, "body") : null} disabled=${running} />`;
 }
 
 // What the task requires (strict: it runs only once they are done) and what requires it; an open task's links edit here.
@@ -535,8 +535,11 @@ function RedoTask({ t }) {
 }
 
 function CloseTask({ t }) {
-  const [mode, setMode] = useState(null);
-  const [note, setNote] = useState("");
+  const [kept, setKept] = useKept(`task:${t.id}:close`, null);
+  const [mode, setMode0] = useState(kept ? kept.mode : null);
+  const [note, setNote0] = useState(kept ? kept.note : "");
+  const setMode = (m) => { setMode0(m); if (!m) setKept(null); };
+  const setNote = (n) => { setNote0(n); setKept(n ? { mode, note: n } : null); };
   const [error, setError] = useState(null);
   const today = new Date().toISOString().slice(0, 10);
   const go = async () => {
@@ -544,8 +547,8 @@ function CloseTask({ t }) {
     catch (e) { setError(e.message); }
   };
   if (!mode) return html`<div class="row" style="margin-top:10px">
-    <button class="btn" onClick=${() => { setMode("done"); setNote(`${today}, `); }}>Done…</button>
-    <button class="btn" onClick=${() => { setMode("dropped"); setNote(""); }}>Drop…</button></div>`;
+    <button class="btn" onClick=${() => { setMode("done"); setNote0(`${today}, `); }}>Done…</button>
+    <button class="btn" onClick=${() => { setMode("dropped"); setNote0(""); }}>Drop…</button></div>`;
   return html`<div class="row" style="margin-top:10px">
     <input class="note-input" ref=${autofocus} value=${note} placeholder=${mode === "done" ? "date, files" : "why it is dropped"}
       onInput=${(e) => setNote(e.target.value)} onKeyDown=${(e) => { if (e.key === "Enter") go(); if (e.key === "Escape") setMode(null); }} />
@@ -708,7 +711,7 @@ export function Decision({ d, id, query }) {
     ${x.options.length && !pending ? html`<h3>Options</h3><ol class="options">${x.options.map((o, i) => html`<li class=${i === 0 ? "rec" : ""}><${InlineMd} text=${o} /></li>`)}</ol>` : null}
     ${plan ? html`<h2>What it approves</h2>
       <div class="sub"><${NamedLink} kind="plan" r=${plan} />: click or press i to edit; it is saved to the plan, and Approve approves the edited version.</div>
-      <${EditableBody} key=${plan.id} text=${plan.body} save=${planSave(d, plan.id, "body")} />`
+      <${EditableBody} text=${plan.body} draft=${`plan:${plan.id}:body`} save=${planSave(d, plan.id, "body")} />`
       : x.signoff_view ? html`<h2>What it approves</h2><div class="card"><${Markdown} text=${x.signoff_view} /></div>` : null}
     ${pending ? html`<${Resolve} key=${x.id} d=${d} x=${x} next=${nextPending(d, x, newest)} view=${newest ? "?view=newest" : ""} />` : null}
     <h2>Tasks waiting for it (${waiting.length})</h2>

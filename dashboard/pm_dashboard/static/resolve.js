@@ -2,13 +2,8 @@
 // Markdown draft (rendered; a click: source; Esc: rendered again), sent with a button or Ctrl-Enter; "& next"
 // (Ctrl-Shift-Enter) then opens the next pending decision.
 import { html, useState, useRef, useEffect } from "/vendor/preact-htm.js";
-import { CodeEditor, post, useEditTrigger } from "/editor.js";
+import { CodeEditor, post, useEditTrigger, loadDraft, saveDraft, useKept } from "/editor.js";
 import { Markdown, InlineMd } from "/ui.js";
-
-const store = {
-  get: (k) => { try { return sessionStorage.getItem(k) || ""; } catch { return ""; } },
-  set: (k, v) => { try { v ? sessionStorage.setItem(k, v) : sessionStorage.removeItem(k); } catch {} },
-};
 
 function Draft({ value, set, empty }) {
   const [editing, setEditing] = useState(false);
@@ -22,15 +17,15 @@ function Draft({ value, set, empty }) {
 }
 
 function useDraft(key) {
-  const [value, setValue] = useState(() => store.get(key));
+  const [value, setValue] = useState(() => loadDraft(key) || "");
   const cur = useRef(value);
-  const set = (v) => { cur.current = v; setValue(v); store.set(key, v); };
+  const set = (v) => { cur.current = v; setValue(v); saveDraft(key, v); };
   return { value, set, cur };
 }
 
 // Reject a sign-off (or one task of a task-queue sign-off): an optional one-line reason; Enter or Submit, Esc cancels.
-function Reject({ what, busy, error, submit, cancel }) {
-  const [reason, setReason] = useState("");
+function Reject({ draft, what, busy, error, submit, cancel }) {
+  const [reason, setReason] = useKept(draft);
   const input = useRef(null);
   useEffect(() => input.current && input.current.focus(), []);
   const key = (e) => {
@@ -52,12 +47,12 @@ const REJECTS = { masterplan: "the masterplan, the plans below it and their open
 export function Resolve({ d, x, next, view = "" }) {
   const [mode, setMode] = useState("answer");
   const [rejecting, setRejecting] = useState(null);   // "all", or a task id
-  const answer = useDraft(`pm-answer:${x.id}:${x.subject}`);
-  const reason = useDraft(`pm-reason:${x.id}:${x.subject}`);
-  const feedback = useDraft(`pm-feedback:${x.id}:${x.subject}`);
+  const answer = useDraft(`decision:${x.id}:answer`);
+  const reason = useDraft(`decision:${x.id}:reason`);
+  const feedback = useDraft(`decision:${x.id}:feedback`);
   const returnable = x.signoff_plan != null;
   const [once, setOnce] = useState(x.kind === "once");
-  const [sup, setSup] = useState("");
+  const [sup, setSup] = useKept(`decision:${x.id}:supersedes`);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const open = (d.tasksWaiting.get(x.id) || []).filter((t) => t.status === "open").length;
@@ -77,7 +72,7 @@ export function Resolve({ d, x, next, view = "" }) {
     if (x.signoff) return go({ op: "decision_approve", id: x.id }, null, then);
     if (mode === "irrelevant") return go({ op: "decision_irrelevant", id: x.id, reason: reason.cur.current }, reason, then);
     const ids = (sup.match(/\d+/g) || []).map(Number);
-    go({ op: "decision_answer", id: x.id, answer: answer.cur.current, once, supersedes: ids }, answer, then);
+    go({ op: "decision_answer", id: x.id, answer: answer.cur.current, once, supersedes: ids }, answer, then).then((ok) => ok && setSup(""));
   };
   const nextBtn = (label, off) => html`<button class="btn primary" onClick=${() => submit(true)} disabled=${off}
     title=${next != null ? `then open decision ${next}` : "none left: then back to the decisions"}>${label} & next</button>`;
@@ -93,12 +88,14 @@ export function Resolve({ d, x, next, view = "" }) {
       ${nextBtn("Return", busy || !feedback.value.trim())}</div>
     <div class="edit-hint">Markdown supported · Esc: render · Ctrl-Enter: return · Ctrl-Shift-Enter: return & next</div></div>`;
   const reject = async (reason) => {
-    if (await go({ op: "decision_reject", id: x.id, reason, ...(rejecting === "all" ? {} : { task: rejecting }) })) setRejecting(null);
+    if (await go({ op: "decision_reject", id: x.id, reason, ...(rejecting === "all" ? {} : { task: rejecting }) })) {
+      saveDraft(`decision:${x.id}:reject:${rejecting}`, null); setRejecting(null);
+    }
   };
   const openTasks = (d.tasksWaiting.get(x.id) || []).filter((t) => t.status === "open");
   const cancelReject = () => { setRejecting(null); setError(null); };
   if (x.signoff) return html`<div class="card resolve">
-    ${rejecting === "all" ? html`<${Reject} what=${REJECTS[x.signoff]} busy=${busy} error=${error} submit=${reject} cancel=${cancelReject} />`
+    ${rejecting === "all" ? html`<${Reject} draft=${`decision:${x.id}:reject:all`} what=${REJECTS[x.signoff]} busy=${busy} error=${error} submit=${reject} cancel=${cancelReject} />`
     : html`<div class="row"><span class="sub">${open ? `Unblocks ${open} open task${open > 1 ? "s" : ""}. ` : ""}${returnable
       ? "Edit the plan above, or return it with feedback." : "Leave it pending to change plans or tasks first."}</span>
       ${rejecting == null ? status : null}${returnable ? html`<button class="iconbtn" onClick=${() => { setMode("return"); setError(null); }}>return with feedback…</button>` : null}
@@ -106,7 +103,7 @@ export function Resolve({ d, x, next, view = "" }) {
       <button class="btn" onClick=${() => submit()} disabled=${busy}>Approve</button>${nextBtn("Approve", busy)}</div>`}
     ${x.signoff === "task-queue" && openTasks.length > 1 ? html`<div class="reject-one"><div class="sub">Or reject one task; the sign-off stays pending for the others:</div>
       <ul class="plain">${openTasks.map((t) => html`<li>${rejecting === t.id
-        ? html`<a href=${`#/task/${t.id}`}>task ${t.id}</a> ${t.subject}<${Reject} what=${`task ${t.id}`} busy=${busy} error=${error} submit=${reject} cancel=${cancelReject} />`
+        ? html`<a href=${`#/task/${t.id}`}>task ${t.id}</a> ${t.subject}<${Reject} draft=${`decision:${x.id}:reject:${t.id}`} what=${`task ${t.id}`} busy=${busy} error=${error} submit=${reject} cancel=${cancelReject} />`
         : html`<a href=${`#/task/${t.id}`}>task ${t.id}</a> ${t.subject} <button class="iconbtn" disabled=${busy}
           onClick=${() => { setRejecting(t.id); setError(null); }}>reject…</button>`}</li>`)}</ul></div>` : null}</div>`;
   if (mode === "irrelevant") return html`<div class="resolve" onKeyDown=${keys}>

@@ -7,6 +7,23 @@ import {
   searchKeymap, highlightSelectionMatches,
 } from "/vendor/codemirror.js";
 import { Markdown } from "/ui.js";
+import { PROJECT } from "/projects.js";
+
+// Unsubmitted input: kept in localStorage per project until submitted or emptied; dropped after 30 days.
+const DRAFT = `pm-draft:${PROJECT ?? location.pathname}:`;
+export function loadDraft(k) { try { const s = localStorage.getItem(DRAFT + k); return s ? JSON.parse(s).v : null; } catch { return null; } }
+export function saveDraft(k, v) {
+  try { v == null || v === "" ? localStorage.removeItem(DRAFT + k) : localStorage.setItem(DRAFT + k, JSON.stringify({ v, t: Date.now() })); } catch {}
+}
+try {
+  for (const k of Object.keys(localStorage)) if (k.startsWith("pm-draft:") && !(JSON.parse(localStorage.getItem(k)).t > Date.now() - 30 * 864e5)) localStorage.removeItem(k);
+} catch {}
+
+// A string state kept as a draft under `k`.
+export function useKept(k, init = "") {
+  const [v, setV] = useState(() => loadDraft(k) ?? init);
+  return [v, (x) => { setV(x); saveDraft(k, x === init ? null : x); }];
+}
 
 // A ref that focuses and selects the element as soon as it is mounted.
 export const autofocus = (el) => {
@@ -126,46 +143,52 @@ export function useEditTrigger(start, disabled) {
 }
 
 // Saves with the text editing started from (`base`): the server refuses the save if the row changed since.
-function useSave(text, save) {
-  const [editing, setEditing] = useState(false);
+// An unsaved edit is kept as a draft under `dk` and reopens in the editor.
+function useSave(text, save, dk) {
+  let init = useRef(dk && save ? loadDraft(dk) : null).current;
+  if (init && init.v === text) { saveDraft(dk, null); init = null; }
+  const [editing, setEditing] = useState(!!init);
   const [shown, setShown] = useState(null);       // saved text until the new state arrives
   const [error, setError] = useState(null);
-  const base = useRef(null), busy = useRef(false);
+  const base = useRef(init ? init.base : null), busy = useRef(false), from = useRef(init ? init.v : null);
   useEffect(() => setShown(null), [text]);
-  const start = () => { base.current = shown ?? text; setEditing(true); };
+  const start = () => { base.current = from.current = shown ?? text; setEditing(true); };
+  const keep = (v) => dk && saveDraft(dk, v === base.current ? null : { v, base: base.current });
   const finish = async (v) => {
     if (busy.current) return;
-    if (v === base.current) { setEditing(false); setError(null); return; }
+    if (v === base.current) { keep(v); setEditing(false); setError(null); return; }
     busy.current = true;
     try {
       await save(v, base.current);
       base.current = v;                 // a late blur finishes again: nothing to save
-      setShown(v); setEditing(false); setError(null);
-    } catch (e) { setError(e.message); }
+      keep(v); setShown(v); setEditing(false); setError(null);
+    } catch (e) { keep(v); setError(e.message); }
     finally { busy.current = false; }
   };
-  return { editing, start, shown: shown ?? text, error, finish };
+  return { editing, start, shown: shown ?? text, from: from.current, restored: !!init && from.current === init.v, error, finish, keep };
 }
 
 const lockTitle = "the running task can't be changed until its run ends";
 
-export function EditableBody({ text, save, disabled = false, empty = "No body.", ph = "Markdown" }) {
-  const s = useSave(text, save);
+export const EditableBody = (p) => html`<${Body} key=${p.draft} ...${p} />`;
+function Body({ text, save, draft, disabled = false, empty = "No body.", ph = "Markdown" }) {
+  const s = useSave(text, save, draft);
   const t = useEditTrigger(s.start, disabled || !save);
   if (s.editing) return html`<div class="editing">
-    <${CodeEditor} value=${s.shown} onDone=${s.finish} ph=${ph} />
-    <div class="edit-hint">${s.error ? html`<span class="err">${s.error}</span>` : "Markdown supported · paste or drop images · Esc or click outside: save · Ctrl-Z: undo"}</div></div>`;
+    <${CodeEditor} value=${s.from} onDone=${s.finish} onChange=${s.keep} autofocus=${!s.restored} ph=${ph} />
+    <div class="edit-hint">${s.error ? html`<span class="err">${s.error}</span>` : s.restored ? "Unsaved edit · Esc or click outside: save" : "Markdown supported · paste or drop images · Esc or click outside: save · Ctrl-Z: undo"}</div></div>`;
   return html`<div class=${"card editable" + (disabled ? " locked" : "")} tabindex="0" ref=${t.ref} onKeyDown=${t.onKeyDown}
     onClick=${t.onClick} title=${disabled ? lockTitle : save ? "i: edit" : ""}><${Markdown} text=${s.shown} empty=${empty} /></div>`;
 }
 
-export function EditableLine({ text, save, disabled = false, tag = "h1" }) {
-  const s = useSave(text, save);
+export const EditableLine = (p) => html`<${Line} key=${p.draft} ...${p} />`;
+function Line({ text, save, draft, disabled = false, tag = "h1" }) {
+  const s = useSave(text, save, draft);
   const t = useEditTrigger(s.start, disabled || !save);
   if (s.editing) {
     const key = (e) => { if (e.key === "Escape" || e.key === "Enter") { e.preventDefault(); s.finish(e.target.value.trim()); } };
-    return html`<div class="editing"><input class=${"line-edit " + tag} ref=${autofocus} value=${s.shown} onKeyDown=${key}
-      onBlur=${(e) => s.finish(e.target.value.trim())} />
+    return html`<div class="editing"><input class=${"line-edit " + tag} ref=${s.restored ? null : autofocus} value=${s.from} onKeyDown=${key}
+      onInput=${(e) => s.keep(e.target.value.trim())} onBlur=${(e) => s.finish(e.target.value.trim())} />
       ${s.error ? html`<div class="edit-hint"><span class="err">${s.error}</span></div>` : null}</div>`;
   }
   const T = tag;

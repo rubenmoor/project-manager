@@ -1,6 +1,6 @@
 // Adding milestones, plans and tasks; the welcome screen of a project without milestones.
 import { html, useState, useRef } from "/vendor/preact-htm.js";
-import { CodeEditor, post, autofocus } from "/editor.js";
+import { CodeEditor, post, autofocus, loadDraft, saveDraft } from "/editor.js";
 import { NamedLink } from "/ui.js";
 
 const WHAT = {
@@ -11,17 +11,27 @@ const WHAT = {
     hint: "A task of yours outside every plan and milestone: queued as if at milestone queue index 0, by priority." },
 };
 
+const addKey = (kind, parent) => `add:${kind}:${parent ?? ""}`;
+const drafted = (kind, parent) => () => loadDraft(addKey(kind, parent)) != null;
+
 export function AddForm({ kind, parent, onClose, worktrees = {} }) {
   const w = WHAT[kind];
-  const [subject, setSubject] = useState("");
-  const [prio, setPrio] = useState("");
-  const [queue, setQueue] = useState("");
-  const [taskKind, setTaskKind] = useState("work");
+  const dk = addKey(kind, parent);
+  const d0 = useRef(loadDraft(dk) || {}).current;
+  const [subject, setSubject] = useState(d0.subject || "");
+  const [prio, setPrio] = useState(d0.prio || "");
+  const [queue, setQueue] = useState(d0.queue || "");
+  const [taskKind, setTaskKind] = useState(d0.taskKind || "work");
   const names = Object.keys(worktrees);
-  const [tree, setTree] = useState(names.length === 1 ? names[0] : "");
+  const [tree, setTree] = useState(names.includes(d0.tree) ? d0.tree : names.length === 1 ? names[0] : "");
   const [error, setError] = useState(null);
   const [busy, setBusy] = useState(false);
-  const body = useRef(w.body);
+  const body = useRef(d0.body ?? w.body);
+  const keep = (x) => {
+    const v = { subject, prio, queue, taskKind, tree, body: body.current, ...x };
+    saveDraft(dk, v.subject.trim() || v.body.trim() || v.prio.trim() || v.queue.trim() ? v : null);
+  };
+  const on = (set, f) => (e) => { set(e.target.value); keep({ [f]: e.target.value }); };
   const submit = async () => {
     if (busy) return;
     const op = { op: `${kind === "exec" ? "task" : kind}_add`, subject, body: body.current };
@@ -41,6 +51,7 @@ export function AddForm({ kind, parent, onClose, worktrees = {} }) {
     setBusy(true);
     try {
       const r = await post(op);
+      saveDraft(dk, null);
       onClose && onClose();
       location.hash = kind === "milestone" ? `#/added/${r.id}` : `#/${kind === "exec" ? "task" : kind}/${r.id}`;
     } catch (e) { setError(e.message); setBusy(false); }
@@ -52,16 +63,16 @@ export function AddForm({ kind, parent, onClose, worktrees = {} }) {
   return html`<div class="card addform" onKeyDown=${keys}>
     <div class="section-head"><b>${w.title}</b>${onClose ? html`<button class="iconbtn" onClick=${onClose}>cancel</button>` : null}</div>
     ${w.hint ? html`<div class="sub" style="margin:4px 0 10px">${w.hint}</div>` : null}
-    <input class="line-edit h1" placeholder=${w.ph} value=${subject} onInput=${(e) => setSubject(e.target.value)} ref=${autofocus} />
-    <div class="cm-frame"><${CodeEditor} value=${w.body} autofocus=${false} onChange=${(v) => (body.current = v)} ph=${w.bodyPh || "Body (Markdown)"} /></div>
+    <input class="line-edit h1" placeholder=${w.ph} value=${subject} onInput=${on(setSubject, "subject")} ref=${autofocus} />
+    <div class="cm-frame"><${CodeEditor} value=${body.current} autofocus=${false} onChange=${(v) => { body.current = v; keep({}); }} ph=${w.bodyPh || "Body (Markdown)"} /></div>
     <div class="row" style="margin-top:10px">
       ${kind === "milestone" ? html`<label class="sub" title="tasks of milestones with a lower queue index are worked first">queue index
-        <input class="small" value=${queue} placeholder="0" onInput=${(e) => setQueue(e.target.value)} /></label>` : null}
+        <input class="small" value=${queue} placeholder="0" onInput=${on(setQueue, "queue")} /></label>` : null}
       ${kind !== "milestone" ? html`<label class="sub">priority <input class="small" value=${prio} placeholder=${kind === "task" ? "plan's" : kind === "exec" ? "0" : "none"}
-        onInput=${(e) => setPrio(e.target.value)} /></label>` : null}
-      ${kind === "task" ? html`<label class="sub">kind <select class="small" value=${taskKind} onChange=${(e) => setTaskKind(e.target.value)}>
+        onInput=${on(setPrio, "prio")} /></label>` : null}
+      ${kind === "task" ? html`<label class="sub">kind <select class="small" value=${taskKind} onChange=${on(setTaskKind, "taskKind")}>
         <option value="work">work</option><option value="plan">plan (writes a plan)</option></select></label>` : null}
-      ${kind === "task" ? html`<label class="sub" title="tasks of different work trees run in parallel">work tree <select class="small" value=${tree} onChange=${(e) => setTree(e.target.value)}>
+      ${kind === "task" ? html`<label class="sub" title="tasks of different work trees run in parallel">work tree <select class="small" value=${tree} onChange=${on(setTree, "tree")}>
         ${names.length === 1 ? null : html`<option value="">pick one</option>`}
         ${names.map((n) => html`<option value=${n}>${n}: ${worktrees[n]}</option>`)}</select></label>` : null}
       <span class="grow"></span>
@@ -95,13 +106,13 @@ export function MilestoneAdded({ d, id }) {
 }
 
 export function AddButton({ kind, parent, label, worktrees }) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(drafted(kind, parent));
   if (open) return html`<${AddForm} kind=${kind} parent=${parent} worktrees=${worktrees} onClose=${() => setOpen(false)} />`;
   return html`<button class="btn" onClick=${() => setOpen(true)}>+ ${label || `Add ${kind}`}</button>`;
 }
 
 export function Welcome() {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(drafted("milestone"));
   return html`<div class="welcome">
     ${open ? html`<div class="welcome-form"><${AddForm} kind="milestone" onClose=${() => setOpen(false)} /></div>`
       : html`<div class="welcome-inner">

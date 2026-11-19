@@ -4,7 +4,7 @@
 import { html, useState } from "/vendor/preact-htm.js";
 import { Markdown, Time, TaskLink, Bars } from "/ui.js";
 import { stamp, usd, tokens, duration } from "/data.js";
-import { post } from "/editor.js";
+import { post, useKept } from "/editor.js";
 
 // While an exec task writes one (pm's open_summary, open_report), its button is disabled and links to it.
 function Request({ d, op, open, label, queued, writing }) {
@@ -27,7 +27,7 @@ function Request({ d, op, open, label, queued, writing }) {
 
 // The human's question or request; pm report ask queues an exec task that answers it in one paragraph.
 function Ask({ d }) {
-  const [q, setQ] = useState("");
+  const [q, setQ] = useKept("report:ask");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const go = () => {
