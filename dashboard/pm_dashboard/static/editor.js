@@ -215,7 +215,7 @@ function Line({ text, save, draft, disabled = false, tag = "h1" }) {
 }
 
 // A priority: click or Enter to change; empty clears it. `from` says where an unset one comes from.
-export function PrioEdit({ value, effective, from, save, disabled, what = "priority" }) {
+export function PrioEdit({ value, effective, from, save, disabled, what = "priority", boxed }) {
   const [editing, setEditing] = useState(false);
   const [error, setError] = useState(null);
   const finish = async (raw) => {
@@ -229,5 +229,5 @@ export function PrioEdit({ value, effective, from, save, disabled, what = "prior
     ${error ? html`<span class="err">${error}</span>` : null}</span>`;
   const label = value != null ? html`${value}` : from === "plan" ? html`<span class="inherited">${effective}</span>` : html`${effective}<span class="from"> ${from}</span>`;
   if (!save || disabled) return html`<span class="prio" title=${disabled ? lockTitle : ""}>${label}</span>`;
-  return html`<button class="prio prio-btn" title=${`change the ${what} (empty: ${what === "priority" ? "none" : "0"})`} onClick=${(e) => { e.preventDefault(); e.stopPropagation(); setEditing(true); }}>${label}</button>`;
+  return html`<button class=${"prio prio-btn" + (boxed ? " boxed" : "")} title=${`change the ${what} (empty: ${what === "priority" ? "none" : "0"})`} onClick=${(e) => { e.preventDefault(); e.stopPropagation(); setEditing(true); }}>${label}</button>`;
 }

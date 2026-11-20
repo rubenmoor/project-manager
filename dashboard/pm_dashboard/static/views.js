@@ -162,7 +162,8 @@ function MilestoneCard({ d, m }) {
     <div class="row" style="justify-content:space-between"><a href=${`#/milestone/${m.id}`}><b><${Named} kind="milestone" r=${m} /></b></a>
       <${Pill} status=${m.status} /></div>
     <${Progress} ...${counts(tasks)} />
-    <div class="sub" style="margin-top:6px"><span title="queue index: tasks of lower ones are worked first">queue ${m.queue_index}</span> · ${plans.length} plans · ${runs.length} runs · ${usd(d.cost(runs))} · created <${Time} ts=${m.created_at} /></div>
+    <div class="sub" style="margin-top:6px"><span title="queue index: tasks of lower ones are worked first">queue <${PrioEdit} boxed what="queue index" value=${m.queue_index} effective=${0} from=""
+      save=${m.status === "implemented" ? null : saveMilestone(m.id, "queue_index")} /></span> · ${plans.length} plans · ${runs.length} runs · ${usd(d.cost(runs))} · created <${Time} ts=${m.created_at} /></div>
     ${m.status !== "implemented" ? (() => {
       const n = d.milestoneDecisions(m).length;
       return html`<div class="sub" style="margin-top:4px">${n ? html`<a class="tag signoff" href=${`#/decisions?milestone=${m.id}`}
@@ -258,7 +259,7 @@ export function Milestone({ d, id }) {
   return html`<div class="crumbs"><a href="#/milestones">Milestones</a></div>
     <${Titled} kind="milestone" id=${m.id}><${EditableLine} text=${m.subject} draft=${`milestone:${m.id}:subject`} save=${mDone ? null : saveMilestone(m.id, "subject")} /></${Titled}>
     <div class="row sub"><${Pill} status=${m.status} /><span title="tasks of lower queue indexes are worked first">queue index
-      <${PrioEdit} what="queue index" value=${m.queue_index} effective=${0} from="" save=${m.status === "implemented" ? null : saveMilestone(m.id, "queue_index")} /></span>
+      <${PrioEdit} boxed what="queue index" value=${m.queue_index} effective=${0} from="" save=${m.status === "implemented" ? null : saveMilestone(m.id, "queue_index")} /></span>
       <span>created ${stamp(m.created_at)}</span>
       ${m.implemented_at ? html`<span>· implemented ${stamp(m.implemented_at)}</span>` : null}
       ${m.status !== "implemented" ? html`<${HoldButton} m=${m} />` : null}</div>
