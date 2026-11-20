@@ -336,6 +336,13 @@ const MAX_LINES = 5000;
 // A box 20 lines high that opens at its end and follows it while scrolled to the end. reveal: scroll it into view once.
 const clock = (ts) => { const d = new Date(ts); return [d.getHours(), d.getMinutes(), d.getSeconds()].map((n) => String(n).padStart(2, "0")).join(":"); };
 
+// One run's log under a line naming it: every run of a task, work and verify runs alike.
+function TaskRunLog({ d, t, r, live, reveal }) {
+  return html`<div class="runlog"><div class="row sub"><b>Run ${r.id}</b>${r.kind === "verify" ? html`<span class="tag phase">verify</span>` : null}
+      ${r.try ? html`<span>try ${r.try}</span>` : null}<${Pill} status=${r.result} /><span class="muted">${stamp(r.started_at)}</span></div>
+    <${Log} d=${d} t=${t} live=${live} run=${r.id} reveal=${reveal} /></div>`;
+}
+
 export function Log({ d, t, live, run = null, reveal = false }) {
   const [lines, setLines] = useState(null);
   const [cut, setCut] = useState(0);
@@ -374,7 +381,7 @@ export function Log({ d, t, live, run = null, reveal = false }) {
     load();
   }, [t.id, size, run]);
   if (lines === null) return html`<div class="empty">Loading the log…</div>`;
-  if (!lines.length) return html`<div class="empty">No log for this task.</div>`;
+  if (!lines.length) return html`<div class="empty">${run != null ? "No log for this run." : "No log for this task."}</div>`;
   return html`<div class="log" ref=${box}>${cut ? html`<div class="muted">… ${cut} earlier lines</div>` : null}
     ${lines.map(([ts, l], i) => html`<div key=${cut + i} class=${"line " + (l.startsWith("  → ") ? "tool" : /^\[\w+: \d+ turns/.test(l) ? "res" : "") + (cut + i >= first.current ? " fresh" : "")}>
       <span class="ts">${ts ? clock(ts) : ""}</span><span>${l || " "}</span></div>`)}</div>`;
@@ -479,7 +486,8 @@ export function Task({ d, id, query, embedded = false }) {
     ${t.status !== "open" ? html`<${Commit} d=${d} t=${t} />` : null}
     <h2>Runs (${runs.length}${runs.length ? `, ${usd(d.cost(runs))}` : ""})</h2>
     <${RunsTable} d=${d} runs=${runs} />
-    ${runs.length ? html`<h2>Worker log${running ? " (live)" : fail ? ` (failed run ${fail.id})` : ""}</h2><${Log} d=${d} t=${t} live=${running} reveal=${query === "log"} />` : null}
+    ${runs.length ? html`<h2>Worker log${running ? " (live)" : ""}</h2>${runs.map((r, i) => html`<${TaskRunLog} key=${r.id} d=${d} t=${t} r=${r}
+      live=${running && r.result === "running"} reveal=${query === "log" && i === runs.length - 1} />`)}` : null}
     <h2>Body</h2>
     <${EditableBody} text=${t.body} draft=${`task:${t.id}:body`} save=${t.status === "open" ? saveTask(t.id, "body") : null} disabled=${running} />`;
 }

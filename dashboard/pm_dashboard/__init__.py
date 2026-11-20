@@ -13,7 +13,7 @@ at /p/<name>/, and a JSON API:
                          changes with its tasks.sql, git or running log) and running logs' sizes
   per project, under /p/<name>/:
     api/state            every table, the queue, git HEAD and changed files; or {"error": …}
-    api/log/<task>       the task's latest worker log (?run=R: run R's) as readable lines, from byte ?from=N on
+    api/log/<task>       the task's latest worker log (?run=R: run R's; the task page asks per run) as readable lines, from byte ?from=N on
     api/task/<id>/commit the commit pm made for the task, with its patch and the rows it changed
     api/runlog           the last 200 lines of `pm run`'s output (<git dir>/pm-run.log)
     POST api/run         {"op": "start" | "stop" | "kill"}: start `pm run`, stop it after its task(s), or stop it now
@@ -393,6 +393,9 @@ def read_log(project, tid, start=0, rid=None):
     path = project.logs / f"task-{tid}.log"
     if rid is not None and (project.logs / f"task-{tid}-run-{rid}.log").exists():
         path = project.logs / f"task-{tid}-run-{rid}.log"
+    elif rid is not None and (path.is_symlink() or rid != max((r["id"] for r in project.rows(
+            "SELECT id FROM run WHERE task_id = ?", tid)), default=None)):
+        return [], start           # run rid has no log of its own; task-<id>.log is another run's
     if not path.exists():
         return [], 0
     with open(path, "rb") as f:
