@@ -28,6 +28,6 @@ pm summary request ; pm report request # queue an executive summary / resource u
 pm report ask "<question>"             # queue a custom one-paragraph report
 ```
 
-Settings in `project-manager.toml`: `[models]` (per kind a worker, or a table with `tries`, a worker per try, and `verify`, the verifier; `default`, `verify`, `ranking`; old `escalate`), `verify_prompt` (how to prove things in this project, for the verify run), `max_tries` (default 3, then a decision), `push_minutes` (`pm run` pushes the trunk's branch at most this often, default 60, 0: off).
+Settings in `project-manager.toml`: `[models]` (per kind a worker, or a table with `tries`, a worker per try, and `verify`, the verifier; `default`, `verify`, `ranking`; old `escalate`), `verify_prompt` (how to prove things in this project, for the verify run), `max_tries` (default 3, then a decision), `push_minutes` (`pm run` pushes the trunk's branch at most this often, default 60, 0: off), `stop_at_weekly_usage` (`pm run` stops once a task ends at this weekly usage %, default 95, 0: off; `pm run --full-quota` and the dashboard's Run ignore it).
 
 Record only answers the human gave.

@@ -438,7 +438,7 @@ def run_control(project, op):
             raise ValueError(f"`pm run` (pid {pid}) is already working this project")
         # The pm this dashboard imports, not the one on PATH; sys.path rather than PYTHONPATH, which the workers would inherit.
         code = (f"import sys; sys.path.insert(0, {str(Path(pm.__file__).resolve().parent.parent)!r}); import pm; "
-                f"sys.exit(pm.main(['--root', {str(project.root)!r}, 'run', '--quiet']))")
+                f"sys.exit(pm.main(['--root', {str(project.root)!r}, 'run', '--quiet', '--full-quota']))")
         out = project.git_dir / "pm-run.out"
         with open(out, "wb") as f:
             proc = subprocess.Popen([sys.executable, "-c", code], cwd=project.root, stdin=subprocess.DEVNULL, stdout=f,

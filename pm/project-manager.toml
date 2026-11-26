@@ -21,6 +21,10 @@ limit_margin_minutes = 5
 # while no task runs in the trunk; a failed push is retried next time. 0: never. Work tree branches aren't pushed.
 push_minutes = 60
 
+# `pm run` stops once a task ends with the weekly usage at this percent or more (from the task's log); 0: never.
+# The dashboard's Run (`pm run --full-quota`) ignores it and uses up the quota.
+stop_at_weekly_usage = 95
+
 # Work trees ([worktrees] at the end): every task but the human's exec tasks and pm's planning and cleanup tasks
 # (they run in the trunk, the project's own checkout) runs in one of them: <worktree_dir>/<name>, on the branch
 # pm/wt/<name>, kept between tasks. Before a task pm merges the trunk into it; after the task, pm commits there and

@@ -89,7 +89,7 @@ function RunControls({ d, runlog }) {
   const status = pid == null ? "pm not running" : stopping ? `stopping after the running task(s) (pid ${pid})` : `pm running (pid ${pid})`;
   return html`<div class="card run-controls">
     <div class="row">
-      <button class="btn primary" disabled=${pid != null || busy} onClick=${() => go("start")} title="start pm run">▶ Run</button>
+      <button class="btn primary" disabled=${pid != null || busy} onClick=${() => go("start")} title="start pm run; it uses up the weekly quota (ignores stop_at_weekly_usage)">▶ Run</button>
       <button class="btn" disabled=${pid == null || stopping || busy} onClick=${() => go("stop")} title="stop after the running task(s), like pm stop">■ Stop</button>
       <button class="btn danger" disabled=${pid == null || busy} onClick=${() => go("kill")} title="stop now, like a second Ctrl-C">Force kill</button>
       <span class="sub">${busy ? "…" : status}</span>

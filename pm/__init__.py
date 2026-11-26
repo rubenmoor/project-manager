@@ -32,7 +32,7 @@ import argparse, collections, contextlib, datetime, fcntl, functools, hashlib, j
 from pathlib import Path
 
 
-VERSION = 116  # bump by one with every commit (AGENTS.md)
+VERSION = 117  # bump by one with every commit (AGENTS.md)
 CONFIG_FILE = "project-manager.toml"
 CONFIG_TEMPLATE = (Path(__file__).parent / CONFIG_FILE).read_text(encoding="utf-8")
 INSTRUCTIONS = Path(__file__).parent / "instructions"
@@ -385,6 +385,33 @@ RESET_RE = re.compile(r"resets\s+(?:(?P<mon>[a-z]{3})[a-z]*\.?\s+(?P<day>\d{1,2}
                       r"(?P<h>\d{1,2})(?::(?P<m>\d{2}))?\s*(?P<ap>[ap]\.?m\.?)?(?:\s*\((?P<tz>[^)]+)\))?", re.I)
 
 
+def weekly_usage(log):
+    """The weekly limit's utilization (0..1) in the last rate_limit_event of a worker log, or None: none, or its week
+    has reset since."""
+    try:
+        with open(log, "rb") as fh:
+            fh.seek(max(0, os.fstat(fh.fileno()).st_size - (1 << 20)))
+            tail = fh.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(tail):
+        if '"rate_limit_event"' not in line:
+            continue
+        try:
+            info = json.loads(unstamp(line)[1])["rate_limit_info"]
+            w = (info.get("unifiedWindows") or {}).get("seven_day")
+            if not w and info.get("rateLimitType") == "seven_day":
+                w = info
+            if not w or w.get("utilization") is None:
+                continue
+            if w.get("resetsAt") and float(w["resetsAt"]) < time.time():
+                return None
+            return float(w["utilization"])
+        except (ValueError, KeyError, TypeError, AttributeError):
+            continue
+    return None
+
+
 def limit_reset(msg, now=None):
     """When Claude's usage limit in `msg` resets (an aware datetime), or None if it doesn't say."""
     m = RESET_RE.search(str(msg))
@@ -680,6 +707,9 @@ def load_config(root):
         errors.append("worker must be a non-empty list of strings")
     errors += [f"{k} must be an integer >= 0" for k in ("limit_margin_minutes", "push_minutes")
                if not isinstance(config[k], int) or isinstance(config[k], bool) or config[k] < 0]
+    k = "stop_at_weekly_usage"
+    if not isinstance(config[k], int) or isinstance(config[k], bool) or not 0 <= config[k] <= 100:
+        errors.append(f"{k} must be an integer from 0 to 100")
     errors += [f"{k} must be a string" for k in ("log_dir", "editor") if not isinstance(config[k], str)]
     if not isinstance(config["max_parallel"], int) or isinstance(config["max_parallel"], bool) or config["max_parallel"] < 1:
         errors.append("max_parallel must be an integer >= 1")
@@ -902,6 +932,7 @@ class Project:
         self.stopping = False       # `pm run` stops after the current task
         self.idle = False           # `pm run` waits for tasks
         self.crash = None           # run_crash() as `pm run` started
+        self.full_quota = False     # `pm run --full-quota`: no stop at stop_at_weekly_usage
         self.stop_reason = None     # why `pm run` stops (stop_for), said last and kept in the run lock
         self.broken_trees = {}      # work tree -> why preparing it failed; its tasks wait for the next `pm run`
         self.cache = None           # (file_key(), the loaded database)
@@ -3913,10 +3944,11 @@ class Project:
         """The running `pm run` was told to stop (`pm stop`, Ctrl-C, SIGTERM)."""
         return self.run_pid() is not None and (self.git_dir / "pm-run.stopping").exists()
 
-    def run(self, once=False, dry_run=False, quiet=False):
+    def run(self, once=False, dry_run=False, quiet=False, full_quota=False):
         """Work the queue, a task per work tree at a time (the trunk is one). The first Ctrl-C (SIGINT) or a
         SIGUSR1 (`pm stop`): start nothing new, stop after the running tasks; a second Ctrl-C, SIGTERM or SIGHUP: stop
         now, the workers get SIGTERM. SIGUSR2 (`pm kill`): the tasks in <git dir>/pm-kill are killed."""
+        self.full_quota = full_quota
         def say_now(msg):
             # Not through self.out: a signal handler may interrupt its write.
             for fd in ([] if quiet else [2]) + ([self.log_fd] if self.log_fd is not None else []):
@@ -4022,6 +4054,8 @@ class Project:
                 running.pop(tree)[0].join()
                 last = result
                 code = self.finished_task(tree, tid, result, message) or code
+                if not code and not self.full_quota:
+                    code = self.quota_stop(tid)
             if self.killed:
                 if running:
                     self.wait_event()
@@ -4231,6 +4265,15 @@ class Project:
                     break
                 pid = parent.get(pid)
         return holds
+
+    def quota_stop(self, tid):
+        """After task tid: stop if its log says the weekly usage reached stop_at_weekly_usage. Returns 1 then, else 0."""
+        if not (limit := self.config["stop_at_weekly_usage"]) or (u := weekly_usage(self.logs / f"task-{tid}.log")) is None:
+            return 0
+        if u * 100 < limit:
+            return 0
+        return self.stop_for(f"weekly usage is at {u * 100:.0f}% (stop_at_weekly_usage = {limit}). "
+                             "Run in the dashboard or `pm run --full-quota` uses up the rest.")
 
     def stop_for(self, reason):
         """`pm run` stops: the first reason is kept (stop_reason). Returns 1, the exit code."""
@@ -4553,6 +4596,8 @@ def main(argv=None):
     r.add_argument("--once", action="store_true", help="stop after one task")
     r.add_argument("--dry-run", action="store_true", help="print the next worker command; change nothing")
     r.add_argument("--quiet", action="store_true", help="no output but errors; it still goes to .git/pm-run.log")
+    r.add_argument("--full-quota", action="store_true", help="don't stop at stop_at_weekly_usage: use up the weekly "
+                   "quota (the dashboard's Run does)")
     sub.add_parser("stop", help="have the running `pm run` stop after its running task(s)")
     sub.add_parser("kill", help="have the running `pm run` kill a running task: dropped, no investigation; its "
                    "leftovers stashed for `pm task redo`").add_argument("task", type=int)
@@ -4786,7 +4831,7 @@ def main(argv=None):
         elif args.cmd == "decide":
             msg = pm.decide() and "decisions answered"
         elif args.cmd == "run":
-            return pm.run(once=args.once, dry_run=args.dry_run, quiet=args.quiet)
+            return pm.run(once=args.once, dry_run=args.dry_run, quiet=args.quiet, full_quota=args.full_quota)
         elif args.cmd == "stop":
             pm.stop()
         elif args.cmd in ("image", "images"):
